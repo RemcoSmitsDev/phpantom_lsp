@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Mixin resolution extracted to `MixinProvider`.** The `@mixin` merge logic (`merge_mixins_into` / `merge_mixins_into_recursive`) has been moved from `inheritance.rs` into a new `MixinProvider` in `virtual_members/mixin.rs`, implementing the `VirtualMemberProvider` trait. `resolve_class_with_inheritance` now performs base resolution only (own + traits + parent chain), and mixin members are applied lazily through the provider pipeline in `resolve_class_fully`. No user-facing behavior changes. This is groundwork for the upcoming PHPDoc and Laravel providers.
+- **`@method`/`@property` tags extracted to `PHPDocProvider`.** `@method`, `@property`, `@property-read`, and `@property-write` tags are no longer parsed eagerly during AST extraction. Instead, the raw class-level docblock is preserved on `ClassInfo.class_docblock` and parsed lazily by a new `PHPDocProvider` in `virtual_members/phpdoc.rs`. This places virtual PHPDoc members at the correct precedence (below real declared members, traits, and parents; above `@mixin`) and allows future framework providers to override them with richer type information. No user-facing behavior changes.
 
 ## [0.3.0] - 2026-02-21
 

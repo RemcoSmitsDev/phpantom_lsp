@@ -489,6 +489,18 @@ pub struct ClassInfo {
     /// For example, `TraitB::method as traitBMethod` adds a new method
     /// `traitBMethod` that is a copy of TraitB's `method`.
     pub trait_aliases: Vec<TraitAlias>,
+    /// Raw class-level docblock text, preserved for deferred parsing.
+    ///
+    /// `@method` and `@property` / `@property-read` / `@property-write`
+    /// tags are **not** parsed eagerly into `methods` / `properties`.
+    /// Instead, the raw docblock string is stored here and parsed lazily
+    /// by the `PHPDocProvider` virtual member provider when completion or
+    /// go-to-definition actually needs virtual members.
+    ///
+    /// Other docblock tags (`@template`, `@extends`, `@deprecated`, etc.)
+    /// are still parsed eagerly because they affect class metadata that is
+    /// needed during indexing and inheritance resolution.
+    pub class_docblock: Option<String>,
 }
 
 // ─── ClassInfo helpers ──────────────────────────────────────────────────────

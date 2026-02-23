@@ -1347,8 +1347,10 @@ async fn test_docblock_return_generic_type_stripped() {
 
 // ─── @property Docblock Tags ────────────────────────────────────────────────
 
-/// Test: `parse_php` extracts `@property` tags from a class-level docblock
-/// as public, non-static `PropertyInfo` entries.
+/// Test: `@property` tags are NOT parsed eagerly into `ClassInfo.properties`.
+/// Instead, the raw docblock is preserved on `ClassInfo.class_docblock` and
+/// properties are provided lazily by the `PHPDocProvider` via
+/// `resolve_class_fully`.
 #[tokio::test]
 async fn test_parse_php_class_property_tags() {
     let backend = create_test_backend();
@@ -1364,9 +1366,26 @@ async fn test_parse_php_class_property_tags() {
 
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].properties.len(), 2);
 
-    let id_prop = classes[0]
+    // After parsing, @property tags are NOT in ClassInfo.properties.
+    assert_eq!(
+        classes[0].properties.len(),
+        0,
+        "@property tags should not be eagerly parsed into properties"
+    );
+
+    // The raw docblock is preserved for deferred parsing.
+    assert!(
+        classes[0].class_docblock.is_some(),
+        "Raw class docblock should be preserved"
+    );
+
+    // After resolve_class_fully, virtual properties appear.
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+    assert_eq!(merged.properties.len(), 2);
+
+    let id_prop = merged
         .properties
         .iter()
         .find(|p| p.name == "latest_subscription_agreement_id")
@@ -1378,7 +1397,7 @@ async fn test_parse_php_class_property_tags() {
     );
     assert!(!id_prop.is_static, "@property should not be static");
 
-    let state_prop = classes[0]
+    let state_prop = merged
         .properties
         .iter()
         .find(|p| p.name == "mobile_verification_state")
@@ -1452,7 +1471,8 @@ async fn test_completion_via_property_tag() {
 }
 
 /// Test: A real declared property takes precedence over a `@property` tag
-/// with the same name.
+/// with the same name.  After `resolve_class_fully`, the PHPDocProvider's
+/// virtual property is suppressed by the real declaration.
 #[tokio::test]
 async fn test_real_property_overrides_property_tag() {
     let backend = create_test_backend();
@@ -1469,8 +1489,16 @@ async fn test_real_property_overrides_property_tag() {
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
 
-    // Should have exactly one property, not two.
-    let name_props: Vec<_> = classes[0]
+    // After parsing, only the real declared property is present.
+    assert_eq!(classes[0].properties.len(), 1);
+    assert_eq!(classes[0].properties[0].type_hint.as_deref(), Some("int"));
+
+    // After resolve_class_fully, still only one — the virtual @property
+    // is suppressed because a real property with the same name exists.
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+
+    let name_props: Vec<_> = merged
         .properties
         .iter()
         .filter(|p| p.name == "name")
@@ -1487,7 +1515,7 @@ async fn test_real_property_overrides_property_tag() {
     );
 }
 
-/// Test: `@property-read` tags are also extracted.
+/// Test: `@property-read` tags are provided lazily via `resolve_class_fully`.
 #[tokio::test]
 async fn test_parse_php_property_read_tag() {
     let backend = create_test_backend();
@@ -1503,7 +1531,14 @@ async fn test_parse_php_property_read_tag() {
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
 
-    let prop = classes[0]
+    // Not eagerly parsed.
+    assert_eq!(classes[0].properties.len(), 0);
+
+    // Available after resolve_class_fully.
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+
+    let prop = merged
         .properties
         .iter()
         .find(|p| p.name == "session")
@@ -1706,8 +1741,10 @@ async fn test_goto_definition_property_read_tag() {
 
 // ─── @method Docblock Tags ──────────────────────────────────────────────────
 
-/// Test: `parse_php` extracts `@method` tags from a class-level docblock
-/// as public `MethodInfo` entries.
+/// Test: `@method` tags are NOT parsed eagerly into `ClassInfo.methods`.
+/// Instead, the raw docblock is preserved on `ClassInfo.class_docblock` and
+/// methods are provided lazily by the `PHPDocProvider` via
+/// `resolve_class_fully`.
 #[tokio::test]
 async fn test_parse_php_class_method_tags() {
     let backend = create_test_backend();
@@ -1724,9 +1761,26 @@ async fn test_parse_php_class_method_tags() {
 
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].methods.len(), 3);
 
-    let mock_method = classes[0]
+    // After parsing, @method tags are NOT in ClassInfo.methods.
+    assert_eq!(
+        classes[0].methods.len(),
+        0,
+        "@method tags should not be eagerly parsed into methods"
+    );
+
+    // The raw docblock is preserved for deferred parsing.
+    assert!(
+        classes[0].class_docblock.is_some(),
+        "Raw class docblock should be preserved"
+    );
+
+    // After resolve_class_fully, virtual methods appear.
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+    assert_eq!(merged.methods.len(), 3);
+
+    let mock_method = merged
         .methods
         .iter()
         .find(|m| m.name == "mock")
@@ -1739,7 +1793,7 @@ async fn test_parse_php_class_method_tags() {
     assert!(!mock_method.is_static, "mock should not be static");
     assert_eq!(mock_method.parameters.len(), 2);
 
-    let assert_method = classes[0]
+    let assert_method = merged
         .methods
         .iter()
         .find(|m| m.name == "assertDatabaseHas")
@@ -1751,7 +1805,7 @@ async fn test_parse_php_class_method_tags() {
     assert_eq!(assert_method.parameters.len(), 3);
     assert!(!assert_method.parameters[2].is_required);
 
-    let static_method = classes[0]
+    let static_method = merged
         .methods
         .iter()
         .find(|m| m.name == "getAmountUntilBonusCashIsTriggered")
@@ -1937,7 +1991,8 @@ async fn test_completion_static_method_tag_via_double_colon() {
 }
 
 /// Test: A real declared method takes precedence over a `@method` tag
-/// with the same name.
+/// with the same name.  After `resolve_class_fully`, the PHPDocProvider's
+/// virtual method is suppressed by the real declaration.
 #[tokio::test]
 async fn test_real_method_overrides_method_tag() {
     let backend = create_test_backend();
@@ -1954,8 +2009,16 @@ async fn test_real_method_overrides_method_tag() {
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
 
-    // Should have exactly one method named getName, not two.
-    let name_methods: Vec<_> = classes[0]
+    // After parsing, only the real declared method is present.
+    assert_eq!(classes[0].methods.len(), 1);
+    assert_eq!(classes[0].methods[0].return_type.as_deref(), Some("int"));
+
+    // After resolve_class_fully, still only one — the virtual @method
+    // is suppressed because a real method with the same name exists.
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+
+    let name_methods: Vec<_> = merged
         .methods
         .iter()
         .filter(|m| m.name == "getName")
@@ -2101,7 +2164,7 @@ async fn test_goto_definition_chained_via_method_tag() {
     }
 }
 
-/// Test: `@method` tags on traits are extracted correctly.
+/// Test: `@method` tags on traits are provided lazily via `resolve_class_fully`.
 #[tokio::test]
 async fn test_parse_php_trait_method_tags() {
     let backend = create_test_backend();
@@ -2116,12 +2179,20 @@ async fn test_parse_php_trait_method_tags() {
 
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].methods.len(), 1);
-    assert_eq!(classes[0].methods[0].name, "greet");
-    assert_eq!(classes[0].methods[0].return_type.as_deref(), Some("string"));
+    assert_eq!(
+        classes[0].methods.len(),
+        0,
+        "@method not eagerly parsed on traits"
+    );
+
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+    assert_eq!(merged.methods.len(), 1);
+    assert_eq!(merged.methods[0].name, "greet");
+    assert_eq!(merged.methods[0].return_type.as_deref(), Some("string"));
 }
 
-/// Test: `@method` tags on interfaces are extracted correctly.
+/// Test: `@method` tags on interfaces are provided lazily via `resolve_class_fully`.
 #[tokio::test]
 async fn test_parse_php_interface_method_tags() {
     let backend = create_test_backend();
@@ -2136,10 +2207,18 @@ async fn test_parse_php_interface_method_tags() {
 
     let classes = backend.parse_php(php);
     assert_eq!(classes.len(), 1);
-    assert_eq!(classes[0].methods.len(), 1);
-    assert_eq!(classes[0].methods[0].name, "create");
-    assert!(classes[0].methods[0].is_static);
-    assert_eq!(classes[0].methods[0].return_type.as_deref(), Some("self"));
-    assert_eq!(classes[0].methods[0].parameters.len(), 1);
-    assert_eq!(classes[0].methods[0].parameters[0].name, "$attributes");
+    assert_eq!(
+        classes[0].methods.len(),
+        0,
+        "@method not eagerly parsed on interfaces"
+    );
+
+    let no_loader = |_: &str| -> Option<phpantom_lsp::ClassInfo> { None };
+    let merged = Backend::resolve_class_fully(&classes[0], &no_loader);
+    assert_eq!(merged.methods.len(), 1);
+    assert_eq!(merged.methods[0].name, "create");
+    assert!(merged.methods[0].is_static);
+    assert_eq!(merged.methods[0].return_type.as_deref(), Some("self"));
+    assert_eq!(merged.methods[0].parameters.len(), 1);
+    assert_eq!(merged.methods[0].parameters[0].name, "$attributes");
 }

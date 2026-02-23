@@ -22,7 +22,11 @@ src/
 ├── composer.rs             # composer.json / PSR-4 autoload parsing
 ├── stubs.rs                # Embedded phpstorm-stubs (build-time generated index)
 ├── resolution.rs           # Multi-phase class/function lookup and name resolution
-├── inheritance.rs          # Class inheritance merging (traits, mixins, parent chain)
+├── inheritance.rs          # Base class inheritance merging (traits, parent chain)
+├── virtual_members/
+│   ├── mod.rs              # VirtualMemberProvider trait, VirtualMembers struct, merge logic
+│   ├── phpdoc.rs           # PHPDocProvider (@method, @property, @property-read, @property-write)
+│   └── mixin.rs            # MixinProvider (@mixin class member forwarding)
 ├── subject_extraction.rs   # Shared helpers for extracting subjects before ->, ?->, ::
 ├── util.rs                 # Position conversion, class lookup, logging
 ├── parser/
@@ -209,7 +213,7 @@ If the stubs aren't installed (e.g. `composer install` hasn't been run), `build.
 
 When building completion items or resolving definitions, PHPantom merges members from the full inheritance chain. Resolution proceeds in two phases:
 
-1. **Base resolution** (`resolve_class_with_inheritance` in `inheritance.rs`): merges own members, trait members, and parent chain members with generic type substitution. Also merges `@mixin` classes at lowest precedence.
+1. **Base resolution** (`resolve_class_with_inheritance` in `inheritance.rs`): merges own members, trait members, and parent chain members with generic type substitution.
 
 2. **Virtual member providers** (`resolve_class_fully` in `virtual_members/mod.rs`): queries registered providers in priority order and merges their contributions. Virtual members never overwrite real declared members or contributions from higher-priority providers.
 
@@ -258,7 +262,10 @@ Provider priority order (highest first):
 2. **PHPDoc provider**: `@method`, `@property`, `@property-read`, `@property-write`
 3. **Mixin provider**: `@mixin` class members
 
-Currently no providers are registered. As they are implemented they will be added to `default_providers()` in `virtual_members/mod.rs`.
+Two providers are currently registered in `default_providers()`:
+
+- **`PHPDocProvider`** (`virtual_members/phpdoc.rs`): parses `@method`, `@property`, `@property-read`, and `@property-write` tags from the class-level docblock stored in `ClassInfo.class_docblock`. These tags are not parsed eagerly during AST extraction; instead, the raw docblock string is preserved and parsed lazily when `provide` is called.
+- **`MixinProvider`** (`virtual_members/mixin.rs`): loads classes listed in `@mixin` tags and returns their public members. Recurses into mixin-of-mixin chains up to `MAX_MIXIN_DEPTH`.
 
 ### Precedence Rules
 

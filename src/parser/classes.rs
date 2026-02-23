@@ -50,32 +50,11 @@ struct ClassDocblockInfo {
     use_generics: Vec<(String, Vec<String>)>,
     /// Type aliases from `@phpstan-type` / `@psalm-type`.
     type_aliases: HashMap<String, String>,
-    /// Virtual properties from `@property` tags.
-    extra_properties: Vec<PropertyInfo>,
-    /// Virtual methods from `@method` tags.
-    extra_methods: Vec<MethodInfo>,
     /// Mixin class names from `@mixin` tags.
     mixins: Vec<String>,
-}
-
-impl ClassDocblockInfo {
-    /// Merge virtual `@property` and `@method` tags into existing member
-    /// lists, skipping any that duplicate a real declaration.
-    ///
-    /// The extra vectors are drained so the remaining fields can still be
-    /// read after calling this method.
-    fn merge_into(&mut self, methods: &mut Vec<MethodInfo>, properties: &mut Vec<PropertyInfo>) {
-        for prop in std::mem::take(&mut self.extra_properties) {
-            if !properties.iter().any(|p| p.name == prop.name) {
-                properties.push(prop);
-            }
-        }
-        for method in std::mem::take(&mut self.extra_methods) {
-            if !methods.iter().any(|m| m.name == method.name) {
-                methods.push(method);
-            }
-        }
-    }
+    /// Raw class-level docblock text, preserved for deferred `@method` /
+    /// `@property` parsing by the `PHPDocProvider`.
+    raw_docblock: Option<String>,
 }
 
 /// Extract all docblock-derived metadata from a class-like AST node.
@@ -94,21 +73,6 @@ fn extract_class_docblock<'a>(
         return ClassDocblockInfo::default();
     };
 
-    let extra_properties = docblock::extract_property_tags(doc_text)
-        .into_iter()
-        .map(|(name, type_str)| PropertyInfo {
-            name,
-            type_hint: if type_str.is_empty() {
-                None
-            } else {
-                Some(type_str)
-            },
-            is_static: false,
-            visibility: Visibility::Public,
-            is_deprecated: false,
-        })
-        .collect();
-
     let params_with_bounds = docblock::extract_template_params_with_bounds(doc_text);
     let template_params = params_with_bounds.iter().map(|(n, _)| n.clone()).collect();
     let template_param_bounds: HashMap<String, String> = params_with_bounds
@@ -124,9 +88,8 @@ fn extract_class_docblock<'a>(
         implements_generics: docblock::extract_generics_tag(doc_text, "@implements"),
         use_generics: docblock::extract_generics_tag(doc_text, "@use"),
         type_aliases: docblock::extract_type_aliases(doc_text),
-        extra_properties,
-        extra_methods: docblock::extract_method_tags(doc_text),
         mixins: docblock::extract_mixin_tags(doc_text),
+        raw_docblock: Some(doc_text.to_string()),
     }
 }
 
@@ -161,16 +124,15 @@ impl Backend {
                         .unwrap_or_default();
 
                     let (
-                        mut methods,
-                        mut properties,
+                        methods,
+                        properties,
                         constants,
                         used_traits,
                         trait_precedences,
                         trait_aliases,
                     ) = Self::extract_class_like_members(class.members.iter(), doc_ctx);
 
-                    let mut doc_info = extract_class_docblock(class, doc_ctx);
-                    doc_info.merge_into(&mut methods, &mut properties);
+                    let doc_info = extract_class_docblock(class, doc_ctx);
 
                     let start_offset = class.left_brace.start.offset;
                     let end_offset = class.right_brace.end.offset;
@@ -198,6 +160,7 @@ impl Backend {
                         type_aliases: doc_info.type_aliases,
                         trait_precedences,
                         trait_aliases,
+                        class_docblock: doc_info.raw_docblock,
                     });
 
                     // Walk method bodies for anonymous classes.
@@ -225,16 +188,15 @@ impl Backend {
                     let parent_class = all_parents.first().cloned();
 
                     let (
-                        mut methods,
-                        mut properties,
+                        methods,
+                        properties,
                         constants,
                         used_traits,
                         trait_precedences,
                         trait_aliases,
                     ) = Self::extract_class_like_members(iface.members.iter(), doc_ctx);
 
-                    let mut doc_info = extract_class_docblock(iface, doc_ctx);
-                    doc_info.merge_into(&mut methods, &mut properties);
+                    let doc_info = extract_class_docblock(iface, doc_ctx);
 
                     let start_offset = iface.left_brace.start.offset;
                     let end_offset = iface.right_brace.end.offset;
@@ -262,6 +224,7 @@ impl Backend {
                         type_aliases: doc_info.type_aliases,
                         trait_precedences,
                         trait_aliases,
+                        class_docblock: doc_info.raw_docblock,
                     });
 
                     // Walk method bodies for anonymous classes.
@@ -271,16 +234,15 @@ impl Backend {
                     let trait_name = trait_def.name.value.to_string();
 
                     let (
-                        mut methods,
-                        mut properties,
+                        methods,
+                        properties,
                         constants,
                         used_traits,
                         trait_precedences,
                         trait_aliases,
                     ) = Self::extract_class_like_members(trait_def.members.iter(), doc_ctx);
 
-                    let mut doc_info = extract_class_docblock(trait_def, doc_ctx);
-                    doc_info.merge_into(&mut methods, &mut properties);
+                    let doc_info = extract_class_docblock(trait_def, doc_ctx);
 
                     let start_offset = trait_def.left_brace.start.offset;
                     let end_offset = trait_def.right_brace.end.offset;
@@ -308,6 +270,7 @@ impl Backend {
                         type_aliases: HashMap::new(),
                         trait_precedences,
                         trait_aliases,
+                        class_docblock: doc_info.raw_docblock,
                     });
 
                     // Walk method bodies for anonymous classes.
@@ -320,7 +283,7 @@ impl Backend {
                 Statement::Enum(enum_def) => {
                     let enum_name = enum_def.name.value.to_string();
 
-                    let (mut methods, mut properties, constants, mut used_traits, _, _) =
+                    let (methods, properties, constants, mut used_traits, _, _) =
                         Self::extract_class_like_members(enum_def.members.iter(), doc_ctx);
 
                     // Enums implicitly implement UnitEnum or BackedEnum.
@@ -336,8 +299,7 @@ impl Backend {
                     };
                     used_traits.push(implicit_interface.to_string());
 
-                    let mut doc_info = extract_class_docblock(enum_def, doc_ctx);
-                    doc_info.merge_into(&mut methods, &mut properties);
+                    let doc_info = extract_class_docblock(enum_def, doc_ctx);
 
                     let interfaces: Vec<String> = enum_def
                         .implements
@@ -377,6 +339,7 @@ impl Backend {
                         type_aliases: HashMap::new(),
                         trait_precedences: vec![],
                         trait_aliases: vec![],
+                        class_docblock: doc_info.raw_docblock,
                     });
 
                     // Walk method bodies for anonymous classes.
@@ -457,6 +420,7 @@ impl Backend {
             type_aliases: HashMap::new(),
             trait_precedences,
             trait_aliases,
+            class_docblock: None,
         }
     }
 

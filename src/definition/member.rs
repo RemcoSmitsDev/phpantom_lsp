@@ -19,6 +19,7 @@ use tower_lsp::lsp_types::*;
 use super::point_location;
 use crate::Backend;
 use crate::completion::resolver::ResolutionCtx;
+use crate::docblock;
 use crate::subject_extraction::{
     collapse_continuation_lines, extract_arrow_subject, extract_double_colon_subject,
 };
@@ -284,6 +285,10 @@ impl Backend {
     /// Determine the kind of member (method, property, or constant) by
     /// checking the class's parsed information.
     ///
+    /// Also checks `@method` and `@property` tags in the class's deferred
+    /// docblock, since those are no longer parsed eagerly into
+    /// `ClassInfo.methods` / `ClassInfo.properties`.
+    ///
     /// Returns `None` if the member is not found in the class.
     fn classify_member(
         class: &ClassInfo,
@@ -294,25 +299,30 @@ impl Backend {
         let has_property = class.properties.iter().any(|p| p.name == member_name);
         let has_constant = class.constants.iter().any(|c| c.name == member_name);
 
+        // Also check the deferred class docblock for @method / @property
+        // tags that are no longer in the parsed members.
+        let (has_virtual_method, has_virtual_property) =
+            Self::has_docblock_virtual_member(class, member_name);
+
         match hint {
             MemberAccessHint::PropertyAccess => {
                 // Prefer property/constant over method when there's no `()`.
-                if has_property {
+                if has_property || has_virtual_property {
                     return Some(MemberKind::Property);
                 }
                 if has_constant {
                     return Some(MemberKind::Constant);
                 }
-                if has_method {
+                if has_method || has_virtual_method {
                     return Some(MemberKind::Method);
                 }
             }
             MemberAccessHint::MethodCall => {
                 // Prefer method when followed by `()`.
-                if has_method {
+                if has_method || has_virtual_method {
                     return Some(MemberKind::Method);
                 }
-                if has_property {
+                if has_property || has_virtual_property {
                     return Some(MemberKind::Property);
                 }
                 if has_constant {
@@ -321,10 +331,10 @@ impl Backend {
             }
             MemberAccessHint::Unknown => {
                 // Default order: method, property, constant.
-                if has_method {
+                if has_method || has_virtual_method {
                     return Some(MemberKind::Method);
                 }
-                if has_property {
+                if has_property || has_virtual_property {
                     return Some(MemberKind::Property);
                 }
                 if has_constant {
@@ -333,6 +343,29 @@ impl Backend {
             }
         }
         None
+    }
+
+    /// Check if a class's deferred docblock contains `@method` or `@property`
+    /// tags that declare the given member name.
+    ///
+    /// Returns `(has_method, has_property)`.  This is a lazy parse of the
+    /// class-level docblock that only runs when the member was not found
+    /// among real declared members.
+    fn has_docblock_virtual_member(class: &ClassInfo, member_name: &str) -> (bool, bool) {
+        let doc_text = match class.class_docblock.as_deref() {
+            Some(t) if !t.is_empty() => t,
+            _ => return (false, false),
+        };
+
+        let has_method = docblock::extract_method_tags(doc_text)
+            .iter()
+            .any(|m| m.name == member_name);
+
+        let has_property = docblock::extract_property_tags(doc_text)
+            .iter()
+            .any(|(name, _)| name == member_name);
+
+        (has_method, has_property)
     }
 
     /// Determine whether the member name at the given position is followed by

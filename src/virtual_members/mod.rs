@@ -33,6 +33,7 @@
 //! ```
 
 pub mod mixin;
+pub mod phpdoc;
 
 use crate::Backend;
 use crate::types::{ClassInfo, ConstantInfo, MethodInfo, PropertyInfo};
@@ -150,6 +151,8 @@ pub fn apply_virtual_members(
 /// 3. Mixin provider (lowest priority)
 pub fn default_providers() -> Vec<Box<dyn VirtualMemberProvider>> {
     vec![
+        // PHPDoc provider — @method / @property tags, higher priority than mixin.
+        Box::new(phpdoc::PHPDocProvider),
         // Mixin provider — lowest priority among virtual member providers.
         Box::new(mixin::MixinProvider),
     ]
@@ -180,7 +183,7 @@ impl Backend {
     /// themselves, to avoid circular loading) should call
     /// [`resolve_class_with_inheritance`](Self::resolve_class_with_inheritance)
     /// directly.
-    pub(crate) fn resolve_class_fully(
+    pub fn resolve_class_fully(
         class: &ClassInfo,
         class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
     ) -> ClassInfo {
@@ -226,6 +229,7 @@ mod tests {
             type_aliases: HashMap::new(),
             trait_precedences: Vec::new(),
             trait_aliases: Vec::new(),
+            class_docblock: None,
         }
     }
 
@@ -568,9 +572,13 @@ mod tests {
     }
 
     #[test]
-    fn default_providers_has_mixin() {
+    fn default_providers_has_phpdoc_and_mixin() {
         let providers = default_providers();
-        assert_eq!(providers.len(), 1, "should have MixinProvider registered");
+        assert_eq!(
+            providers.len(),
+            2,
+            "should have PHPDocProvider and MixinProvider registered"
+        );
     }
 
     // ── resolve_class_fully tests ───────────────────────────────────────

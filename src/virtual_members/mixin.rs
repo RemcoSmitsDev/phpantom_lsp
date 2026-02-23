@@ -262,6 +262,7 @@ mod tests {
             type_aliases: HashMap::new(),
             trait_precedences: Vec::new(),
             trait_aliases: Vec::new(),
+            class_docblock: None,
         }
     }
 
