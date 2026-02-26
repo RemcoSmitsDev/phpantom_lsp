@@ -510,14 +510,76 @@ pub(crate) fn collapse_continuation_lines(
     let cursor_leading_ws = line.len() - trimmed.len();
 
     // Walk backwards to find the first non-continuation line (the base).
+    //
+    // A continuation line is one that starts with `->` or `?->`.  However,
+    // multi-line closure/function arguments can break the chain:
+    //
+    //   Brand::whereNested(function (Builder $q): void {
+    //   })
+    //   ->   // ← cursor
+    //
+    // Here line `})` is NOT a continuation but is part of the call
+    // expression on the base line.  We detect this by tracking
+    // brace/paren balance: when the accumulated lines (from the current
+    // candidate upwards to the cursor) have unmatched closing delimiters,
+    // we keep walking backwards until the delimiters balance out.
     let mut start = cursor_line;
     while start > 0 {
         let prev_trimmed = lines[start - 1].trim_start();
         if prev_trimmed.starts_with("->") || prev_trimmed.starts_with("?->") {
             start -= 1;
         } else {
-            // This is the base expression line.
+            // Check whether the accumulated text from this candidate
+            // line through the line just before the cursor has
+            // unbalanced closing delimiters.  If so, this line is in
+            // the middle of a multi-line argument list and we must
+            // keep walking backwards.
             start -= 1;
+
+            // Count paren/brace balance from `start` up to (but not
+            // including) the cursor line.
+            let mut paren_depth: i32 = 0;
+            let mut brace_depth: i32 = 0;
+            for line in lines.iter().take(cursor_line).skip(start) {
+                for ch in line.chars() {
+                    match ch {
+                        '(' => paren_depth += 1,
+                        ')' => paren_depth -= 1,
+                        '{' => brace_depth += 1,
+                        '}' => brace_depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+
+            // If balanced (or net-open), this is a proper base line.
+            if paren_depth >= 0 && brace_depth >= 0 {
+                break;
+            }
+
+            // Unbalanced — keep walking backwards until we close the
+            // gap.  Each step re-checks the running balance.
+            while start > 0 && (paren_depth < 0 || brace_depth < 0) {
+                start -= 1;
+                for ch in lines[start].chars() {
+                    match ch {
+                        '(' => paren_depth += 1,
+                        ')' => paren_depth -= 1,
+                        '{' => brace_depth += 1,
+                        '}' => brace_depth -= 1,
+                        _ => {}
+                    }
+                }
+            }
+
+            // After re-balancing we may have landed on a continuation
+            // line (e.g. `->where(...\n...\n)->`) — keep walking if so.
+            if start > 0 {
+                let landed = lines[start].trim_start();
+                if landed.starts_with("->") || landed.starts_with("?->") {
+                    continue;
+                }
+            }
             break;
         }
     }
@@ -703,5 +765,115 @@ mod tests {
         let lines = vec!["$foo->bar()", "    ->"];
         let (collapsed, _col) = collapse_continuation_lines(&lines, 1, 6);
         assert_eq!(collapsed, "$foo->bar()->");
+    }
+
+    #[test]
+    fn test_collapse_multiline_closure_argument() {
+        // Brand::whereNested(function (Builder $q): void {
+        // })
+        // ->
+        let lines = vec![
+            "Brand::whereNested(function (Builder $q): void {",
+            "})",
+            "    ->",
+        ];
+        let (collapsed, col) = collapse_continuation_lines(&lines, 2, 6);
+        assert!(
+            collapsed.starts_with("Brand::whereNested("),
+            "collapsed should start with the call expression, got: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("})->"),
+            "collapsed should join the closing brace/paren with the arrow, got: {collapsed}"
+        );
+        let chars: Vec<char> = collapsed.chars().collect();
+        assert!(
+            col <= chars.len(),
+            "col {col} should be within collapsed len {}",
+            chars.len()
+        );
+    }
+
+    #[test]
+    fn test_collapse_multiline_closure_with_body() {
+        // Brand::whereNested(function (Builder $q): void {
+        //     $q->where('active', true);
+        // })
+        // ->
+        let lines = vec![
+            "Brand::whereNested(function (Builder $q): void {",
+            "    $q->where('active', true);",
+            "})",
+            "    ->",
+        ];
+        let (collapsed, col) = collapse_continuation_lines(&lines, 3, 6);
+        assert!(
+            collapsed.starts_with("Brand::whereNested("),
+            "collapsed should start with the call expression, got: {collapsed}"
+        );
+        let chars: Vec<char> = collapsed.chars().collect();
+        assert!(
+            col <= chars.len(),
+            "col {col} should be within collapsed len {}",
+            chars.len()
+        );
+    }
+
+    #[test]
+    fn test_collapse_multiline_closure_then_chain() {
+        // Brand::whereNested(function (Builder $q): void {
+        // })
+        // ->where('active', 1)
+        // ->
+        let lines = vec![
+            "Brand::whereNested(function (Builder $q): void {",
+            "})",
+            "    ->where('active', 1)",
+            "    ->",
+        ];
+        let (collapsed, col) = collapse_continuation_lines(&lines, 3, 6);
+        assert!(
+            collapsed.starts_with("Brand::whereNested("),
+            "collapsed should start with the call expression, got: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("->where('active', 1)->"),
+            "collapsed should contain the chained call, got: {collapsed}"
+        );
+        let chars: Vec<char> = collapsed.chars().collect();
+        assert!(
+            col <= chars.len(),
+            "col {col} should be within collapsed len {}",
+            chars.len()
+        );
+    }
+
+    #[test]
+    fn test_collapse_multiline_closure_intermediate_chain() {
+        // $builder->where('x', 1)
+        // ->whereNested(function ($q) {
+        // })
+        // ->
+        let lines = vec![
+            "$builder->where('x', 1)",
+            "    ->whereNested(function ($q) {",
+            "    })",
+            "    ->",
+        ];
+        let (collapsed, col) = collapse_continuation_lines(&lines, 3, 6);
+        assert!(
+            collapsed.starts_with("$builder->where('x', 1)"),
+            "collapsed should start with the base expression, got: {collapsed}"
+        );
+        assert!(
+            collapsed.contains("->whereNested("),
+            "collapsed should contain the closure call, got: {collapsed}"
+        );
+        let chars: Vec<char> = collapsed.chars().collect();
+        assert!(
+            col <= chars.len(),
+            "col {col} should be within collapsed len {}",
+            chars.len()
+        );
     }
 }

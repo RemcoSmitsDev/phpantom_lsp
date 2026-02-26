@@ -1037,6 +1037,70 @@ fn build_builder_forwarded_methods(
     methods
 }
 
+/// Inject scope methods from a concrete model onto a resolved Builder.
+///
+/// When a type resolves to `Builder<User>`, the generic substitution
+/// replaces `TModel` with `User` but does not add `User`'s scope
+/// methods.  This function loads the concrete model, scans for scope
+/// methods, and returns them as **instance** methods on the Builder so
+/// that `$query->active()` and `Brand::where(...)->isActive()` both
+/// resolve.
+///
+/// Return types are mapped so that `static` (from the default scope
+/// return type `Builder<static>`) becomes `Builder<ConcreteModel>`,
+/// keeping the chain on the Builder rather than jumping to the model.
+pub fn build_scope_methods_for_builder(
+    model_name: &str,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+) -> Vec<MethodInfo> {
+    let model_class = match class_loader(model_name) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    // Only synthesize scopes for actual Eloquent models.
+    if !extends_eloquent_model(&model_class, class_loader) {
+        return Vec::new();
+    }
+
+    // Fully resolve the model to pick up scope methods defined in
+    // traits and parent classes, not just the model itself.
+    let resolved_model = Backend::resolve_class_fully(&model_class, class_loader);
+
+    // Build a substitution map so that `static`, `$this`, and `self`
+    // in scope return types resolve to the concrete model name.
+    // The default scope return type is `\...\Builder<static>` where
+    // `static` means the model, so substituting `static` → `User`
+    // produces `\...\Builder<User>`, keeping the chain on the builder.
+    let mut subs = HashMap::new();
+    subs.insert("static".to_string(), model_name.to_string());
+    subs.insert("$this".to_string(), model_name.to_string());
+    subs.insert("self".to_string(), model_name.to_string());
+
+    let mut methods = Vec::new();
+
+    for method in &resolved_model.methods {
+        if !is_scope_method(method) {
+            continue;
+        }
+
+        // Build an instance method (scopes are called as instance
+        // methods on Builder, not static).
+        let [instance_method, _static_method] = build_scope_methods(method);
+
+        let mut m = instance_method;
+
+        // Apply substitutions to the return type.
+        if let Some(ref mut ret) = m.return_type {
+            *ret = apply_substitution(ret, &subs);
+        }
+
+        methods.push(m);
+    }
+
+    methods
+}
+
 impl VirtualMemberProvider for LaravelModelProvider {
     /// Returns `true` if the class extends `Illuminate\Database\Eloquent\Model`.
     fn applies_to(
@@ -4809,5 +4873,186 @@ mod tests {
             create.return_type.as_deref(),
             Some("\\App\\Models\\Admin\\SuperUser")
         );
+    }
+
+    // ─── build_scope_methods_for_builder ─────────────────────────────
+
+    #[test]
+    fn builder_scope_returns_empty_when_model_not_found() {
+        let methods = build_scope_methods_for_builder("App\\Models\\Missing", &no_loader);
+        assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn builder_scope_returns_empty_for_non_model() {
+        let loader = |name: &str| -> Option<ClassInfo> {
+            if name == "App\\Models\\Plain" {
+                Some(make_class("App\\Models\\Plain"))
+            } else {
+                None
+            }
+        };
+        let methods = build_scope_methods_for_builder("App\\Models\\Plain", &loader);
+        assert!(methods.is_empty());
+    }
+
+    #[test]
+    fn builder_scope_extracts_scope_methods_as_instance() {
+        let mut model = make_class("App\\Models\\User");
+        model.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+        model.methods.push(make_method("scopeActive", Some("void")));
+        model
+            .methods
+            .push(make_method("scopeVerified", Some("void")));
+        model.methods.push(make_method("getName", Some("string")));
+
+        let loader = |name: &str| -> Option<ClassInfo> {
+            if name == "App\\Models\\User" {
+                Some(model.clone())
+            } else if name == ELOQUENT_MODEL_FQN {
+                Some(make_class(ELOQUENT_MODEL_FQN))
+            } else {
+                None
+            }
+        };
+
+        let methods = build_scope_methods_for_builder("App\\Models\\User", &loader);
+        let names: Vec<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+
+        assert!(
+            names.contains(&"active"),
+            "should contain active, got: {names:?}"
+        );
+        assert!(
+            names.contains(&"verified"),
+            "should contain verified, got: {names:?}"
+        );
+        assert!(
+            !names.contains(&"getName"),
+            "should not contain non-scope getName, got: {names:?}"
+        );
+        // All should be instance methods
+        assert!(methods.iter().all(|m| !m.is_static));
+    }
+
+    #[test]
+    fn builder_scope_substitutes_static_in_return_type() {
+        let mut model = make_class("App\\Models\\Brand");
+        model.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+        // Default scope return type contains `static`
+        model
+            .methods
+            .push(make_method("scopePopular", Some("void")));
+
+        let loader = |name: &str| -> Option<ClassInfo> {
+            if name == "App\\Models\\Brand" {
+                Some(model.clone())
+            } else if name == ELOQUENT_MODEL_FQN {
+                Some(make_class(ELOQUENT_MODEL_FQN))
+            } else {
+                None
+            }
+        };
+
+        let methods = build_scope_methods_for_builder("App\\Models\\Brand", &loader);
+        assert_eq!(methods.len(), 1);
+        let popular = &methods[0];
+        assert_eq!(popular.name, "popular");
+        // The default return type `\...\Builder<static>` should have
+        // `static` substituted with the concrete model name.
+        let ret = popular.return_type.as_deref().unwrap();
+        assert!(
+            ret.contains("App\\Models\\Brand"),
+            "return type should contain model name, got: {ret}"
+        );
+        assert!(
+            !ret.contains("static"),
+            "return type should not contain 'static', got: {ret}"
+        );
+    }
+
+    #[test]
+    fn builder_scope_strips_query_parameter() {
+        let mut model = make_class("App\\Models\\Task");
+        model.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+        model.methods.push(make_method_with_params(
+            "scopeOfType",
+            Some("void"),
+            vec![
+                make_param("$query", Some("Builder"), true),
+                make_param("$type", Some("string"), true),
+            ],
+        ));
+
+        let loader = |name: &str| -> Option<ClassInfo> {
+            if name == "App\\Models\\Task" {
+                Some(model.clone())
+            } else if name == ELOQUENT_MODEL_FQN {
+                Some(make_class(ELOQUENT_MODEL_FQN))
+            } else {
+                None
+            }
+        };
+
+        let methods = build_scope_methods_for_builder("App\\Models\\Task", &loader);
+        assert_eq!(methods.len(), 1);
+        let of_type = &methods[0];
+        assert_eq!(of_type.name, "ofType");
+        // $query should be stripped, only $type remains
+        assert_eq!(of_type.parameters.len(), 1);
+        assert_eq!(of_type.parameters[0].name, "$type");
+    }
+
+    #[test]
+    fn builder_scope_with_custom_return_type() {
+        let mut model = make_class("App\\Models\\Post");
+        model.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+        model.methods.push(make_method(
+            "scopeDraft",
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<static>"),
+        ));
+
+        let loader = |name: &str| -> Option<ClassInfo> {
+            if name == "App\\Models\\Post" {
+                Some(model.clone())
+            } else if name == ELOQUENT_MODEL_FQN {
+                Some(make_class(ELOQUENT_MODEL_FQN))
+            } else {
+                None
+            }
+        };
+
+        let methods = build_scope_methods_for_builder("App\\Models\\Post", &loader);
+        assert_eq!(methods.len(), 1);
+        let draft = &methods[0];
+        assert_eq!(draft.name, "draft");
+        let ret = draft.return_type.as_deref().unwrap();
+        assert_eq!(
+            ret,
+            "\\Illuminate\\Database\\Eloquent\\Builder<App\\Models\\Post>"
+        );
+    }
+
+    #[test]
+    fn builder_scope_preserves_deprecated() {
+        let mut model = make_class("App\\Models\\Item");
+        model.parent_class = Some(ELOQUENT_MODEL_FQN.to_string());
+        let mut scope = make_method("scopeOld", Some("void"));
+        scope.is_deprecated = true;
+        model.methods.push(scope);
+
+        let loader = |name: &str| -> Option<ClassInfo> {
+            if name == "App\\Models\\Item" {
+                Some(model.clone())
+            } else if name == ELOQUENT_MODEL_FQN {
+                Some(make_class(ELOQUENT_MODEL_FQN))
+            } else {
+                None
+            }
+        };
+
+        let methods = build_scope_methods_for_builder("App\\Models\\Item", &loader);
+        assert_eq!(methods.len(), 1);
+        assert!(methods[0].is_deprecated);
     }
 }

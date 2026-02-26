@@ -29,6 +29,7 @@ use crate::docblock::types::{
 use crate::inheritance::{apply_generic_args, apply_substitution};
 use crate::types::*;
 use crate::util::short_name;
+use crate::virtual_members::laravel::{ELOQUENT_BUILDER_FQN, build_scope_methods_for_builder};
 
 use super::conditional_resolution::{
     VarClassStringResolver, resolve_conditional_with_text_args, resolve_conditional_without_args,
@@ -1048,7 +1049,25 @@ impl Backend {
         // ── Parse generic arguments (if any) ──
         // `Collection<int, User>` → base_hint = `Collection`, generic_args = ["int", "User"]
         // `Foo`                   → base_hint = `Foo`,        generic_args = []
-        let (base_hint, generic_args) = parse_generic_args(hint);
+        let (base_hint, raw_generic_args) = parse_generic_args(hint);
+
+        // ── Resolve static/self/$this inside generic arguments ────────
+        // When a method returns e.g. `Builder<static>`, the generic arg
+        // `static` must be resolved to the owning class name so that
+        // `Brand::with('english')->` resolves to `Builder<Brand>` and
+        // scope injection (and other generic substitution) works correctly.
+        let resolved_generic_args: Vec<String> = raw_generic_args
+            .iter()
+            .map(|arg| {
+                let trimmed = arg.trim();
+                if trimmed == "static" || trimmed == "self" || trimmed == "$this" {
+                    owning_class_name.to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            })
+            .collect();
+        let generic_args: Vec<&str> = resolved_generic_args.iter().map(|s| s.as_str()).collect();
 
         // For class lookup, strip any remaining generics from the base
         // (should already be clean, but defensive) and use the short name.
@@ -1124,7 +1143,49 @@ impl Backend {
                 // substituted to the concrete model class.
                 if !generic_args.is_empty() && !cls.template_params.is_empty() {
                     let resolved = Self::resolve_class_fully(&cls, class_loader);
-                    vec![apply_generic_args(&resolved, &generic_args)]
+                    let mut result = apply_generic_args(&resolved, &generic_args);
+
+                    // ── Eloquent Builder scope injection ───────────────
+                    // When the resolved class is the Eloquent Builder
+                    // and the first generic arg is a concrete model
+                    // name, inject the model's scope methods as instance
+                    // methods on the Builder so that
+                    // `Brand::where(...)->isActive()` and
+                    // `$query->active()` both resolve.
+                    let is_eloquent_builder = {
+                        let bc = base_clean.strip_prefix('\\').unwrap_or(&base_clean);
+                        let cn = cls.name.strip_prefix('\\').unwrap_or(&cls.name);
+                        // Also construct FQN from file_namespace + name
+                        // for classes loaded via PSR-4 where `cls.name`
+                        // is the short name only.
+                        let fqn_from_ns = cls
+                            .file_namespace
+                            .as_ref()
+                            .map(|ns| format!("{ns}\\{}", cls.name));
+                        let fqn_clean = fqn_from_ns
+                            .as_deref()
+                            .map(|f| f.strip_prefix('\\').unwrap_or(f));
+                        bc == ELOQUENT_BUILDER_FQN
+                            || cn == ELOQUENT_BUILDER_FQN
+                            || fqn_clean == Some(ELOQUENT_BUILDER_FQN)
+                    };
+                    if is_eloquent_builder {
+                        // The first (or only) generic arg is the model type.
+                        if let Some(model_arg) = generic_args.first() {
+                            let model_clean = model_arg.strip_prefix('\\').unwrap_or(model_arg);
+                            let scope_methods =
+                                build_scope_methods_for_builder(model_clean, class_loader);
+                            for method in scope_methods {
+                                if !result.methods.iter().any(|m| {
+                                    m.name == method.name && m.is_static == method.is_static
+                                }) {
+                                    result.methods.push(method);
+                                }
+                            }
+                        }
+                    }
+
+                    vec![result]
                 } else {
                     vec![cls]
                 }

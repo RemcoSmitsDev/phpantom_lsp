@@ -70,6 +70,52 @@ fn build_var_resolver_from_ctx<'a>(
     }
 }
 
+/// Check whether a type hint should be enriched with generic args for
+/// Eloquent scope method Builder parameters.
+///
+/// When `type_str` resolves to `Builder` (the Eloquent Builder, without
+/// generic parameters) and the enclosing method is a scope (name starts
+/// with `scope`, len > 5) on a class that extends Eloquent Model,
+/// returns `Some("Builder<EnclosingModelName>")`.  Otherwise returns
+/// `None`, meaning the caller should use the original type string.
+fn enrich_builder_type_in_scope(
+    type_str: &str,
+    method_name: &str,
+    current_class: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+) -> Option<String> {
+    use crate::virtual_members::laravel::{ELOQUENT_BUILDER_FQN, extends_eloquent_model};
+
+    // Only applies inside scope methods (scopeX where X is at least one char).
+    if !method_name.starts_with("scope") || method_name.len() <= 5 {
+        return None;
+    }
+
+    // Only applies when the enclosing class extends Eloquent Model.
+    if !extends_eloquent_model(current_class, class_loader) {
+        return None;
+    }
+
+    // Strip leading backslash for comparison.
+    let bare = type_str.strip_prefix('\\').unwrap_or(type_str);
+
+    // Check if the type is the Eloquent Builder (without generic args).
+    // Accept both the FQN and the short name `Builder` (common in use
+    // imports).  If the type already has generic args (e.g.
+    // `Builder<User>`), do not enrich — the user-supplied generics
+    // should be used as-is.
+    if type_str.contains('<') {
+        return None;
+    }
+    let is_eloquent_builder = bare == ELOQUENT_BUILDER_FQN || bare == "Builder";
+    if !is_eloquent_builder {
+        return None;
+    }
+
+    // Build the enriched type with the enclosing model as the generic arg.
+    Some(format!("{type_str}<{}>", current_class.name))
+}
+
 impl Backend {
     /// Resolve the type of `$variable` by re-parsing the file and walking
     /// the method body that contains `cursor_offset`.
@@ -480,8 +526,26 @@ impl Backend {
                         let native_type_str =
                             param.hint.as_ref().map(|h| Self::extract_hint_string(h));
 
-                        let resolved_from_native = native_type_str
-                            .as_deref()
+                        // ── Eloquent scope Builder inference ────────
+                        // When the enclosing method is a scope on an
+                        // Eloquent Model and the parameter type is
+                        // `Builder` (without generics), enrich it to
+                        // `Builder<EnclosingModel>` so that the
+                        // generic-args path injects scope methods.
+                        let enriched_type_str = native_type_str.as_deref().and_then(|ts| {
+                            let method_name = method.name.value.to_string();
+                            enrich_builder_type_in_scope(
+                                ts,
+                                &method_name,
+                                ctx.current_class,
+                                ctx.class_loader,
+                            )
+                        });
+
+                        let type_str_for_resolution =
+                            enriched_type_str.as_deref().or(native_type_str.as_deref());
+
+                        let resolved_from_native = type_str_for_resolution
                             .map(|ts| {
                                 Self::type_hint_to_classes(
                                     ts,
@@ -2235,5 +2299,143 @@ impl Backend {
             ctx.all_classes,
             ctx.class_loader,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::enrich_builder_type_in_scope;
+    use crate::types::{ClassInfo, ClassLikeKind};
+    use std::collections::HashMap;
+
+    fn make_class(name: &str) -> ClassInfo {
+        ClassInfo {
+            kind: ClassLikeKind::Class,
+            name: name.to_string(),
+            methods: Vec::new(),
+            properties: Vec::new(),
+            constants: Vec::new(),
+            start_offset: 0,
+            end_offset: 0,
+            parent_class: None,
+            interfaces: Vec::new(),
+            used_traits: Vec::new(),
+            mixins: Vec::new(),
+            is_final: false,
+            is_abstract: false,
+            is_deprecated: false,
+            template_params: Vec::new(),
+            template_param_bounds: HashMap::new(),
+            extends_generics: Vec::new(),
+            implements_generics: Vec::new(),
+            use_generics: Vec::new(),
+            type_aliases: HashMap::new(),
+            trait_precedences: Vec::new(),
+            trait_aliases: Vec::new(),
+            class_docblock: None,
+            file_namespace: None,
+            custom_collection: None,
+            casts_definitions: Vec::new(),
+            attributes_definitions: Vec::new(),
+            column_names: Vec::new(),
+        }
+    }
+
+    fn make_model(name: &str) -> ClassInfo {
+        let mut class = make_class(name);
+        class.parent_class = Some("Illuminate\\Database\\Eloquent\\Model".to_string());
+        class
+    }
+
+    fn model_loader(name: &str) -> Option<ClassInfo> {
+        if name == "Illuminate\\Database\\Eloquent\\Model" {
+            Some(make_class("Illuminate\\Database\\Eloquent\\Model"))
+        } else if name == "App\\Models\\User" {
+            Some(make_model("App\\Models\\User"))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn enrich_scope_method_with_builder_type() {
+        let model = make_model("App\\Models\\User");
+        let result = enrich_builder_type_in_scope("Builder", "scopeActive", &model, &model_loader);
+        assert_eq!(result, Some("Builder<App\\Models\\User>".to_string()));
+    }
+
+    #[test]
+    fn enrich_scope_method_with_fqn_builder() {
+        let model = make_model("App\\Models\\User");
+        let result = enrich_builder_type_in_scope(
+            "Illuminate\\Database\\Eloquent\\Builder",
+            "scopeActive",
+            &model,
+            &model_loader,
+        );
+        assert_eq!(
+            result,
+            Some("Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>".to_string())
+        );
+    }
+
+    #[test]
+    fn enrich_skips_non_scope_method() {
+        let model = make_model("App\\Models\\User");
+        let result = enrich_builder_type_in_scope("Builder", "getName", &model, &model_loader);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn enrich_skips_bare_scope_name() {
+        let model = make_model("App\\Models\\User");
+        let result = enrich_builder_type_in_scope("Builder", "scope", &model, &model_loader);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn enrich_skips_non_model_class() {
+        let plain = make_class("App\\Services\\SomeService");
+        let result = enrich_builder_type_in_scope("Builder", "scopeActive", &plain, &model_loader);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn enrich_skips_non_builder_type() {
+        let model = make_model("App\\Models\\User");
+        let result =
+            enrich_builder_type_in_scope("Collection", "scopeActive", &model, &model_loader);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn enrich_skips_builder_with_existing_generics() {
+        let model = make_model("App\\Models\\User");
+        let result =
+            enrich_builder_type_in_scope("Builder<User>", "scopeActive", &model, &model_loader);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn enrich_scope_multi_word_method_name() {
+        let model = make_model("App\\Models\\User");
+        let result =
+            enrich_builder_type_in_scope("Builder", "scopeByAuthor", &model, &model_loader);
+        assert_eq!(result, Some("Builder<App\\Models\\User>".to_string()));
+    }
+
+    #[test]
+    fn enrich_scope_with_leading_backslash_builder() {
+        let model = make_model("App\\Models\\User");
+        let result = enrich_builder_type_in_scope(
+            "\\Illuminate\\Database\\Eloquent\\Builder",
+            "scopeActive",
+            &model,
+            &model_loader,
+        );
+        assert_eq!(
+            result,
+            Some("\\Illuminate\\Database\\Eloquent\\Builder<App\\Models\\User>".to_string())
+        );
     }
 }

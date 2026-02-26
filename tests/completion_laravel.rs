@@ -26,7 +26,10 @@ const COMPOSER_JSON: &str = r#"{
 const MODEL_PHP: &str = "\
 <?php
 namespace Illuminate\\Database\\Eloquent;
-class Model {}
+class Model {
+    /** @return \\Illuminate\\Database\\Eloquent\\Builder<static> */
+    public static function with(mixed $relations): Builder { return new Builder(); }
+}
 ";
 
 const COLLECTION_PHP: &str = "\
@@ -142,6 +145,8 @@ namespace Illuminate\\Database\\Query;
 class Builder {
     /** @return static */
     public function whereIn(string $column, array $values): static { return $this; }
+    /** @return static */
+    public function whereNested(\\Closure $callback, string $boolean = 'and'): static { return $this; }
     /** @return static */
     public function groupBy(string ...$groups): static { return $this; }
     /** @return static */
@@ -8128,6 +8133,698 @@ class UserFactory extends Factory {
     assert!(
         methods.contains(&"active"),
         "scope should coexist with factory, got methods: {:?}",
+        methods
+    );
+}
+
+// ─── Scope methods on Builder instances ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_scope_available_after_builder_where_chain() {
+    // Brand::where('id', $id)->isActive() should resolve scope methods
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function test() {
+        $q = Brand::where('id', 1);
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // "$q->" at line 8, character 12
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 8, 12).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"isActive"),
+        "After Brand::where(), ->isActive() scope should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"orderBy"),
+        "Builder methods should still be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"get"),
+        "Builder get() should still be available, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_available_inside_scope_body() {
+    // Inside a scope method body, $query->verified() should resolve other scopes
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class User extends Model {
+    public function scopeActive(Builder $query): void {
+        $query->
+    }
+    public function scopeVerified(Builder $query): void {}
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // "$query->" at line 6, character 16
+    let items = complete_at(&backend, &dir, "src/Models/User.php", user_php, 6, 16).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"verified"),
+        "Inside scope body, $query->verified() should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"active"),
+        "Inside scope body, $query->active() should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"where"),
+        "Builder where() should still be available inside scope body, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_available_after_inline_builder_chain() {
+    // Brand::where('id', $id)->isActive()-> should continue the chain
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function test() {
+        Brand::where('id', 1)->isActive()->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // "->isActive()->" at line 7, character 43
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 7, 43).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"get"),
+        "After chaining through scope, ->get() should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"orderBy"),
+        "After chaining through scope, ->orderBy() should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"isActive"),
+        "After chaining through scope, ->isActive() should still be chainable, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_on_builder_with_multiple_scopes() {
+    // Multiple scopes should all be available on the builder
+    let post_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Post extends Model {
+    public function scopePublished(Builder $query): void {}
+    public function scopeDraft(Builder $query): void {}
+    public function scopeByAuthor(Builder $query, int $authorId): void {}
+    public function test() {
+        $q = Post::where('id', 1);
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Post.php", post_php)]);
+
+    // "$q->" at line 10, character 12
+    let items = complete_at(&backend, &dir, "src/Models/Post.php", post_php, 10, 12).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"published"),
+        "published scope should be available on Builder, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"draft"),
+        "draft scope should be available on Builder, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"byAuthor"),
+        "byAuthor scope should be available on Builder, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_on_builder_from_trait() {
+    // Scopes defined in traits used by the model should appear on the builder
+    let trait_php = "\
+<?php
+namespace App\\Concerns;
+use Illuminate\\Database\\Eloquent\\Builder;
+trait SoftDeletesCustom {
+    public function scopeWithTrashed(Builder $query): void {}
+}
+";
+    let order_php = "\
+<?php
+namespace App\\Models;
+use App\\Concerns\\SoftDeletesCustom;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Order extends Model {
+    use SoftDeletesCustom;
+    public function scopePending(Builder $query): void {}
+    public function test() {
+        $q = Order::where('status', 'pending');
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Concerns/SoftDeletesCustom.php", trait_php),
+        ("src/Models/Order.php", order_php),
+    ]);
+
+    // "$q->" at line 10, character 12
+    let items = complete_at(&backend, &dir, "src/Models/Order.php", order_php, 10, 12).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"pending"),
+        "Own scope pending should be available on Builder, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"withTrashed"),
+        "Trait scope withTrashed should be available on Builder, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_on_builder_cross_file() {
+    // Scopes should work when the model is in a different file from
+    // the code that chains builder calls
+    let product_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Product extends Model {
+    public function scopeInStock(Builder $query): void {}
+    public function scopeOnSale(Builder $query): void {}
+}
+";
+    let service_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Builder;
+class ProductService {
+    public function test() {
+        $q = Product::where('active', true);
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/Product.php", product_php),
+        ("src/Models/ProductService.php", service_php),
+    ]);
+
+    // Open the model file first so it's indexed
+    let model_uri = Url::from_file_path(dir.path().join("src/Models/Product.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: model_uri,
+                language_id: "php".to_string(),
+                version: 1,
+                text: product_php.to_string(),
+            },
+        })
+        .await;
+
+    // "$q->" at line 6, character 12
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Models/ProductService.php",
+        service_php,
+        6,
+        12,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"inStock"),
+        "Cross-file scope inStock should be available on Builder, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"onSale"),
+        "Cross-file scope onSale should be available on Builder, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_not_injected_on_non_eloquent_builder() {
+    // Scopes should NOT be injected when the Builder's generic arg
+    // is not an Eloquent Model.
+    let not_a_model_php = "\
+<?php
+namespace App\\Models;
+class NotAModel {
+    public function hello(): void {}
+}
+";
+    let model_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class SomeModel extends Model {
+    public function scopePopular(Builder $query): void {}
+    /** @return Builder<NotAModel> */
+    public function getBadBuilder(): Builder { return new Builder(); }
+    public function test() {
+        $q = $this->getBadBuilder();
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/NotAModel.php", not_a_model_php),
+        ("src/Models/SomeModel.php", model_php),
+    ]);
+
+    // Open NotAModel first so it's indexed
+    let uri = Url::from_file_path(dir.path().join("src/Models/NotAModel.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri,
+                language_id: "php".to_string(),
+                version: 1,
+                text: not_a_model_php.to_string(),
+            },
+        })
+        .await;
+
+    // "$q->" at line 10, character 12
+    let items = complete_at(
+        &backend,
+        &dir,
+        "src/Models/SomeModel.php",
+        model_php,
+        10,
+        12,
+    )
+    .await;
+    let methods = method_names(&items);
+
+    // Builder methods should be available (where, get, etc.)
+    assert!(
+        methods.contains(&"where"),
+        "Builder methods should be available, got: {:?}",
+        methods
+    );
+    // Scopes from SomeModel should NOT appear because the generic arg
+    // is NotAModel, which does not extend Eloquent Model.
+    assert!(
+        !methods.contains(&"popular"),
+        "Scope from SomeModel should NOT appear on Builder<NotAModel>, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_chain_returns_builder_with_scopes() {
+    // After calling a scope, further scopes should still be available
+    let task_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Task extends Model {
+    public function scopeUrgent(Builder $query): void {}
+    public function scopeAssignedTo(Builder $query, int $userId): void {}
+    public function test() {
+        $q = Task::where('active', true)->urgent();
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Task.php", task_php)]);
+
+    // "$q->" at line 9, character 12
+    let items = complete_at(&backend, &dir, "src/Models/Task.php", task_php, 9, 12).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"assignedTo"),
+        "After chaining through urgent(), assignedTo() should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"urgent"),
+        "After chaining through urgent(), urgent() should still be chainable, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"get"),
+        "Builder get() should be available after scope chain, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_on_builder_indirect_model_subclass() {
+    // Scopes on indirect model subclasses should also appear on Builder
+    let base_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class BaseModel extends Model {
+    public function scopeTenantAware(Builder $query): void {}
+}
+";
+    let invoice_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Invoice extends BaseModel {
+    public function scopeOverdue(Builder $query): void {}
+    public function test() {
+        $q = Invoice::where('status', 'pending');
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[
+        ("src/Models/BaseModel.php", base_php),
+        ("src/Models/Invoice.php", invoice_php),
+    ]);
+
+    // "$q->" at line 7, character 12
+    let items = complete_at(&backend, &dir, "src/Models/Invoice.php", invoice_php, 7, 12).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"overdue"),
+        "Own scope overdue should be available on Builder, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"tenantAware"),
+        "Parent model scope tenantAware should be available on Builder, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_strips_query_param_on_builder() {
+    // Scope methods on Builder should have the $query parameter stripped
+    let item_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Item extends Model {
+    public function scopeOfType(Builder $query, string $type): void {}
+    public function test() {
+        $q = Item::where('active', true);
+        $q->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Item.php", item_php)]);
+
+    // "$q->" at line 8, character 12
+    let items = complete_at(&backend, &dir, "src/Models/Item.php", item_php, 8, 12).await;
+
+    // Find the ofType method completion item
+    let of_type_item = items.iter().find(|i| {
+        let name = i.filter_text.as_deref().unwrap_or(&i.label);
+        name == "ofType"
+    });
+    assert!(
+        of_type_item.is_some(),
+        "ofType scope should be available on Builder, got: {:?}",
+        method_names(&items)
+    );
+}
+
+#[tokio::test]
+async fn test_model_with_returns_builder_methods() {
+    // Sanity check: Brand::with('english')-> should at minimum resolve
+    // to Builder methods (where, get, orderBy, etc).
+    // Model::with() has @return \Illuminate\Database\Eloquent\Builder<static>
+    // and `static` in the generic arg must be resolved to the concrete model.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function test() {
+        Brand::with('english')->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // line 6 = "        Brand::with('english')->", character 32 = after ->
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 6, 32).await;
+    let methods = method_names(&items);
+
+    assert!(
+        !methods.is_empty(),
+        "Brand::with('english')-> should produce completions, got empty list"
+    );
+    assert!(
+        methods.contains(&"where"),
+        "Builder::where() should be available after Brand::with(), got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"get"),
+        "Builder::get() should be available after Brand::with(), got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_available_after_model_with_call() {
+    // Brand::with('english')-> should resolve scope methods.
+    // Model::with() returns Builder<static>, and `static` in the generic
+    // arg must be resolved to the concrete model name so that scope
+    // injection on Builder<Brand> works.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeProductInformation(Builder $query): void {}
+    public function test() {
+        Brand::with('english')->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // line 7 = "        Brand::with('english')->", character 32 = after ->
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 7, 32).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"productInformation"),
+        "After Brand::with(), ->productInformation() scope should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"where"),
+        "Builder methods should still be available after with(), got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"get"),
+        "Builder get() should still be available after with(), got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_scope_available_after_model_with_then_chain() {
+    // Brand::with('english')->where('active', 1)-> should still have scopes.
+    // This verifies that chaining after with() preserves the Builder<Brand>
+    // type through subsequent builder method calls.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function test() {
+        Brand::with('english')->where('active', 1)->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // line 7 = "        Brand::with('english')->where('active', 1)->", character 52 = after ->
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 7, 52).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"isActive"),
+        "After Brand::with()->where(), ->isActive() scope should be available, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_completion_after_multiline_closure_argument() {
+    // Brand::whereNested(function (Builder $q): void {
+    // })
+    // ->   // completion should work here
+    //
+    // This tests that collapse_continuation_lines handles multi-line
+    // closure arguments by tracking brace/paren balance when walking
+    // backwards through lines.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function test() {
+        Brand::whereNested(function (Builder $q): void {
+        })
+        ->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // line 9 = "        ->", character 10 = after ->
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 9, 10).await;
+    let methods = method_names(&items);
+
+    assert!(
+        !methods.is_empty(),
+        "Completion after multi-line closure arg should produce results, got empty list"
+    );
+    assert!(
+        methods.contains(&"where"),
+        "Builder::where() should be available after multi-line closure, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"isActive"),
+        "Scope isActive() should be available after multi-line closure, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_completion_after_multiline_closure_with_body() {
+    // Same as above but the closure has a body with content inside.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function test() {
+        Brand::whereNested(function (Builder $q): void {
+            $q->where('active', true);
+        })
+        ->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // line 10 = "        ->", character 10 = after ->
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 10, 10).await;
+    let methods = method_names(&items);
+
+    assert!(
+        !methods.is_empty(),
+        "Completion after multi-line closure with body should produce results, got empty list"
+    );
+    assert!(
+        methods.contains(&"where"),
+        "Builder::where() should be available, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"isActive"),
+        "Scope isActive() should be available, got: {:?}",
+        methods
+    );
+}
+
+#[tokio::test]
+async fn test_single_line_closure_still_works() {
+    // Sanity check: the single-line closure case should still work.
+    // Brand::whereNested(function (Builder $q): void {})
+    // ->
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function test() {
+        Brand::whereNested(function (Builder $q): void {})
+        ->
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // line 8 = "        ->", character 10 = after ->
+    let items = complete_at(&backend, &dir, "src/Models/Brand.php", brand_php, 8, 10).await;
+    let methods = method_names(&items);
+
+    assert!(
+        methods.contains(&"where"),
+        "Builder::where() should be available after single-line closure, got: {:?}",
+        methods
+    );
+    assert!(
+        methods.contains(&"isActive"),
+        "Scope isActive() should be available after single-line closure, got: {:?}",
         methods
     );
 }

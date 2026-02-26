@@ -1,6 +1,6 @@
 # PHPantom — Laravel Support: Remaining Work
 
-> Last updated: 2025-07-20
+> Last updated: 2025-07-21
 
 This document tracks bugs, known gaps, and missing features in
 PHPantom's Laravel Eloquent support. For the general architecture and
@@ -33,24 +33,32 @@ Other cases:
 - MyModel::whereHas('order', function (Builder $q) {})
 - MyModel::with(['translations' => function (Relation $query) {}]) // translations is the name of the relation on MyModel, Relation will become the return type of that relation
 
-### 3. Query scope chaining on Builder instances
+### 3. Go-to-definition for scope methods called through `with()`
 
-Inside a scope method body, `$query->verified()` (calling another
-scope) does not offer scope method completions. Scope methods are
-synthesized on the Model class, not on the Builder class. The Builder
-instance inside a scope body resolves to `Illuminate\Database\Eloquent\Builder`
-which has no knowledge of the model's scopes.
+`Brand::with('english')->sortable()` does not resolve go-to-definition
+for `sortable()`, even though completion works. Compare with
+`Brand::with('english')->paginate()` where GTD works fine. The
+difference is that `paginate()` is a real Builder method with a source
+location, while `sortable()` is a scope method injected onto the
+Builder at resolution time without preserving the original declaration
+site. The GTD fallback `find_scope_on_builder_model` may not be
+triggering for the `with()` return path.
 
-**Possible fix:** When the Builder's `TModel` template parameter is
-known (e.g., `Builder<User>`), load the concrete model and merge its
-scope methods as instance methods on the resolved Builder. This
-requires extending the virtual member system to also apply to
-Builder instances, not just Model classes.
+### 4. Multi-line chain after `with()` breaks completion and GTD
 
-### 4. Scopes on queries
+When the chain after `with()` is split across lines, neither completion
+nor go-to-definition works:
 
-Copes are missing from complation of a query after other query
-opertions for example Brand::where('id', $id)->isActive(); // Brand has a method called scopeIsActive()
+```php
+Brand::with('english')
+    ->paginate(); // neither GTD nor completion works
+```
+
+The single-line equivalent resolves fine. This is a variant of the
+multi-line closure argument issue (now fixed): `collapse_continuation_lines`
+joins lines that start with `->`, but the base line `Brand::with('english')`
+is not being found when the chain spans lines in this specific pattern.
+Likely a cursor-position or line-counting edge case in the collapse logic.
 
 ---
 

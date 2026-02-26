@@ -50,6 +50,8 @@ class Builder {
     public function where($column, $operator = null, $value = null, $boolean = 'and') {}
     /** @return \\Illuminate\\Database\\Eloquent\\Collection<int, TModel> */
     public function get($columns = null) { return new Collection(); }
+    /** @return \\Illuminate\\Support\\Collection<array-key, mixed> */
+    public function pluck($column, $key = null) {}
 }
 ";
 
@@ -1270,6 +1272,354 @@ class User extends Model {
     assert_eq!(
         line, 5,
         "Should jump to 'secret_key' in $guarded on line 5, got: {}",
+        line
+    );
+}
+
+// ─── Builder method GTD on chained Builder instances ────────────────────────
+
+#[tokio::test]
+async fn test_goto_definition_builder_method_on_chained_builder_instance() {
+    // BrandTranslation::where('name', 1)->pluck() — GTD on pluck should
+    // jump to pluck() on the Eloquent Builder class.
+    let model_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class BrandTranslation extends Model {}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/BrandTranslation.php", model_php)]);
+
+    // Open model file first so it's indexed
+    let model_uri =
+        Url::from_file_path(dir.path().join("src/Models/BrandTranslation.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: model_uri,
+                language_id: "php".to_string(),
+                version: 1,
+                text: model_php.to_string(),
+            },
+        })
+        .await;
+
+    let test_php = "\
+<?php
+namespace App\\Models;
+class TestService {
+    public function demo(): void {
+        BrandTranslation::where('name', 1)->pluck('brand_id');
+    }
+}
+";
+    // Cursor on "pluck" in `->pluck('brand_id')`
+    // Line 4 (0-indexed), "pluck" starts at character 44
+    let result = goto_definition_at(
+        &backend,
+        &dir,
+        "src/Models/TestService.php",
+        test_php,
+        4,
+        46,
+    )
+    .await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on ->pluck() after Model::where() should resolve"
+    );
+
+    let response = result.unwrap();
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("Builder.php"),
+        "pluck should resolve to Builder.php, got: {}",
+        uri.as_str()
+    );
+    // pluck is on the Eloquent Builder — verify it lands on the right file
+    assert!(
+        uri.as_str().contains("Eloquent"),
+        "pluck should resolve to the Eloquent Builder, got: {}",
+        uri.as_str()
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_builder_method_via_variable_on_chained_builder() {
+    // $q = BrandTranslation::where('name', 1); $q->pluck() — GTD on pluck
+    let model_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+class BrandTranslation extends Model {}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/BrandTranslation.php", model_php)]);
+
+    let model_uri =
+        Url::from_file_path(dir.path().join("src/Models/BrandTranslation.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: model_uri,
+                language_id: "php".to_string(),
+                version: 1,
+                text: model_php.to_string(),
+            },
+        })
+        .await;
+
+    let test_php = "\
+<?php
+namespace App\\Models;
+class TestService {
+    public function demo(): void {
+        $q = BrandTranslation::where('name', 1);
+        $q->pluck('brand_id');
+    }
+}
+";
+    // Cursor on "pluck" in `$q->pluck('brand_id');`
+    // Line 5 (0-indexed), "pluck" starts at character 12
+    let result = goto_definition_at(
+        &backend,
+        &dir,
+        "src/Models/TestService.php",
+        test_php,
+        5,
+        14,
+    )
+    .await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $q->pluck() should resolve"
+    );
+
+    let response = result.unwrap();
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("Builder.php"),
+        "pluck should resolve to Builder.php, got: {}",
+        uri.as_str()
+    );
+    assert!(
+        uri.as_str().contains("Eloquent"),
+        "pluck should resolve to the Eloquent Builder, got: {}",
+        uri.as_str()
+    );
+}
+
+// ─── Scope methods on Builder instances (GTD) ───────────────────────────────
+
+#[tokio::test]
+async fn test_goto_definition_scope_on_builder_after_where_chain() {
+    // Brand::where('id', 1)->isActive() — GTD on isActive should jump
+    // to scopeIsActive on the model.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {
+        $query->where('active', true);
+    }
+    public function demo(): void {
+        $q = Brand::where('id', 1);
+        $q->isActive();
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // Cursor on "isActive" in `$q->isActive();`
+    // Line 10 (0-indexed), "isActive" starts at character 12
+    let result =
+        goto_definition_at(&backend, &dir, "src/Models/Brand.php", brand_php, 10, 14).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $q->isActive() should resolve to scopeIsActive"
+    );
+
+    let response = result.unwrap();
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("Brand.php"),
+        "Scope should resolve within Brand.php, got: {}",
+        uri.as_str()
+    );
+
+    let line = definition_line(&response);
+    assert_eq!(
+        line, 5,
+        "scopeIsActive is on line 5 (0-indexed), got: {}",
+        line
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_scope_on_builder_inline_chain() {
+    // Brand::where('id', 1)->isActive() — inline chain, GTD on isActive
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {
+        $query->where('active', true);
+    }
+    public function demo(): void {
+        Brand::where('id', 1)->isActive();
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // Cursor on "isActive" in `Brand::where('id', 1)->isActive();`
+    // Line 9 (0-indexed), "isActive" starts at character 31
+    let result = goto_definition_at(&backend, &dir, "src/Models/Brand.php", brand_php, 9, 33).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on Brand::where()->isActive() should resolve to scopeIsActive"
+    );
+
+    let response = result.unwrap();
+    let line = definition_line(&response);
+    assert_eq!(
+        line, 5,
+        "scopeIsActive is on line 5 (0-indexed), got: {}",
+        line
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_scope_on_builder_with_params() {
+    // $q->ofGenre('fiction') — GTD on ofGenre should jump to scopeOfGenre
+    let author_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class BlogAuthor extends Model {
+    public function scopeOfGenre(Builder $query, string $genre): void {
+        $query->where('genre', $genre);
+    }
+    public function demo(): void {
+        $q = BlogAuthor::where('active', true);
+        $q->ofGenre('fiction');
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/BlogAuthor.php", author_php)]);
+
+    // Cursor on "ofGenre" in `$q->ofGenre('fiction');`
+    // Line 10 (0-indexed), "ofGenre" starts at character 12
+    let result = goto_definition_at(
+        &backend,
+        &dir,
+        "src/Models/BlogAuthor.php",
+        author_php,
+        10,
+        14,
+    )
+    .await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $q->ofGenre() should resolve to scopeOfGenre"
+    );
+
+    let response = result.unwrap();
+    let uri = definition_uri(&response);
+    assert!(
+        uri.as_str().contains("BlogAuthor.php"),
+        "Scope should resolve within BlogAuthor.php, got: {}",
+        uri.as_str()
+    );
+
+    let line = definition_line(&response);
+    assert_eq!(
+        line, 5,
+        "scopeOfGenre is on line 5 (0-indexed), got: {}",
+        line
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_scope_inside_scope_body() {
+    // Inside scopeActive body, $query->verified() — GTD on verified
+    // should jump to scopeVerified.
+    let user_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class User extends Model {
+    public function scopeActive(Builder $query): void {
+        $query->verified();
+    }
+    public function scopeVerified(Builder $query): void {
+        $query->where('verified', true);
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/User.php", user_php)]);
+
+    // Cursor on "verified" in `$query->verified();`
+    // Line 6 (0-indexed), "verified" starts at character 16
+    let result = goto_definition_at(&backend, &dir, "src/Models/User.php", user_php, 6, 18).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on $query->verified() inside scope body should resolve to scopeVerified"
+    );
+
+    let response = result.unwrap();
+    let line = definition_line(&response);
+    assert_eq!(
+        line, 8,
+        "scopeVerified is on line 8 (0-indexed), got: {}",
+        line
+    );
+}
+
+#[tokio::test]
+async fn test_goto_definition_scope_on_builder_after_scope_chain() {
+    // Brand::where('id', 1)->isActive()->ofType('premium') — GTD on
+    // ofType after chaining through another scope.
+    let brand_php = "\
+<?php
+namespace App\\Models;
+use Illuminate\\Database\\Eloquent\\Model;
+use Illuminate\\Database\\Eloquent\\Builder;
+class Brand extends Model {
+    public function scopeIsActive(Builder $query): void {}
+    public function scopeOfType(Builder $query, string $type): void {}
+    public function demo(): void {
+        Brand::where('id', 1)->isActive()->ofType('premium');
+    }
+}
+";
+    let (backend, dir) = make_workspace(&[("src/Models/Brand.php", brand_php)]);
+
+    // Cursor on "ofType" in `->ofType('premium');`
+    // Line 8 (0-indexed), "ofType" starts at character 42
+    let result = goto_definition_at(&backend, &dir, "src/Models/Brand.php", brand_php, 8, 44).await;
+
+    assert!(
+        result.is_some(),
+        "Go-to-definition on ->ofType() after scope chain should resolve to scopeOfType"
+    );
+
+    let response = result.unwrap();
+    let line = definition_line(&response);
+    assert_eq!(
+        line, 6,
+        "scopeOfType is on line 6 (0-indexed), got: {}",
         line
     );
 }

@@ -889,6 +889,19 @@ class EloquentVirtualMemberDemo
         BlogAuthor::whereIn('id', [1, 2])->groupBy('genre')->get();
         // Completion for relations after a query
         BlogAuthor::where('active', 1)->first()->profile->getBio();
+
+        // Scope methods on Builder instances — after chaining through
+        // builder methods, scopes from the model are still available:
+        BlogAuthor::where('active', 1)->active();          // scope on Builder
+        BlogAuthor::where('active', 1)->ofGenre('fiction'); // scope with params
+        BlogAuthor::where('active', 1)->active()->get();   // scope then builder
+        BlogAuthor::where('active', 1)->active()->ofGenre('sci-fi')->get(); // multi-scope chain
+
+        // Scopes also resolve on Builder variables:
+        $q = BlogAuthor::where('genre', 'fiction');
+        $q->active();                     // scope available on $q
+        $q->ofGenre('mystery');           // scope with extra parameter
+        $q->orderBy('name')->get();       // builder methods still work
     }
 }
 
@@ -2693,6 +2706,7 @@ class BlogAuthor extends \Illuminate\Database\Eloquent\Model
     // ── Scopes ──────────────────────────────────────────────────────────────
     public function scopeActive(\Illuminate\Database\Eloquent\Builder $query): void
     {
+        // Try: $query-> offers ofGenre(), where(), orderBy(), etc.
         $query->where('active', true);
     }
 

@@ -154,36 +154,52 @@ impl Backend {
                         match Self::find_declaring_class(lookup_class, &scope_name, &class_loader) {
                             Some((cls, fqn)) => (scope_name.clone(), cls, fqn),
                             None => {
-                                // Try accessor mapping: display_name →
-                                // getDisplayNameAttribute or avatarUrl
-                                let accessor_match = accessor_method_candidates(&effective_name)
-                                    .into_iter()
-                                    .find_map(|candidate| {
-                                        Self::find_declaring_class(
-                                            lookup_class,
-                                            &candidate,
-                                            &class_loader,
-                                        )
-                                        .map(|(cls, fqn)| (candidate, cls, fqn))
-                                    });
-                                match accessor_match {
-                                    Some((name, cls, fqn)) => (name, cls, fqn),
+                                // Try scope-on-Builder: when the target
+                                // is an Eloquent Builder<Model>, look
+                                // for scopeXxx on the model class.
+                                match Self::find_scope_on_builder_model(
+                                    target_class,
+                                    lookup_class,
+                                    &effective_name,
+                                    &class_loader,
+                                ) {
+                                    Some((cls, fqn, sname)) => (sname, cls, fqn),
                                     None => {
-                                        // Try builder-forwarded method: Laravel's
-                                        // Model::__callStatic delegates to Builder.
-                                        // The real Model has no @mixin, so we check
-                                        // explicitly.
-                                        match Self::find_builder_forwarded_method(
-                                            lookup_class,
-                                            &effective_name,
-                                            &class_loader,
-                                        ) {
-                                            Some((cls, fqn)) => (effective_name.clone(), cls, fqn),
-                                            None => (
-                                                effective_name.clone(),
-                                                target_class.clone(),
-                                                target_class.name.clone(),
-                                            ),
+                                        // Try accessor mapping: display_name →
+                                        // getDisplayNameAttribute or avatarUrl
+                                        let accessor_match =
+                                            accessor_method_candidates(&effective_name)
+                                                .into_iter()
+                                                .find_map(|candidate| {
+                                                    Self::find_declaring_class(
+                                                        lookup_class,
+                                                        &candidate,
+                                                        &class_loader,
+                                                    )
+                                                    .map(|(cls, fqn)| (candidate, cls, fqn))
+                                                });
+                                        match accessor_match {
+                                            Some((name, cls, fqn)) => (name, cls, fqn),
+                                            None => {
+                                                // Try builder-forwarded method: Laravel's
+                                                // Model::__callStatic delegates to Builder.
+                                                // The real Model has no @mixin, so we check
+                                                // explicitly.
+                                                match Self::find_builder_forwarded_method(
+                                                    lookup_class,
+                                                    &effective_name,
+                                                    &class_loader,
+                                                ) {
+                                                    Some((cls, fqn)) => {
+                                                        (effective_name.clone(), cls, fqn)
+                                                    }
+                                                    None => (
+                                                        effective_name.clone(),
+                                                        target_class.clone(),
+                                                        target_class.name.clone(),
+                                                    ),
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -275,52 +291,72 @@ impl Backend {
                     match Self::find_declaring_class(fallback_class, &scope_name, &class_loader) {
                         Some((cls, fqn)) => (scope_name, cls, fqn),
                         None => {
-                            // Try accessor mapping in the fallback path.
-                            let accessor_match = accessor_method_candidates(&effective_name)
-                                .into_iter()
-                                .find_map(|candidate| {
-                                    Self::find_declaring_class(
-                                        fallback_class,
-                                        &candidate,
-                                        &class_loader,
-                                    )
-                                    .map(|(cls, fqn)| (candidate, cls, fqn))
-                                });
-                            match accessor_match {
-                                Some((name, cls, fqn)) => (name, cls, fqn),
+                            // Try scope-on-Builder in the fallback path.
+                            match Self::find_scope_on_builder_model(
+                                target_class,
+                                fallback_class,
+                                &effective_name,
+                                &class_loader,
+                            ) {
+                                Some((cls, fqn, sname)) => (sname, cls, fqn),
                                 None => {
-                                    match Self::find_builder_forwarded_method(
-                                        fallback_class,
-                                        &effective_name,
-                                        &class_loader,
-                                    ) {
-                                        Some((cls, fqn)) => (effective_name.clone(), cls, fqn),
+                                    // Try accessor mapping in the fallback path.
+                                    let accessor_match =
+                                        accessor_method_candidates(&effective_name)
+                                            .into_iter()
+                                            .find_map(|candidate| {
+                                                Self::find_declaring_class(
+                                                    fallback_class,
+                                                    &candidate,
+                                                    &class_loader,
+                                                )
+                                                .map(|(cls, fqn)| (candidate, cls, fqn))
+                                            });
+                                    match accessor_match {
+                                        Some((name, cls, fqn)) => (name, cls, fqn),
                                         None => {
-                                            // Last resort: Eloquent array entry.
-                                            if extends_eloquent_model(fallback_class, &class_loader)
-                                            {
-                                                let fqn = fallback_class.name.clone();
-                                                if let Some((class_uri, class_content)) =
-                                                    self.find_class_file_content(&fqn, uri, content)
-                                                    && let Some(entry_position) =
-                                                        Self::find_eloquent_array_entry(
-                                                            &class_content,
-                                                            &effective_name,
-                                                            Some((
-                                                                fallback_class.start_offset
-                                                                    as usize,
-                                                                fallback_class.end_offset as usize,
-                                                            )),
-                                                        )
-                                                    && let Ok(parsed_uri) = Url::parse(&class_uri)
-                                                {
-                                                    return Some(point_location(
-                                                        parsed_uri,
-                                                        entry_position,
-                                                    ));
+                                            match Self::find_builder_forwarded_method(
+                                                fallback_class,
+                                                &effective_name,
+                                                &class_loader,
+                                            ) {
+                                                Some((cls, fqn)) => {
+                                                    (effective_name.clone(), cls, fqn)
+                                                }
+                                                None => {
+                                                    // Last resort: Eloquent array entry.
+                                                    if extends_eloquent_model(
+                                                        fallback_class,
+                                                        &class_loader,
+                                                    ) {
+                                                        let fqn = fallback_class.name.clone();
+                                                        if let Some((class_uri, class_content)) =
+                                                            self.find_class_file_content(
+                                                                &fqn, uri, content,
+                                                            )
+                                                            && let Some(entry_position) =
+                                                                Self::find_eloquent_array_entry(
+                                                                    &class_content,
+                                                                    &effective_name,
+                                                                    Some((
+                                                                        fallback_class.start_offset
+                                                                            as usize,
+                                                                        fallback_class.end_offset
+                                                                            as usize,
+                                                                    )),
+                                                                )
+                                                            && let Ok(parsed_uri) =
+                                                                Url::parse(&class_uri)
+                                                        {
+                                                            return Some(point_location(
+                                                                parsed_uri,
+                                                                entry_position,
+                                                            ));
+                                                        }
+                                                    }
+                                                    return None;
                                                 }
                                             }
-                                            return None;
                                         }
                                     }
                                 }
@@ -744,6 +780,65 @@ impl Backend {
         }
     }
 
+    /// Find a scope method's declaration on the model when the target
+    /// class is an Eloquent Builder instance.
+    ///
+    /// When a variable resolves to `Builder<User>`, completion injects
+    /// the model's scope methods onto the Builder.  For go-to-definition,
+    /// we need to trace back to the `scopeXxx` method on the model.
+    ///
+    /// `resolved_candidate` is the fully-resolved Builder (with scope
+    /// methods injected by `type_hint_to_classes_depth`).  We use it to
+    /// confirm the member exists and to extract the model name from the
+    /// scope method's return type.
+    ///
+    /// Returns `Some((declaring_class, fqn, scope_method_name))` when
+    /// the scope is found on the model, or `None` otherwise.
+    fn find_scope_on_builder_model(
+        resolved_candidate: &ClassInfo,
+        raw_class: &ClassInfo,
+        member_name: &str,
+        class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    ) -> Option<(ClassInfo, String, String)> {
+        // Only applies to the Eloquent Builder class.
+        let raw_fqn = match &raw_class.file_namespace {
+            Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, raw_class.name),
+            _ => raw_class.name.clone(),
+        };
+        let raw_clean = raw_fqn.strip_prefix('\\').unwrap_or(&raw_fqn);
+        if raw_clean != ELOQUENT_BUILDER_FQN {
+            return None;
+        }
+
+        // Check if the resolved (scope-injected) candidate has this
+        // method.  If not, the member is not a scope.
+        let scope_method = resolved_candidate
+            .methods
+            .iter()
+            .find(|m| m.name == member_name && !m.is_static)?;
+
+        // Extract the model name from the scope method's return type.
+        // The return type is typically
+        // `\Illuminate\Database\Eloquent\Builder<App\Models\User>`.
+        let ret = scope_method.return_type.as_deref()?;
+        let model_name = crate::docblock::types::parse_generic_args(ret)
+            .1
+            .into_iter()
+            .next()
+            .map(|s| s.strip_prefix('\\').unwrap_or(s).to_string())?;
+
+        // Load the model and verify it extends Eloquent Model.
+        let model = class_loader(&model_name)?;
+        if !extends_eloquent_model(&model, class_loader) {
+            return None;
+        }
+
+        // Look for `scopeXxx` on the model's inheritance chain.
+        let scope_name = Self::scope_method_name(member_name);
+        let (declaring, fqn) = Self::find_declaring_class(&model, &scope_name, class_loader)?;
+        Some((declaring, fqn, scope_name))
+    }
+
     fn resolve_trait_alias(class: &ClassInfo, member_name: &str) -> (String, Option<String>) {
         for alias in &class.trait_aliases {
             if alias.alias.as_deref() == Some(member_name) {
@@ -760,7 +855,10 @@ impl Backend {
     /// the member cannot be found in any ancestor.  The `fqn` is the name
     /// that was passed to `class_loader` to obtain the `ClassInfo`, which is
     /// a fully-qualified name for parents and traits.  For the class itself
-    /// (when the member is declared directly), the short name is returned.
+    /// (when the member is declared directly), the FQN is reconstructed
+    /// from `file_namespace` + `name` when a namespace is available so
+    /// that `find_class_file_content` can disambiguate classes that share
+    /// the same short name (e.g. `Eloquent\Builder` vs `Query\Builder`).
     fn find_declaring_class(
         class: &ClassInfo,
         member_name: &str,
@@ -768,7 +866,11 @@ impl Backend {
     ) -> Option<(ClassInfo, String)> {
         // Check if this class directly declares the member.
         if Self::classify_member(class, member_name, MemberAccessHint::Unknown).is_some() {
-            return Some((class.clone(), class.name.clone()));
+            let fqn = match &class.file_namespace {
+                Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, class.name),
+                _ => class.name.clone(),
+            };
+            return Some((class.clone(), fqn));
         }
 
         // Check traits used by this class.

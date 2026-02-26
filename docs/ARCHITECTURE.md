@@ -259,7 +259,7 @@ Provider priority order (highest first):
 
 Two providers are currently registered in `default_providers()`:
 
-- **`LaravelModelProvider`** (`virtual_members/laravel.rs`): synthesizes virtual members for classes extending `Illuminate\Database\Eloquent\Model`. Produces relationship properties (methods returning `HasMany`, `HasOne`, `BelongsTo`, etc. generate a virtual property typed from the relationship's generic parameters), scope methods (`scopeActive` becomes `active()` as both static and instance), Builder-as-static forwarding (`User::where()->get()` resolves end-to-end), accessors (legacy `getXAttribute()` and modern `Attribute` casts), and cast properties (`$casts` array or `casts()` method entries are mapped to PHP types like `datetime` to `\Carbon\Carbon`, `boolean` to `bool`, custom cast classes to their `get()` return type). Highest priority among virtual member providers.
+- **`LaravelModelProvider`** (`virtual_members/laravel.rs`): synthesizes virtual members for classes extending `Illuminate\Database\Eloquent\Model`. Produces relationship properties (methods returning `HasMany`, `HasOne`, `BelongsTo`, etc. generate a virtual property typed from the relationship's generic parameters), scope methods (`scopeActive` becomes `active()` as both static and instance), Builder-as-static forwarding (`User::where()->get()` resolves end-to-end), accessors (legacy `getXAttribute()` and modern `Attribute` casts), and cast properties (`$casts` array or `casts()` method entries are mapped to PHP types like `datetime` to `\Carbon\Carbon`, `boolean` to `bool`, custom cast classes to their `get()` return type). Highest priority among virtual member providers. Scope methods are also injected onto `Builder<Model>` instances via a post-generic-substitution hook in `type_hint_to_classes_depth` (see "Scope Methods on Builder Instances" below).
 - **`PHPDocProvider`** (`virtual_members/phpdoc.rs`): parses `@method`, `@property`, `@property-read`, `@property-write`, and `@mixin` tags from the class-level docblock stored in `ClassInfo.class_docblock`. Explicit `@method` / `@property` tags are not parsed eagerly during AST extraction; instead, the raw docblock string is preserved and parsed lazily when `provide` is called. For `@mixin` tags, the provider loads the referenced classes and merges their public members. Within the provider, explicit tags take precedence over mixin members. Recurses into mixin-of-mixin chains up to `MAX_MIXIN_DEPTH`.
 
 ### Precedence Rules
@@ -269,6 +269,18 @@ Two providers are currently registered in `default_providers()`:
 - **Parent members** fill in anything not already present.
 - **Virtual members** from providers sit below all real declared members (own, trait, parent). Higher-priority providers shadow lower-priority ones. Within the PHPDoc provider, `@method` / `@property` tags beat `@mixin` members.
 - **Private members** are never inherited from parents (but trait private members are copied, matching PHP semantics).
+
+### Scope Methods on Builder Instances
+
+Scope methods are synthesized on the Model class by `LaravelModelProvider`, but they also need to be available on `Builder<Model>` instances (e.g. `Brand::where('id', $id)->isActive()`). This cannot be handled by a virtual member provider alone because providers run before generic argument substitution, so the provider would not know the concrete model type.
+
+Instead, scope injection happens in three places:
+
+1. **Post-generic-substitution hook** (`completion/resolver.rs`, inside `type_hint_to_classes_depth`): after `resolve_class_fully` + `apply_generic_args` produces a `Builder<User>` class, the resolver detects that the result is an Eloquent Builder with a concrete model generic argument. It calls `build_scope_methods_for_builder(model_name, class_loader)` which loads the model, fully resolves it, extracts scope methods, and returns them as instance methods with `static` in return types substituted to the concrete model name. These are merged onto the Builder's method list, giving `$q->active()` after `$q = User::where(...)`.
+
+2. **Scope body Builder enrichment** (`completion/variable_resolution.rs`, `enrich_builder_type_in_scope`): inside a scope method body, the `$query` parameter is typically typed as `Builder` without generic arguments. The enrichment function detects when the enclosing method is a scope (name starts with `scope`, length > 5) on a class that extends Eloquent Model, and the parameter type is `Builder` without generics. It rewrites the type to `Builder<EnclosingModel>`, which then flows through the generic-args path and triggers the post-substitution hook above. This makes `$query->otherScope()` resolve inside scope bodies.
+
+3. **Go-to-definition fallback** (`definition/member.rs`, `find_scope_on_builder_model`): when go-to-definition resolves a member on a Builder class and the normal lookup chain (own members, traits, parents, mixins, builder forwarding) fails, this fallback checks whether the member is a scope method injected from the model. It confirms the resolved candidate (with injected scopes) has the method, extracts the model name from the scope method's return type generic argument, loads the model, and finds the `scopeXxx` declaration through the model's inheritance chain. This bridges the gap between completion (which works on the merged ClassInfo) and GTD (which traces back to the declaring source file).
 
 ### Interface Inheritance in Traits/Used Interfaces
 
