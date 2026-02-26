@@ -176,6 +176,16 @@ impl Backend {
                         return Self::resolve_class_string_in_members(enum_def.members.iter(), ctx);
                     }
                 }
+                Statement::Trait(trait_def) => {
+                    let start = trait_def.left_brace.start.offset;
+                    let end = trait_def.right_brace.end.offset;
+                    if ctx.cursor_offset >= start && ctx.cursor_offset <= end {
+                        return Self::resolve_class_string_in_members(
+                            trait_def.members.iter(),
+                            ctx,
+                        );
+                    }
+                }
                 Statement::Namespace(ns) => {
                     let results =
                         Self::resolve_class_string_in_statements(ns.statements().iter(), ctx);
@@ -364,6 +374,14 @@ impl Backend {
                         continue;
                     }
                     return Self::resolve_variable_in_members(enum_def.members.iter(), ctx);
+                }
+                Statement::Trait(trait_def) => {
+                    let start = trait_def.left_brace.start.offset;
+                    let end = trait_def.right_brace.end.offset;
+                    if ctx.cursor_offset < start || ctx.cursor_offset > end {
+                        continue;
+                    }
+                    return Self::resolve_variable_in_members(trait_def.members.iter(), ctx);
                 }
                 Statement::Namespace(ns) => {
                     let results = Self::resolve_variable_in_statements(ns.statements().iter(), ctx);

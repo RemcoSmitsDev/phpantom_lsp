@@ -3622,3 +3622,331 @@ class FeatureTest extends TestCase {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+// ─── Variable type resolution inside trait method bodies ────────────────────
+
+/// Variables assigned inside a trait method body should resolve their type.
+/// Previously, `resolve_variable_in_statements` did not handle
+/// `Statement::Trait`, so `$var = new ClassName()` inside a trait method
+/// produced no completions on `$var->`.
+#[tokio::test]
+async fn test_variable_resolution_inside_trait_method() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///trait_var.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Customer {\n",
+        "    public function getName(): string { return ''; }\n",
+        "    public function getEmail(): string { return ''; }\n",
+        "}\n",
+        "trait IsAuditableTrait {\n",
+        "    public function transformAudit(): array {\n",
+        "        $user = new Customer();\n",
+        "        $user->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                // "$user->" at line 8, character 15
+                position: Position {
+                    line: 8,
+                    character: 15,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    match result {
+        Some(CompletionResponse::Array(items))
+        | Some(CompletionResponse::List(CompletionList { items, .. })) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getName"),
+                "Variable inside trait method should resolve to Customer with getName(), got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getEmail"),
+                "Variable inside trait method should resolve to Customer with getEmail(), got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected completion results for $user-> inside trait method"),
+    }
+}
+
+/// Variables assigned from method calls inside trait bodies should also resolve.
+#[tokio::test]
+async fn test_variable_from_method_call_inside_trait() {
+    let (backend, dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\": "src/" } } }"#,
+        &[
+            (
+                "src/Order.php",
+                "<?php\nnamespace App;\nclass Order {\n    public function getTotal(): float { return 0.0; }\n}\n",
+            ),
+            (
+                "src/OrderService.php",
+                "<?php\nnamespace App;\nclass OrderService {\n    public function findOrder(): Order { return new Order(); }\n}\n",
+            ),
+            (
+                "src/AuditTrait.php",
+                concat!(
+                    "<?php\n",
+                    "namespace App;\n",
+                    "trait AuditTrait {\n",
+                    "    public function audit(): void {\n",
+                    "        $svc = new OrderService();\n",
+                    "        $order = $svc->findOrder();\n",
+                    "        $order->\n",
+                    "    }\n",
+                    "}\n",
+                ),
+            ),
+        ],
+    );
+
+    let trait_content = concat!(
+        "<?php\n",
+        "namespace App;\n",
+        "trait AuditTrait {\n",
+        "    public function audit(): void {\n",
+        "        $svc = new OrderService();\n",
+        "        $order = $svc->findOrder();\n",
+        "        $order->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let uri = Url::from_file_path(dir.path().join("src/AuditTrait.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: trait_content.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                // "$order->" at line 6, character 16
+                position: Position {
+                    line: 6,
+                    character: 16,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    match result {
+        Some(CompletionResponse::Array(items))
+        | Some(CompletionResponse::List(CompletionList { items, .. })) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getTotal"),
+                "Chained variable inside trait should resolve to Order with getTotal(), got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected completion results for $order-> inside trait method"),
+    }
+}
+
+/// Parameter type hints inside trait methods should resolve for completion.
+#[tokio::test]
+async fn test_parameter_type_hint_inside_trait_method() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///trait_param.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Request {\n",
+        "    public function getMethod(): string { return ''; }\n",
+        "    public function getPath(): string { return ''; }\n",
+        "}\n",
+        "trait HandlesRequests {\n",
+        "    public function handle(Request $req): void {\n",
+        "        $req->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                // "$req->" at line 7, character 14
+                position: Position {
+                    line: 7,
+                    character: 14,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    match result {
+        Some(CompletionResponse::Array(items))
+        | Some(CompletionResponse::List(CompletionList { items, .. })) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getMethod"),
+                "Parameter type hint inside trait method should resolve, got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getPath"),
+                "Parameter type hint inside trait method should resolve, got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected completion results for $req-> inside trait method"),
+    }
+}
+
+// ─── Cross-file variable resolution inside trait method bodies ──────────────
+
+/// When a trait is in its own file with a `use` import for a class defined
+/// in another file, `$var = new ClassName(); $var->` should resolve.
+/// This reproduces the real-world bug where variable resolution inside
+/// traits failed in cross-file PSR-4 workspaces even though it worked
+/// for classes.
+#[tokio::test]
+async fn test_cross_file_variable_resolution_inside_trait_method() {
+    let customer_php = "\
+<?php
+namespace App\\Models;
+class Customer {
+    public function getName(): string { return ''; }
+    public function getEmail(): string { return ''; }
+}
+";
+    let trait_php = "\
+<?php
+namespace App\\Traits;
+use App\\Models\\Customer;
+trait IsAuditableTrait {
+    public function transformAudit(): array {
+        $user = new Customer();
+        $user->
+    }
+}
+";
+    let (backend, dir) = create_psr4_workspace(
+        r#"{ "autoload": { "psr-4": { "App\\Models\\": "src/Models/", "App\\Traits\\": "src/Traits/" } } }"#,
+        &[
+            ("src/Models/Customer.php", customer_php),
+            ("src/Traits/IsAuditableTrait.php", trait_php),
+        ],
+    );
+
+    let uri = Url::from_file_path(dir.path().join("src/Traits/IsAuditableTrait.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: trait_php.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                // "$user->" at line 6, character 15
+                position: Position {
+                    line: 6,
+                    character: 15,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    match result {
+        Some(CompletionResponse::Array(items))
+        | Some(CompletionResponse::List(CompletionList { items, .. })) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"getName"),
+                "Cross-file variable inside trait should resolve Customer with getName(), got: {:?}",
+                method_names
+            );
+            assert!(
+                method_names.contains(&"getEmail"),
+                "Cross-file variable inside trait should resolve Customer with getEmail(), got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected completion results for $user-> inside cross-file trait method"),
+    }
+}
