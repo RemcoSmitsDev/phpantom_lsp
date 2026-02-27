@@ -161,6 +161,7 @@ async fn test_goto_definition_union_return_type_standalone_function() {
                 uri.to_string(),
                 phpantom_lsp::FunctionInfo {
                     name: "getAnimal".to_string(),
+                    name_offset: 0,
                     parameters: vec![],
                     return_type: Some("Dog|Cat".to_string()),
                     namespace: None,

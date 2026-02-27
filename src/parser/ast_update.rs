@@ -2,14 +2,15 @@
 ///
 /// This module contains the `update_ast` method that performs a full
 /// parse of a PHP file and updates all the backend maps (ast_map,
-/// use_map, namespace_map, global_functions, global_defines, class_index)
-/// in a single pass.  It also contains the name resolution helpers
-/// (`resolve_parent_class_names`, `resolve_name`) used to convert short
-/// class names to fully-qualified names.
+/// use_map, namespace_map, global_functions, global_defines, class_index,
+/// symbol_maps) in a single pass.  It also contains the name resolution
+/// helpers (`resolve_parent_class_names`, `resolve_name`) used to convert
+/// short class names to fully-qualified names.
 use std::collections::HashMap;
 use std::panic;
 
 use crate::docblock::types::is_scalar;
+use crate::symbol_map::extract_symbol_map;
 
 use bumpalo::Bump;
 
@@ -302,8 +303,15 @@ impl Backend {
             }
         }
 
+        // Build the precomputed symbol map while the AST is still alive.
+        // This must happen before the `Program` (and its arena) are dropped.
+        let symbol_map = extract_symbol_map(program, content);
+
         if let Ok(mut map) = self.ast_map.lock() {
             map.insert(uri_string.clone(), classes);
+        }
+        if let Ok(mut map) = self.symbol_maps.lock() {
+            map.insert(uri_string.clone(), symbol_map);
         }
         if let Ok(mut map) = self.use_map.lock() {
             map.insert(uri_string.clone(), use_map);

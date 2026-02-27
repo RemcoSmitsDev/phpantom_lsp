@@ -1,6 +1,6 @@
 # PHPantom — Remaining Work
 
-> Last updated: 2026-02-22
+> Last updated: 2026-02-27
 
 Items are ordered by recommended implementation sequence: quick wins
 first, then high-impact items, then competitive-parity features, then
@@ -286,21 +286,45 @@ No outline view. Editors can't show a file's class/method/property structure.
 ### 9. Find References (`textDocument/references`)
 **Priority: Medium**
 
-Can't find all usages of a symbol.
+Can't find all usages of a symbol. The precomputed `SymbolMap` (built
+during `update_ast` for every open file) already records every navigable
+symbol occurrence with byte offsets and a typed `SymbolKind` — class
+references, member accesses, variables, function calls, etc. This is
+exactly the index a find-references implementation needs for the current
+file. The main work is cross-file scanning: iterating `ast_map` entries
+(and lazily parsing uncached files) to collect matching symbol spans
+across the project.
+
+The `SymbolMap` also stores variable definition sites (`var_defs`) with
+scope boundaries, which directly supports "find all references to this
+variable within its scope" without re-parsing.
 
 ---
 
 ### 10. Rename (`textDocument/rename`)
 **Priority: Low**
 
-No rename refactoring support.
+No rename refactoring support. Rename builds on find-references (§9) —
+once all occurrences of a symbol are known, the rename handler produces
+a `WorkspaceEdit` replacing each occurrence. The `SymbolMap`'s byte
+ranges translate directly to LSP `Range`s via `offset_to_position`,
+which makes generating the text edits straightforward.
+
+For member renames, the stored `name_offset` on `MethodInfo`,
+`PropertyInfo`, and `ConstantInfo` provides the declaration-site edit
+position without text scanning.
 
 ---
 
 ### 11. Workspace Symbols (`workspace/symbol`)
 **Priority: Low**
 
-Can't search for classes/functions across the project.
+Can't search for classes/functions across the project. The `ast_map`
+already contains `ClassInfo` records (with `keyword_offset`) and
+`global_functions` contains `FunctionInfo` records (with `name_offset`)
+for every parsed file. A workspace symbol handler would iterate these
+maps, filter by the query string, and convert stored byte offsets to
+LSP `Location`s.
 
 ---
 
@@ -342,6 +366,39 @@ new function. The LSP would need to:
 | Document Symbols (§8) | AST range → symbol mapping — needed to find enclosing function and valid insertion points |
 | Find References (§9) | Variable usage tracking across a scope — the same "which variables are used where" analysis |
 | Simple code actions (add use stmt, implement interface) | Builds the code action + `WorkspaceEdit` plumbing |
+
+---
+
+## Infrastructure Cleanup
+
+### Remove deprecated text-search fallbacks
+
+The go-to-definition subsystem now uses the precomputed `SymbolMap` as
+its primary path and stored byte offsets (`name_offset`, `keyword_offset`)
+for cross-file jumps. The original line-by-line text scanners are marked
+`#[deprecated]` and retained only as fallbacks for:
+
+- Stubs and synthetic members where `name_offset == 0`
+- Files where the parser panicked and no symbol map exists
+- The go-to-implementation subsystem (not yet migrated)
+
+Once the AST-based paths have been stable for a release cycle, these
+deprecated functions can be removed:
+
+| Function | File | Replacement |
+|---|---|---|
+| `find_definition_position` | `definition/resolve.rs` | `ClassInfo::keyword_offset` + `offset_to_position` |
+| `find_function_position` | `definition/resolve.rs` | `FunctionInfo::name_offset` + `offset_to_position` |
+| `find_define_position` | `definition/resolve.rs` | Store `define()` offset during parsing |
+| `extract_word_at_position` | `definition/resolve.rs` | `SymbolMap::lookup` |
+| `resolve_variable_definition_text` | `definition/variable.rs` | `SymbolMap::find_var_definition` + AST walk |
+| `line_defines_variable` | `definition/variable.rs` | (only used by `resolve_variable_definition_text`) |
+| `find_member_position_in_range` text path | `definition/member.rs` | `name_offset` + `offset_to_position` |
+
+The go-to-implementation subsystem (`resolve_implementation` in
+`definition/implementation.rs`) still uses `extract_word_at_position`
+for cursor context detection. Migrating it to use `SymbolMap::lookup`
+would let that deprecated function be removed entirely.
 
 ---
 

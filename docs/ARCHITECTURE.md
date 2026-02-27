@@ -8,8 +8,9 @@ PHPantom is a language server that provides completion and go-to-definition for 
 
 1. **Parsing** PHP files into lightweight `ClassInfo` / `FunctionInfo` structures (not a full AST — just the information needed for IDE features).
 2. **Caching** parsed results in an in-memory `ast_map` keyed by file URI.
-3. **Resolving** symbols on demand through a multi-phase lookup chain.
-4. **Merging** inherited members (from parent classes, traits, interfaces, and mixins) at resolution time.
+3. **Building** a precomputed symbol map (`symbol_maps`) during parsing for O(log n) go-to-definition lookups.
+4. **Resolving** symbols on demand through a multi-phase lookup chain.
+5. **Merging** inherited members (from parent classes, traits, interfaces, and mixins) at resolution time.
 
 ## Module Layout
 
@@ -23,8 +24,10 @@ src/
 ├── stubs.rs                # Embedded phpstorm-stubs (build-time generated index)
 ├── resolution.rs           # Multi-phase class/function lookup and name resolution
 ├── inheritance.rs          # Base class inheritance merging (traits, parent chain)
+├── symbol_map.rs           # Precomputed per-file symbol location map (SymbolSpan, VarDefSite, SymbolMap)
 ├── virtual_members/
 │   ├── mod.rs              # VirtualMemberProvider trait, VirtualMembers struct, merge logic
+│   ├── laravel.rs          # LaravelModelProvider (relationships, scopes, casts, accessors)
 │   └── phpdoc.rs           # PHPDocProvider (@method, @property, @property-read, @property-write, @mixin)
 ├── subject_extraction.rs   # Shared helpers for extracting subjects before ->, ?->, ::
 ├── util.rs                 # Position conversion, class lookup, logging
@@ -66,9 +69,9 @@ src/
 │   └── use_edit.rs         # Use-statement insertion helpers
 ├── definition/
 │   ├── mod.rs              # Submodule declarations
-│   ├── resolve.rs          # Core go-to-definition resolution (classes, functions)
-│   ├── member.rs           # Member-access resolution (->method, ::$prop, ::CONST)
-│   ├── variable.rs         # Variable definition resolution ($var jump-to-definition)
+│   ├── resolve.rs          # Core go-to-definition: symbol-map dispatch + text-based fallback
+│   ├── member.rs           # Member-access resolution (->method, ::$prop, ::CONST) with stored offsets
+│   ├── variable.rs         # Variable definition resolution (symbol-map → AST walk → text fallback)
 │   └── implementation.rs   # Go-to-implementation (interface/abstract → concrete classes)
 build.rs                    # Parses PhpStormStubsMap.php, generates stub index
 stubs/                      # Composer vendor dir for jetbrains/phpstorm-stubs
@@ -82,6 +85,60 @@ tests/
 ├── composer.rs             # Composer integration tests
 └── …
 ```
+
+## Go-to-Definition Architecture
+
+The definition subsystem uses a **three-tier** approach, from fastest to slowest:
+
+### Tier 1: Precomputed Symbol Map (primary)
+
+During `update_ast`, every navigable symbol occurrence in a file is recorded as a `SymbolSpan` in a sorted vec stored in `symbol_maps` (keyed by file URI). Each span records the byte range and a `SymbolKind` variant:
+
+| `SymbolKind` | What it captures |
+|---|---|
+| `ClassReference` | Class/interface/trait/enum names in type contexts (`new Foo`, `extends`, `implements`, type hints, catch, docblock types) |
+| `ClassDeclaration` | Class name at its declaration site (cursor already at definition) |
+| `MemberAccess` | `->`, `?->`, `::` member names with the subject text and static/method-call flags |
+| `Variable` | `$variable` tokens (both usage and definition sites) |
+| `FunctionCall` | Standalone function call names |
+| `SelfStaticParent` | `self`, `static`, `parent` keywords in navigable contexts |
+| `ConstantReference` | Constant names (reserved for future use) |
+
+When a go-to-definition request arrives, `resolve_definition` converts the cursor position to a byte offset and does a binary search on the symbol map. If a `SymbolSpan` is found, it dispatches directly to the appropriate resolution path — no text scanning needed. If the offset falls in a gap (whitespace, string interior, comment interior, etc.), the request is instantly rejected.
+
+Docblock type references (`@param`, `@return`, `@var`, `@template`, `@method`, etc.) are extracted by a dedicated string scanner during the AST walk, since docblocks are trivia in the `mago_syntax` AST and produce no expression/statement nodes. These use the same `ClassReference` kind and resolution path as code type hints.
+
+The symbol map also stores:
+
+- **Variable definition sites** (`var_defs`): records every assignment, parameter, foreach binding, catch variable, static/global declaration, and destructuring site with its byte offset, scope boundary, and `effective_from` offset (for assignments, this is the end of the statement so the RHS sees the previous definition). Go-to-definition for `$var` finds the most recent definition before the cursor within the enclosing scope via binary search.
+- **Scope boundaries** (`scopes`): function, method, closure, and arrow function body ranges. Used by `find_enclosing_scope` to determine which scope the cursor is in.
+- **Template parameter definitions** (`template_defs`): `@template` tag locations so that template parameter names (e.g. `TKey`, `TModel`) that appear in docblock types can be resolved to their declaration site.
+
+### Tier 2: Stored Byte Offsets (cross-file jumps)
+
+`MethodInfo`, `PropertyInfo`, `ConstantInfo`, and `FunctionInfo` each carry a `name_offset: u32` field recording the byte offset of the member's name token in the source file. `ClassInfo` carries `keyword_offset: u32` for the `class`/`interface`/`trait`/`enum` keyword. These are populated during parsing.
+
+When a cross-file jump lands on a class or member, `find_member_position` and `find_definition_position` convert the stored offset directly to an LSP `Position` via `offset_to_position` — no line-by-line text scanning needed.
+
+A value of `0` means "not available" (stubs parsed before offsets were stored, synthetic/virtual members). In that case, the system falls back to Tier 3.
+
+### Tier 3: Text-Based Fallback (deprecated)
+
+The original line-by-line text scanners (`extract_word_at_position`, `find_member_position_in_range` text search, `line_defines_variable`, `find_definition_position`, `find_function_position`) are retained as fallbacks for:
+
+- Stubs and synthetic members where `name_offset == 0`
+- Files where the parser panicked (malformed PHP) and no symbol map exists
+- The go-to-implementation subsystem (not yet migrated to the symbol map)
+
+These functions are marked `#[deprecated]` with phase notes. They will be removed once the AST-based paths have been stable for a release cycle.
+
+### Variable Definition Resolution
+
+Variable go-to-definition (`$var` → jump to definition) uses three layers:
+
+1. **Symbol map** (`var_defs`): the primary path. Finds the most recent `VarDefSite` before the cursor within the enclosing scope. When the cursor is physically on a definition token (parameter, foreach binding, catch variable), it returns `None` so the caller can fall through to type-hint resolution.
+2. **AST-based search** (`resolve_variable_definition_ast`): parses the file and walks the enclosing scope to find the definition site. Handles destructuring (`[$a, $b] = ...`, `list($a, $b) = ...`) and nested scopes correctly. Used as a fallback when the symbol map doesn't have a match.
+3. **Text-based search** (`resolve_variable_definition_text`): the original heuristic line scanner. Only activated when the AST parse fails.
 
 ## Symbol Resolution: `find_or_load_class`
 
@@ -524,6 +581,12 @@ When a class is not loaded and not a stub (typically a classmap or class_index e
 - Names starting with `Abstract` are demoted in `New`.
 
 Demotion means a worse sort prefix (`9_` instead of the source's normal prefix), pushing the item to the bottom of the list. The item is never removed, because naming conventions are not reliable enough to exclude candidates entirely.
+
+## Memory Overhead
+
+The `symbol_maps` store is keyed by file URI, matching `ast_map`. A typical PHP file has 100–400 navigable symbol tokens. Each `SymbolSpan` is ~50–100 bytes (two `u32` fields plus the `SymbolKind` enum with a `String` or two), totalling ~20–40 KB per open file. Variable definition sites add ~1–3 KB. For comparison, `open_files` already stores the full file content (often 50–200 KB per file), so the symbol map is a small fraction of existing memory use.
+
+Files that are not open (vendor files loaded via PSR-4 on demand) do not get a symbol map — they use the stored byte offsets from Tier 2 (which live on `ClassInfo` / `MethodInfo` / etc. in `ast_map`).
 
 ## Name Resolution
 

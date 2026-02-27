@@ -71,6 +71,7 @@ fn register_namespaced_function(
                 uri.to_string(),
                 FunctionInfo {
                     name: name.to_string(),
+                    name_offset: 0,
                     parameters: vec![],
                     return_type: Some("mixed".to_string()),
                     namespace: Some(namespace.to_string()),
@@ -92,6 +93,7 @@ fn register_global_function(backend: &phpantom_lsp::Backend, name: &str, uri: &s
                 uri.to_string(),
                 FunctionInfo {
                     name: name.to_string(),
+                    name_offset: 0,
                     parameters: vec![],
                     return_type: Some("string".to_string()),
                     namespace: None,
@@ -828,6 +830,7 @@ async fn test_use_function_namespaced_detail_shows_signature() {
                 "file:///helpers.php".to_string(),
                 FunctionInfo {
                     name: "enum_value".to_string(),
+                    name_offset: 0,
                     parameters: vec![phpantom_lsp::types::ParameterInfo {
                         name: "$value".to_string(),
                         is_required: true,
@@ -917,6 +920,7 @@ async fn test_deprecated_namespaced_function() {
                 "file:///legacy.php".to_string(),
                 FunctionInfo {
                     name: "old_helper".to_string(),
+                    name_offset: 0,
                     parameters: vec![],
                     return_type: None,
                     namespace: Some("Legacy".to_string()),

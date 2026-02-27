@@ -460,6 +460,7 @@ fn build_factory_model_methods(
     vec![
         MethodInfo {
             name: "create".to_string(),
+            name_offset: 0,
             parameters: Vec::new(),
             return_type: Some(model_type.clone()),
             is_static: false,
@@ -471,6 +472,7 @@ fn build_factory_model_methods(
         },
         MethodInfo {
             name: "make".to_string(),
+            name_offset: 0,
             parameters: Vec::new(),
             return_type: Some(model_type),
             is_static: false,
@@ -900,6 +902,7 @@ fn build_scope_methods(method: &MethodInfo) -> [MethodInfo; 2] {
 
     let instance_method = MethodInfo {
         name: name.clone(),
+        name_offset: 0,
         parameters: parameters.clone(),
         return_type: return_type.clone(),
         is_static: false,
@@ -912,6 +915,7 @@ fn build_scope_methods(method: &MethodInfo) -> [MethodInfo; 2] {
 
     let static_method = MethodInfo {
         name,
+        name_offset: 0,
         parameters,
         return_type,
         is_static: true,
@@ -1128,6 +1132,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
             let php_type = cast_type_to_php_type(cast_type, class_loader);
             properties.push(PropertyInfo {
                 name: column.clone(),
+                name_offset: 0,
                 type_hint: Some(php_type),
                 is_static: false,
                 visibility: Visibility::Public,
@@ -1143,6 +1148,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
             }
             properties.push(PropertyInfo {
                 name: column.clone(),
+                name_offset: 0,
                 type_hint: Some(php_type.clone()),
                 is_static: false,
                 visibility: Visibility::Public,
@@ -1159,6 +1165,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
             }
             properties.push(PropertyInfo {
                 name: column.clone(),
+                name_offset: 0,
                 type_hint: Some("mixed".to_string()),
                 is_static: false,
                 visibility: Visibility::Public,
@@ -1180,6 +1187,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 let prop_name = legacy_accessor_property_name(&method.name);
                 properties.push(PropertyInfo {
                     name: prop_name,
+                    name_offset: 0,
                     type_hint: method.return_type.clone(),
                     is_static: false,
                     visibility: Visibility::Public,
@@ -1193,6 +1201,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
                 let prop_name = camel_to_snake(&method.name);
                 properties.push(PropertyInfo {
                     name: prop_name,
+                    name_offset: 0,
                     type_hint: Some("mixed".to_string()),
                     is_static: false,
                     visibility: Visibility::Public,
@@ -1239,6 +1248,7 @@ impl VirtualMemberProvider for LaravelModelProvider {
             if type_hint.is_some() {
                 properties.push(PropertyInfo {
                     name: method.name.clone(),
+                    name_offset: 0,
                     type_hint,
                     is_static: false,
                     visibility: Visibility::Public,
@@ -1307,6 +1317,7 @@ mod tests {
             constants: Vec::new(),
             start_offset: 0,
             end_offset: 0,
+            keyword_offset: 0,
             parent_class: None,
             interfaces: Vec::new(),
             used_traits: Vec::new(),
@@ -1335,6 +1346,7 @@ mod tests {
     fn make_method(name: &str, return_type: Option<&str>) -> MethodInfo {
         MethodInfo {
             name: name.to_string(),
+            name_offset: 0,
             parameters: Vec::new(),
             return_type: return_type.map(|s| s.to_string()),
             is_static: false,
@@ -1354,6 +1366,7 @@ mod tests {
     ) -> MethodInfo {
         MethodInfo {
             name: name.to_string(),
+            name_offset: 0,
             parameters: params,
             return_type: return_type.map(|s| s.to_string()),
             is_static: false,
@@ -3451,6 +3464,7 @@ mod tests {
         // the parser from body inference.
         user.methods.push(MethodInfo {
             name: "posts".to_string(),
+            name_offset: 0,
             parameters: Vec::new(),
             return_type: Some("HasMany<Post>".to_string()),
             is_static: false,
@@ -3487,6 +3501,7 @@ mod tests {
         // morphTo inferred from body — bare name, no generics.
         comment.methods.push(MethodInfo {
             name: "commentable".to_string(),
+            name_offset: 0,
             parameters: Vec::new(),
             return_type: Some("MorphTo".to_string()),
             is_static: false,

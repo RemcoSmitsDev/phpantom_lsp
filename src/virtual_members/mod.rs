@@ -231,6 +231,7 @@ mod tests {
             constants: Vec::new(),
             start_offset: 0,
             end_offset: 0,
+            keyword_offset: 0,
             parent_class: None,
             interfaces: Vec::new(),
             used_traits: Vec::new(),
@@ -259,6 +260,7 @@ mod tests {
     fn make_method(name: &str, return_type: Option<&str>) -> MethodInfo {
         MethodInfo {
             name: name.to_string(),
+            name_offset: 0,
             parameters: Vec::new(),
             return_type: return_type.map(|s| s.to_string()),
             is_static: false,
@@ -274,6 +276,7 @@ mod tests {
     fn make_property(name: &str, type_hint: Option<&str>) -> PropertyInfo {
         PropertyInfo {
             name: name.to_string(),
+            name_offset: 0,
             type_hint: type_hint.map(|s| s.to_string()),
             is_static: false,
             visibility: Visibility::Public,
@@ -320,6 +323,7 @@ mod tests {
             properties: Vec::new(),
             constants: vec![ConstantInfo {
                 name: "FOO".to_string(),
+                name_offset: 0,
                 type_hint: None,
                 visibility: Visibility::Public,
                 is_deprecated: false,

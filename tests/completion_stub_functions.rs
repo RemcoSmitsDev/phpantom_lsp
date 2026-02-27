@@ -344,6 +344,7 @@ async fn test_user_function_takes_precedence_over_stub() {
     // Pre-populate global_functions with a user-defined `str_contains`.
     let custom_func = phpantom_lsp::FunctionInfo {
         name: "str_contains".to_string(),
+        name_offset: 0,
         parameters: vec![],
         return_type: Some("CustomReturn".to_string()),
         namespace: None,

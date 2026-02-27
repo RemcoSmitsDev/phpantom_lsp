@@ -1,3 +1,5 @@
+#![allow(deprecated)] // tests for text-search helpers that are now deprecated
+
 /// Go-to-definition on type hints in declarations.
 ///
 /// Tests that clicking on a class/interface/enum name used as a type hint

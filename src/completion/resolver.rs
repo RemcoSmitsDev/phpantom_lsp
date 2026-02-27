@@ -1015,6 +1015,7 @@ impl Backend {
                 .into_iter()
                 .map(|e| PropertyInfo {
                     name: e.key,
+                    name_offset: 0,
                     type_hint: Some(e.value_type),
                     is_static: false,
                     visibility: Visibility::Public,

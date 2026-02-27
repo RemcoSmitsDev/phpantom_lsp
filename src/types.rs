@@ -86,6 +86,12 @@ pub struct ParameterInfo {
 pub struct MethodInfo {
     /// The method name (e.g. "updateText").
     pub name: String,
+    /// Byte offset of the method's name token in the source file.
+    ///
+    /// Set to the `span.start.offset` of the name `LocalIdentifier` during
+    /// parsing.  A value of `0` means "not available" (e.g. for stubs and
+    /// synthetic members) — callers should fall back to text search.
+    pub name_offset: u32,
     /// The parameters of the method.
     pub parameters: Vec<ParameterInfo>,
     /// Optional return type hint string (e.g. "void", "string", "?int").
@@ -133,6 +139,12 @@ pub struct PropertyInfo {
     /// The property name WITHOUT the `$` prefix (e.g. "name", "age").
     /// This matches PHP access syntax: `$this->name` not `$this->$name`.
     pub name: String,
+    /// Byte offset of the property's variable token (`$name`) in the source file.
+    ///
+    /// Set to the `span.start.offset` of the `DirectVariable` during parsing.
+    /// A value of `0` means "not available" — callers should fall back to
+    /// text search.
+    pub name_offset: u32,
     /// Optional type hint string (e.g. "string", "int").
     pub type_hint: Option<String>,
     /// Whether the property is static.
@@ -148,6 +160,12 @@ pub struct PropertyInfo {
 pub struct ConstantInfo {
     /// The constant name (e.g. "MAX_SIZE", "STATUS_ACTIVE").
     pub name: String,
+    /// Byte offset of the constant's name token in the source file.
+    ///
+    /// Set to the `span.start.offset` of the name `LocalIdentifier` during
+    /// parsing.  A value of `0` means "not available" — callers should fall
+    /// back to text search.
+    pub name_offset: u32,
     /// Optional type hint string (e.g. "string", "int").
     pub type_hint: Option<String>,
     /// Visibility of the constant (public, protected, or private).
@@ -195,6 +213,12 @@ pub struct CompletionTarget {
 pub struct FunctionInfo {
     /// The function name (e.g. "array_map", "myHelper").
     pub name: String,
+    /// Byte offset of the function's name token in the source file.
+    ///
+    /// Set to the `span.start.offset` of the name `LocalIdentifier` during
+    /// parsing.  A value of `0` means "not available" (e.g. for stubs and
+    /// synthetic entries) — callers should fall back to text search.
+    pub name_offset: u32,
     /// The parameters of the function.
     pub parameters: Vec<ParameterInfo>,
     /// Optional return type hint string (e.g. "void", "string", "?int").
@@ -404,6 +428,14 @@ pub struct ClassInfo {
     pub start_offset: u32,
     /// Byte offset where the class body ends (right brace).
     pub end_offset: u32,
+    /// Byte offset of the `class` / `interface` / `trait` / `enum` keyword
+    /// token in the source file.
+    ///
+    /// Used by `find_definition_position` to convert directly to an LSP
+    /// `Position` instead of scanning the file line-by-line.  A value of
+    /// `0` means "not available" (e.g. for stubs, synthetic classes, or
+    /// anonymous classes) — callers should fall back to text search.
+    pub keyword_offset: u32,
     /// The parent class name from the `extends` clause, if any.
     /// This is the raw name as written in source (e.g. "BaseClass", "Foo\\Bar").
     pub parent_class: Option<String>,
@@ -565,6 +597,33 @@ pub struct ClassInfo {
 // ─── ClassInfo helpers ──────────────────────────────────────────────────────
 
 impl ClassInfo {
+    /// Look up the stored `name_offset` for a member by name and kind.
+    ///
+    /// Returns `Some(offset)` when the member exists and has a non-zero
+    /// offset, or `None` otherwise.  The `kind` string should be one of
+    /// `"method"`, `"property"`, or `"constant"`.
+    pub(crate) fn member_name_offset(&self, name: &str, kind: &str) -> Option<u32> {
+        let off = match kind {
+            "method" => self
+                .methods
+                .iter()
+                .find(|m| m.name == name)
+                .map(|m| m.name_offset),
+            "property" => self
+                .properties
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.name_offset),
+            "constant" => self
+                .constants
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.name_offset),
+            _ => None,
+        };
+        off.filter(|&o| o > 0)
+    }
+
     /// Push a `ClassInfo` into `results` only if no existing entry shares
     /// the same class name.  This is the single place where completion /
     /// resolution code deduplicates candidate classes.

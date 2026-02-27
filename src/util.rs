@@ -12,6 +12,36 @@
 /// expressions, etc.) live in [`crate::subject_extraction`].
 use tower_lsp::lsp_types::*;
 
+/// Convert a byte offset in `content` to an LSP `Position` (line, character).
+///
+/// This is the inverse of [`position_to_byte_offset`].  Characters are
+/// counted as single-byte (sufficient for the vast majority of PHP source).
+/// If `offset` is past the end of `content`, the position at the end of
+/// the file is returned.
+pub(crate) fn offset_to_position(content: &str, offset: usize) -> Position {
+    let mut line = 0u32;
+    let mut col = 0u32;
+    for (i, ch) in content.char_indices() {
+        if i == offset {
+            return Position {
+                line,
+                character: col,
+            };
+        }
+        if ch == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    // offset == content.len() (end of file)
+    Position {
+        line,
+        character: col,
+    }
+}
+
 /// Convert an LSP `Position` (line, character) to a byte offset in
 /// `content`.
 ///
@@ -405,6 +435,9 @@ impl Backend {
     /// Called from `did_close` to clean up state when a file is closed.
     pub(crate) fn clear_file_maps(&self, uri: &str) {
         if let Ok(mut map) = self.ast_map.lock() {
+            map.remove(uri);
+        }
+        if let Ok(mut map) = self.symbol_maps.lock() {
             map.remove(uri);
         }
         if let Ok(mut map) = self.use_map.lock() {

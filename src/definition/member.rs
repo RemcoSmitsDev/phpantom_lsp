@@ -37,11 +37,22 @@ pub(crate) enum MemberKind {
     Constant,
 }
 
+impl MemberKind {
+    /// Return the string key used by [`ClassInfo::member_name_offset`].
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            MemberKind::Method => "method",
+            MemberKind::Property => "property",
+            MemberKind::Constant => "constant",
+        }
+    }
+}
+
 /// Hint about whether the member access looks like a method call or a property
 /// access.  Used to disambiguate when a class has both a method and a property
 /// with the same name (e.g. `id()` method vs `$id` property).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MemberAccessHint {
+pub(super) enum MemberAccessHint {
     /// Followed by `(` — looks like a method call.
     MethodCall,
     /// No `(` after the name — looks like a property / constant access.
@@ -69,6 +80,38 @@ impl Backend {
         // 1. Detect the access operator and extract the subject (left side).
         let (subject, access_kind) = Self::extract_member_access_context(content, position)?;
 
+        // Determine whether this looks like a method call or property access.
+        let access_hint = Self::detect_member_access_hint(content, position, member_name);
+
+        self.resolve_member_definition_with(
+            uri,
+            content,
+            position,
+            member_name,
+            &subject,
+            access_kind,
+            access_hint,
+        )
+    }
+
+    /// Resolve a member access to its definition using pre-extracted context.
+    ///
+    /// This is the core implementation shared by the text-based path
+    /// ([`resolve_member_definition`]) and the symbol-map path.  The caller
+    /// provides the subject text, access kind, and access hint so that
+    /// both code paths can use the same resolution logic without
+    /// re-extracting context from the source text.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn resolve_member_definition_with(
+        &self,
+        uri: &str,
+        content: &str,
+        position: Position,
+        member_name: &str,
+        subject: &str,
+        access_kind: AccessKind,
+        access_hint: MemberAccessHint,
+    ) -> Option<Location> {
         // 2. Gather context needed for class resolution.
         let cursor_offset = Self::position_to_offset(content, position);
         let ctx = self.file_context(uri);
@@ -89,14 +132,11 @@ impl Backend {
             class_loader: &class_loader,
             function_loader: Some(&function_loader),
         };
-        let candidates = Self::resolve_target_classes(&subject, access_kind, &rctx);
+        let candidates = Self::resolve_target_classes(subject, access_kind, &rctx);
 
         if candidates.is_empty() {
             return None;
         }
-
-        // Determine whether this looks like a method call or property access.
-        let access_hint = Self::detect_member_access_hint(content, position, member_name);
 
         // 4. Try each candidate class and pick the first one where the
         //    member actually exists (directly or via inheritance).
@@ -134,6 +174,7 @@ impl Backend {
                         trait_info.start_offset as usize,
                         trait_info.end_offset as usize,
                     )),
+                    trait_info.member_name_offset(&effective_name, "method"),
                 )
                 && let Ok(parsed_uri) = Url::parse(&class_uri)
             {
@@ -226,6 +267,7 @@ impl Backend {
                         declaring_class.start_offset as usize,
                         declaring_class.end_offset as usize,
                     )),
+                    declaring_class.member_name_offset(&search_name, member_kind.as_str()),
                 )
                 && let Ok(parsed_uri) = Url::parse(&class_uri)
             {
@@ -276,6 +318,7 @@ impl Backend {
                     trait_info.start_offset as usize,
                     trait_info.end_offset as usize,
                 )),
+                trait_info.member_name_offset(&effective_name, "method"),
             )
             && let Ok(parsed_uri) = Url::parse(&class_uri)
         {
@@ -379,6 +422,7 @@ impl Backend {
                 declaring_class.start_offset as usize,
                 declaring_class.end_offset as usize,
             )),
+            declaring_class.member_name_offset(&search_name, member_kind.as_str()),
         )?;
 
         let parsed_uri = Url::parse(&class_uri).ok()?;
@@ -1162,14 +1206,16 @@ impl Backend {
     /// Find the position of a member declaration (method, property, or constant)
     /// inside a PHP file.
     ///
-    /// Searches line by line for the declaration pattern corresponding to the
-    /// member kind, with word-boundary checks to avoid partial matches.
+    /// When `name_offset` is `Some(off)` with `off > 0`, the position is
+    /// computed directly from the stored byte offset (fast path).
+    /// Otherwise falls back to line-by-line text search.
     pub(crate) fn find_member_position(
         content: &str,
         member_name: &str,
         kind: MemberKind,
+        name_offset: Option<u32>,
     ) -> Option<Position> {
-        Self::find_member_position_in_range(content, member_name, kind, None)
+        Self::find_member_position_in_range(content, member_name, kind, None, name_offset)
     }
 
     /// Find the position of a member declaration, optionally scoped to a
@@ -1178,12 +1224,43 @@ impl Backend {
     /// considered.  This prevents jumping to the wrong class when multiple
     /// classes in the same file declare a member with the same name (e.g.
     /// `Demo\Builder::where` vs `Illuminate\Database\Eloquent\Builder::where`).
+    ///
+    /// When `name_offset` is `Some(off)` with `off > 0`, the position is
+    /// computed directly from the stored byte offset (fast path), bypassing
+    /// the text search entirely.
+    ///
+    /// The line-by-line text-search slow path below is deprecated.  All
+    /// callers should pass a valid `name_offset` (from
+    /// `MethodInfo::name_offset`, `PropertyInfo::name_offset`, or
+    /// `ConstantInfo::name_offset`).  The text-search branch is retained
+    /// only for stubs and synthetic members where `name_offset == 0` and
+    /// will be removed once those cases store offsets too.
     pub(crate) fn find_member_position_in_range(
         content: &str,
         member_name: &str,
         kind: MemberKind,
         class_range: Option<(usize, usize)>,
+        name_offset: Option<u32>,
     ) -> Option<Position> {
+        // ── Fast path: use stored AST offset ────────────────────────────
+        if let Some(off) = name_offset
+            && off > 0
+            && (off as usize) <= content.len()
+        {
+            let mut pos = crate::util::offset_to_position(content, off as usize);
+            // For properties, place the cursor on the first letter
+            // after `$` so that a second go-to-definition triggers
+            // type-hint resolution (matches the text-search behavior).
+            if kind == MemberKind::Property {
+                pos.character += 1;
+            }
+            return Some(pos);
+        }
+
+        // ── Slow path: line-by-line text search (deprecated) ────────────
+        // Only reached when name_offset is None or 0 (stubs, synthetic
+        // members). Will be removed once all members store valid byte
+        // offsets during parsing.
         let is_word_boundary = |c: u8| {
             let ch = c as char;
             !ch.is_alphanumeric() && ch != '_'

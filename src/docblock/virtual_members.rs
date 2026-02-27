@@ -201,6 +201,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
 
         results.push(MethodInfo {
             name: method_name.to_string(),
+            name_offset: 0,
             parameters,
             return_type,
             is_static,

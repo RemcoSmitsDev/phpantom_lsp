@@ -1696,6 +1696,8 @@ async fn test_goto_definition_variable_at_definition_union_class_second() {
 /// go-to-definition should jump to the type hint class.
 #[tokio::test]
 async fn test_goto_definition_property_at_definition_jumps_to_type_hint() {
+    // Property variables should NOT have GTD — the type hint is visible
+    // right next to the variable and is clickable separately.
     let backend = create_test_backend();
 
     let uri = Url::parse("file:///prop_type.php").unwrap();
@@ -1734,20 +1736,9 @@ async fn test_goto_definition_property_at_definition_jumps_to_type_hint() {
 
     let result = backend.goto_definition(params).await.unwrap();
     assert!(
-        result.is_some(),
-        "Should resolve to the Logger class from the property type hint"
+        result.is_none(),
+        "Property $logger should NOT have GTD — the type hint Logger is clickable separately"
     );
-
-    match result.unwrap() {
-        GotoDefinitionResponse::Scalar(location) => {
-            assert_eq!(location.uri, uri);
-            assert_eq!(
-                location.range.start.line, 1,
-                "Logger class defined on line 1"
-            );
-        }
-        other => panic!("Expected Scalar location, got: {:?}", other),
-    }
 }
 
 // ─── Foreach Variable: Consecutive Loops with Same Variable Name ────────────
@@ -2132,10 +2123,11 @@ async fn test_goto_definition_arrow_fn_rhs_param_jumps_to_same_line_param() {
 }
 
 /// When the cursor is on the LHS (definition site) of an arrow function
-/// parameter (`$o` in `fn(Order $o) =>`), go-to-definition should resolve
-/// the type hint and jump to the `Order` class.
+/// parameter (`$o` in `fn(Order $o) =>`), go-to-definition should return
+/// None — the type hint `Order` is right next to the variable and
+/// clickable on its own.
 #[tokio::test]
-async fn test_goto_definition_arrow_fn_lhs_param_jumps_to_type_hint() {
+async fn test_goto_definition_arrow_fn_lhs_param_returns_none() {
     let backend = create_test_backend();
 
     let uri = Url::parse("file:///arrow_fn_lhs.php").unwrap();
@@ -2163,6 +2155,8 @@ async fn test_goto_definition_arrow_fn_lhs_param_jumps_to_type_hint() {
 
     // Line 6: `        $list = array_map(fn(Order $o) => $o->getItems(), []);`
     // The parameter `$o` is at col 35-36.  Cursor on the defining `$o`.
+    // Parameters at their definition site should NOT offer GTD — the type
+    // hint is right next to them and clickable on its own.
     let params = GotoDefinitionParams {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -2177,20 +2171,9 @@ async fn test_goto_definition_arrow_fn_lhs_param_jumps_to_type_hint() {
 
     let result = backend.goto_definition(params).await.unwrap();
     assert!(
-        result.is_some(),
-        "LHS $o at definition site should resolve type hint to Order class"
+        result.is_none(),
+        "LHS $o at parameter definition site should return None (type hint is clickable separately)"
     );
-
-    match result.unwrap() {
-        GotoDefinitionResponse::Scalar(location) => {
-            assert_eq!(location.uri, uri);
-            assert_eq!(
-                location.range.start.line, 1,
-                "Should jump to Order class definition on line 1"
-            );
-        }
-        other => panic!("Expected Scalar location, got: {:?}", other),
-    }
 }
 
 /// Arrow function parameter with no type hint: RHS usage should still

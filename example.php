@@ -1102,7 +1102,7 @@ class GeneratorDemo
     {
         // Generator<int, Order, mixed, Response> — value is still 2nd param (Order)
         foreach ($this->processOrders() as $order) {
-            $order->getId();              // resolves to Order (2nd param), not Response (4th)
+            $order->customer;              // resolves to Order (2nd param), not Response (4th)
         }
     }
 
@@ -1770,7 +1770,7 @@ class ClosureParamInferenceDemo
     public function explicitTypeWins(): void
     {
         // Explicit type hint takes precedence over inference.
-        $this->users->map(fn(Order $o) => $o->getItems());
+        $this->users->map(fn(Order $o) => $o->customer);
     }
 }
 

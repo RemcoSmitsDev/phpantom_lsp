@@ -61,6 +61,7 @@ impl Backend {
         position: Position,
     ) -> Option<Vec<Location>> {
         // ── 1. Extract the word under the cursor ────────────────────────
+        #[allow(deprecated)] // text-based fallback; not yet migrated to symbol map
         let word = Self::extract_word_at_position(content, position)?;
         if word.is_empty() {
             return None;
@@ -618,6 +619,12 @@ impl Backend {
         kind: MemberKind,
         cls: &ClassInfo,
     ) -> Option<Position> {
+        // Fast path: use stored AST offset when available.
+        let name_offset = cls.member_name_offset(member_name, kind.as_str());
+        if name_offset.is_some() {
+            return Self::find_member_position(content, member_name, kind, name_offset);
+        }
+
         // Convert byte offsets to line numbers.
         let start_line = content
             .get(..cls.start_offset as usize)
@@ -637,7 +644,7 @@ impl Backend {
             .collect();
         let class_body = class_lines.join("\n");
 
-        Self::find_member_position(&class_body, member_name, kind).map(|pos| Position {
+        Self::find_member_position(&class_body, member_name, kind, None).map(|pos| Position {
             line: pos.line + start_line as u32,
             character: pos.character,
         })
@@ -667,7 +674,13 @@ impl Backend {
         let (class_uri, class_content) =
             self.find_class_file_content(&cls.name, current_uri, current_content)?;
 
-        let position = Self::find_definition_position(&class_content, &cls.name)?;
+        // Fast path: use stored keyword_offset when available.
+        let position = if cls.keyword_offset > 0 {
+            crate::util::offset_to_position(&class_content, cls.keyword_offset as usize)
+        } else {
+            #[allow(deprecated)] // fallback for stubs/synthetic (keyword_offset == 0)
+            Self::find_definition_position(&class_content, &cls.name)?
+        };
         let parsed_uri = Url::parse(&class_uri).ok()?;
 
         Some(point_location(parsed_uri, position))

@@ -177,6 +177,21 @@ const FUNCTION_TAGS: &[TagDef] = &[
         label: Some("@throws ExceptionType"),
     },
     TagDef {
+        tag: "@template",
+        detail: "Declare a generic type parameter",
+        label: Some("@template T"),
+    },
+    TagDef {
+        tag: "@template-covariant",
+        detail: "Declare a covariant generic type parameter",
+        label: Some("@template-covariant T"),
+    },
+    TagDef {
+        tag: "@template-contravariant",
+        detail: "Declare a contravariant generic type parameter",
+        label: Some("@template-contravariant T"),
+    },
+    TagDef {
         tag: "@inheritdoc",
         detail: "Inherit documentation from parent",
         label: None,
@@ -192,6 +207,16 @@ const CLASS_TAGS: &[TagDef] = &[
         label: Some("@property Type $name"),
     },
     TagDef {
+        tag: "@property-read",
+        detail: "Declare a read-only magic property",
+        label: Some("@property-read Type $name"),
+    },
+    TagDef {
+        tag: "@property-write",
+        detail: "Declare a write-only magic property",
+        label: Some("@property-write Type $name"),
+    },
+    TagDef {
         tag: "@method",
         detail: "Declare a magic method",
         label: Some("@method ReturnType name()"),
@@ -205,6 +230,16 @@ const CLASS_TAGS: &[TagDef] = &[
         tag: "@template",
         detail: "Declare a generic type parameter",
         label: Some("@template T"),
+    },
+    TagDef {
+        tag: "@template-covariant",
+        detail: "Declare a covariant generic type parameter",
+        label: Some("@template-covariant T"),
+    },
+    TagDef {
+        tag: "@template-contravariant",
+        detail: "Declare a contravariant generic type parameter",
+        label: Some("@template-contravariant T"),
     },
     TagDef {
         tag: "@extends",

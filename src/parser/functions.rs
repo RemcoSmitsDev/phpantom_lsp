@@ -27,6 +27,7 @@ impl Backend {
             match statement {
                 Statement::Function(func) => {
                     let name = func.name.value.to_string();
+                    let name_offset = func.name.span.start.offset;
                     let parameters = Self::extract_parameters(&func.parameter_list);
                     let native_return_type = func
                         .return_type_hint
@@ -87,6 +88,7 @@ impl Backend {
 
                     functions.push(FunctionInfo {
                         name,
+                        name_offset,
                         parameters,
                         return_type,
                         namespace: current_namespace.clone(),

@@ -2390,6 +2390,7 @@ async fn test_use_import_excludes_constants_and_functions() {
                 "file:///funcs.php".to_string(),
                 phpantom_lsp::types::FunctionInfo {
                     name: "some_widget_func".to_string(),
+                    name_offset: 0,
                     parameters: vec![],
                     return_type: None,
                     namespace: None,
@@ -2510,6 +2511,7 @@ async fn test_use_function_shows_only_functions() {
                 "file:///funcs.php".to_string(),
                 phpantom_lsp::types::FunctionInfo {
                     name: "array_merge".to_string(),
+                    name_offset: 0,
                     parameters: vec![],
                     return_type: Some("array".to_string()),
                     namespace: None,

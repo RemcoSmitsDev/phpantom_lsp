@@ -172,6 +172,7 @@ impl Backend {
 
                 PropertyInfo {
                     name,
+                    name_offset: var.span.start.offset,
                     type_hint: type_hint.clone(),
                     is_static,
                     visibility,

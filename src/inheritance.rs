@@ -1250,6 +1250,7 @@ mod tests {
 
         let mut method = MethodInfo {
             name: "first".to_string(),
+            name_offset: 0,
             parameters: vec![crate::types::ParameterInfo {
                 name: "$key".to_string(),
                 is_required: false,

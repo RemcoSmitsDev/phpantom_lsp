@@ -49,6 +49,7 @@ mod resolution;
 mod server;
 pub mod stubs;
 pub(crate) mod subject_extraction;
+pub(crate) mod symbol_map;
 pub mod types;
 mod util;
 pub(crate) mod virtual_members;
@@ -88,6 +89,13 @@ pub struct Backend {
     pub(crate) open_files: Arc<Mutex<HashMap<String, String>>>,
     /// Maps a file URI to a list of ClassInfo extracted from that file.
     pub(crate) ast_map: Arc<Mutex<HashMap<String, Vec<ClassInfo>>>>,
+    /// Per-file precomputed symbol location maps for O(log n) lookup.
+    ///
+    /// Built during `update_ast` by walking the AST and recording every
+    /// navigable symbol occurrence (class references, member accesses,
+    /// variables, function calls, etc.).  Consulted by `resolve_definition`
+    /// to replace character-level backward-walking with a binary search.
+    pub(crate) symbol_maps: Arc<Mutex<HashMap<String, symbol_map::SymbolMap>>>,
     pub(crate) client: Option<Client>,
     /// The root directory of the workspace (set during `initialize`).
     pub(crate) workspace_root: Arc<Mutex<Option<PathBuf>>>,
@@ -170,6 +178,7 @@ impl Backend {
             version: env!("CARGO_PKG_VERSION").to_string(),
             open_files: Arc::new(Mutex::new(HashMap::new())),
             ast_map: Arc::new(Mutex::new(HashMap::new())),
+            symbol_maps: Arc::new(Mutex::new(HashMap::new())),
             client: None,
             workspace_root: Arc::new(Mutex::new(None)),
             psr4_mappings: Arc::new(Mutex::new(Vec::new())),

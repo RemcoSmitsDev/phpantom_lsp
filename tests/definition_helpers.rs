@@ -1,3 +1,5 @@
+#![allow(deprecated)] // tests for text-search helpers that are now deprecated
+
 use phpantom_lsp::Backend;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::*;

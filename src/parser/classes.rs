@@ -649,6 +649,7 @@ impl Backend {
                     let mut use_generics = doc_info.use_generics;
                     use_generics.extend(inline_use_generics);
 
+                    let keyword_offset = class.class.span.start.offset;
                     let start_offset = class.left_brace.start.offset;
                     let end_offset = class.right_brace.end.offset;
 
@@ -676,6 +677,7 @@ impl Backend {
                         constants,
                         start_offset,
                         end_offset,
+                        keyword_offset,
                         parent_class,
                         interfaces,
                         used_traits,
@@ -735,6 +737,7 @@ impl Backend {
 
                     let doc_info = extract_class_docblock(iface, doc_ctx);
 
+                    let keyword_offset = iface.interface.span.start.offset;
                     let start_offset = iface.left_brace.start.offset;
                     let end_offset = iface.right_brace.end.offset;
 
@@ -746,6 +749,7 @@ impl Backend {
                         constants,
                         start_offset,
                         end_offset,
+                        keyword_offset,
                         parent_class,
                         interfaces: all_parents,
                         used_traits,
@@ -791,6 +795,7 @@ impl Backend {
 
                     let doc_info = extract_class_docblock(trait_def, doc_ctx);
 
+                    let keyword_offset = trait_def.r#trait.span.start.offset;
                     let start_offset = trait_def.left_brace.start.offset;
                     let end_offset = trait_def.right_brace.end.offset;
 
@@ -802,6 +807,7 @@ impl Backend {
                         constants,
                         start_offset,
                         end_offset,
+                        keyword_offset,
                         parent_class: None,
                         interfaces: vec![],
                         used_traits,
@@ -868,6 +874,7 @@ impl Backend {
                         })
                         .unwrap_or_default();
 
+                    let keyword_offset = enum_def.r#enum.span.start.offset;
                     let start_offset = enum_def.left_brace.start.offset;
                     let end_offset = enum_def.right_brace.end.offset;
 
@@ -880,6 +887,7 @@ impl Backend {
                         constants,
                         start_offset,
                         end_offset,
+                        keyword_offset,
                         parent_class: None,
                         interfaces,
                         used_traits,
@@ -956,6 +964,9 @@ impl Backend {
 
         let start_offset = anon.left_brace.start.offset;
         let end_offset = anon.right_brace.end.offset;
+        // Anonymous classes don't have a meaningful keyword_offset for
+        // go-to-definition purposes — use 0 ("not available").
+        let keyword_offset = 0;
         let name = format!("__anonymous@{}", start_offset);
 
         ClassInfo {
@@ -966,6 +977,7 @@ impl Backend {
             constants,
             start_offset,
             end_offset,
+            keyword_offset,
             parent_class,
             interfaces,
             used_traits,
@@ -1412,6 +1424,7 @@ impl Backend {
             match member {
                 ClassLikeMember::Method(method) => {
                     let name = method.name.value.to_string();
+                    let name_offset = method.name.span.start.offset;
                     let mut parameters = Self::extract_parameters(&method.parameter_list);
                     let native_return_type = method
                         .return_type_hint
@@ -1524,8 +1537,10 @@ impl Backend {
                                     native_hint
                                 };
 
+                                let prop_name_offset = param.variable.span.start.offset;
                                 properties.push(PropertyInfo {
                                     name: prop_name,
+                                    name_offset: prop_name_offset,
                                     type_hint,
                                     is_static: false,
                                     visibility: prop_visibility,
@@ -1572,6 +1587,7 @@ impl Backend {
 
                     methods.push(MethodInfo {
                         name,
+                        name_offset,
                         parameters,
                         return_type,
                         is_static,
@@ -1620,6 +1636,7 @@ impl Backend {
                     for item in constant.items.iter() {
                         constants.push(ConstantInfo {
                             name: item.name.value.to_string(),
+                            name_offset: item.name.span.start.offset,
                             type_hint: type_hint.clone(),
                             visibility,
                             is_deprecated,
@@ -1628,8 +1645,10 @@ impl Backend {
                 }
                 ClassLikeMember::EnumCase(enum_case) => {
                     let case_name = enum_case.item.name().value.to_string();
+                    let case_name_offset = enum_case.item.name().span.start.offset;
                     constants.push(ConstantInfo {
                         name: case_name,
+                        name_offset: case_name_offset,
                         type_hint: None,
                         visibility: Visibility::Public,
                         is_deprecated: false,
