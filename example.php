@@ -26,6 +26,24 @@ use Demo\UserProfile as Profile;
 // ═══════════════════════════════════════════════════════════════════════════
 
 
+// ── Auto-Import ─────────────────────────────────────────────────────────────
+// Try: type `new DateT` and accept `DateTime`. The `use DateTime;` statement
+// is inserted between `use Exception;` and `use Stringable;` above to
+// maintain alphabetical order.
+//
+// The `use Exception;` import above occupies the short name "Exception".
+// Try: type `throw new pq\Exception()` and accept — the auto-import inserts
+// `\pq\Exception` at the usage site instead of a conflicting `use` statement.
+
+// ── Namespace Segment Completion ────────────────────────────────────────────
+// Try: erase the class name after `use Demo\` and trigger completion to see
+// namespace segments (module/folder icon) alongside class names.
+
+// ── Namespaced Function Completion ──────────────────────────────────────────
+// Try: type `use function parse_file` and accept to get
+// `use function ast\parse_file;`
+
+
 // ── Instance Completion ─────────────────────────────────────────────────────
 
 class InstanceCompletionDemo
@@ -1272,23 +1290,12 @@ class SnippetInsertionDemo
 
 
 // ── Go-to-Definition ────────────────────────────────────────────────────────
-// All jump targets are defined right below this demo so Ctrl+Click lands
+// All jump targets are defined right after the demo so Ctrl+Click lands
 // within a few lines, making it easy to verify the feature works.
-
-class GtdParent
-{
-    public const string ORIGIN = 'base';
-}
-
-class GtdTarget extends GtdParent
-{
-    public static string $defaultTag = 'none';
-    public const string KIND = 'target';
-
-    public function locate(): string { return 'found'; }
-}
-
-function gtdHelper(): GtdTarget { return new GtdTarget(); }
+//
+// Member names deliberately collide with names elsewhere in the file
+// (label, format, CONNECTION, $defaultRole) so a wrong-target bug
+// would land on the wrong label() or CONNECTION instead of silently passing.
 
 class GoToDefinitionDemo
 {
@@ -1296,52 +1303,38 @@ class GoToDefinitionDemo
     {
         // Ctrl+Click on any symbol to jump to its definition
         $target = new GtdTarget();
-        $target->locate();                        // Ctrl+Click → jumps to GtdTarget::locate()
-        GtdTarget::KIND;                          // Ctrl+Click → jumps to class constant
-        GtdParent::ORIGIN;                        // Ctrl+Click → jumps to inherited constant
-        GtdTarget::$defaultTag;                   // Ctrl+Click → jumps to static property
+        $target->label();                         // Ctrl+Click → GtdTarget::label() (not Pen::label)
+        $target->format();                        // Ctrl+Click → GtdTarget::format() (not User::format)
+        GtdTarget::FORMAT;                        // Ctrl+Click → class constant (not Renderable::format)
+        GtdParent::CONNECTION;                    // Ctrl+Click → GtdParent (not Model::CONNECTION)
+        GtdTarget::$defaultRole;                  // Ctrl+Click → GtdTarget (not User::$defaultRole)
 
         $helper = gtdHelper();
         echo $helper;                             // Ctrl+Click on $helper → jumps to assignment
 
         define('APP_VERSION', '1.0.0');
-        echo APP_VERSION;                         // Ctrl+Click → jumps to define()
+        echo APP_VERSION;                         // BUG: Ctrl+Click should jump to define() above
     }
 }
+
+class GtdParent { public const string CONNECTION = 'gtd'; }
+class GtdTarget extends GtdParent
+{
+    public static string $defaultRole = 'gtd';
+    public const string FORMAT = 'gtd';
+    public function label(): string { return 'gtd'; }
+    public function format(): string { return 'gtd'; }
+}
+function gtdHelper(): GtdTarget { return new GtdTarget(); }
 
 
 // ── Type Hint Go-to-Definition ──────────────────────────────────────────────
 // Ctrl+Click on class names in type hints, return types, catch blocks,
 // and docblock annotations to jump to their definitions.
-// All referenced types are defined right here so the jump is short.
-
-class GtdAlpha
-{
-    public function act(): void {}
-}
-
-class GtdBeta
-{
-    public function act(): void {}
-}
-
-interface GtdShape
-{
-    public function area(): float;
-}
-
-interface GtdColor
-{
-    public function rgb(): string;
-}
-
-class GtdResult
-{
-    public function ok(): bool { return true; }
-}
-
-class GtdNotFoundException extends \RuntimeException {}
-class GtdAccessException extends \RuntimeException {}
+// All referenced types are defined right after the demo so the jump is short.
+//
+// Support classes have format()/label() methods that collide with names
+// elsewhere — if GTD resolves the wrong class, you land on the wrong one.
 
 class TypeHintGtdDemo
 {
@@ -1366,46 +1359,67 @@ class TypeHintGtdDemo
     public function docblockTypes($items) { return new GtdResult(); }
 }
 
+class GtdAlpha { public function label(): string { return 'alpha'; } }
+class GtdBeta { public function label(): string { return 'beta'; } }
+interface GtdShape { public function format(): string; }
+interface GtdColor { public function format(): string; }
+class GtdResult { public function label(): string { return 'ok'; } }
+class GtdNotFoundException extends \RuntimeException {}
+class GtdAccessException extends \RuntimeException {}
+
 
 // ── Go-to-Implementation ────────────────────────────────────────────────────
-// All implementors are defined right here so "Go to Implementations"
-// lands within a few lines of the demo.
-
-interface GtdRenderable
-{
-    public function render(): string;
-}
-
-class GtdHtmlRenderer implements GtdRenderable
-{
-    public function render(): string { return '<html>'; }
-}
-
-class GtdJsonRenderer implements GtdRenderable
-{
-    public function render(): string { return '{}'; }
-}
+// All implementors are defined right after the demo so "Go to Implementations"
+// lands within a few lines.
+//
+// The interface method is format() — same name as Renderable::format(),
+// User::format(), Ingredient::format(). A resolver bug would jump to one
+// of those instead of the local implementor.
 
 class GoToImplementationDemo
 {
-    // Right-click → "Go to Implementations" on GtdRenderable
-    // to jump to GtdHtmlRenderer and GtdJsonRenderer above.
-    // Try: Go-to-Implementation on "render" → render() in each implementor
-    public function demo(GtdRenderable $renderer): string
+    // Right-click → "Go to Implementations" on GtdPrintable
+    // to jump to GtdPlainPrinter and GtdHtmlPrinter below.
+    // Try: Go-to-Implementation on "format" → format() in each implementor
+    public function demo(GtdPrintable $printer): string
     {
-        return $renderer->render();
+        return $printer->format();
     }
 }
 
+interface GtdPrintable { public function format(): string; }
+class GtdPlainPrinter implements GtdPrintable { public function format(): string { return 'plain'; } }
+class GtdHtmlPrinter implements GtdPrintable { public function format(): string { return '<b>html</b>'; } }
+
 
 // ── Context-Aware Class Name Filtering ──────────────────────────────────────
-// Try: erase the class name after each keyword and re-type a prefix.
-//   extends (class)     → non-final classes only
-//   extends (interface) → interfaces only
-//   implements          → interfaces only
-//   use (inside class)  → traits only
-//   instanceof          → classes, interfaces, enums (no traits)
-//   new                 → concrete non-abstract classes only
+// Try: erase the class name after each keyword and re-trigger completion.
+//
+// extends Model        → classes only, non-final
+//                        MUST show: User, Response, Pen (non-final classes)
+//                        MUST NOT show: AdminUser (final), Model (abstract),
+//                        Renderable (interface), HasTimestamps (trait), Status (enum)
+//
+// extends Renderable   → interfaces only (interface-extends-interface)
+//                        MUST show: Renderable, GtdShape, Printable
+//                        MUST NOT show: User (class), HasTimestamps (trait), Status (enum)
+//
+// implements Renderable → interfaces only
+//                        MUST show: Renderable, GtdShape, Printable
+//                        MUST NOT show: User (class), HasTimestamps (trait), Status (enum)
+//
+// use HasTimestamps    → traits only (inside class body)
+//                        MUST show: HasTimestamps, HasSlug, JsonSerializer
+//                        MUST NOT show: User (class), Renderable (interface), Status (enum)
+//
+// instanceof User      → classes, interfaces, enums (no traits)
+//                        MUST show: User, Renderable, Status
+//                        MUST NOT show: HasTimestamps (trait)
+//
+// new User             → concrete non-abstract classes only
+//                        MUST show: User, Pen, Response
+//                        MUST NOT show: Model (abstract), AdminUser (final is ok for new),
+//                        Renderable (interface), HasTimestamps (trait), Status (enum)
 
 class ClassFilteringDemo extends Model implements Renderable
 {
@@ -1425,23 +1439,6 @@ function typeHintDemo(User $user, string $name): User { return $user; }
 
 function unionDemo(string|int $value, ?User $maybe): User|null { return $maybe; }
 
-
-// ── Auto-Import ─────────────────────────────────────────────────────────────
-// Try: type `new DateT` and accept `DateTime`. The `use DateTime;` statement
-// is inserted between `use Exception;` and `use Stringable;` above to
-// maintain alphabetical order.
-//
-// The `use Exception;` import above occupies the short name "Exception".
-// Try: type `throw new pq\Exception()` and accept — the auto-import inserts
-// `\pq\Exception` at the usage site instead of a conflicting `use` statement.
-
-// ── Namespace Segment Completion ────────────────────────────────────────────
-// Try: erase the class name after `use Demo\` and trigger completion to see
-// namespace segments (module/folder icon) alongside class names.
-
-// ── Namespaced Function Completion ──────────────────────────────────────────
-// Try: type `use function parse_file` and accept to get
-// `use function ast\parse_file;`
 
 // ── $_SERVER Superglobal ────────────────────────────────────────────────────
 

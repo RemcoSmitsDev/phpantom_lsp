@@ -653,13 +653,66 @@ These functions have return type semantics that don't fit into either
 
 ---
 
+### 19. Array element access after method call on variable produces no completion
+**Impact: Medium · Effort: Low-Medium**
+
+When a method returning `Pen[]` is called on a variable (not `$this`),
+array element access on the result produces no completions. In the
+`ArrayAccessDemo`:
+
+```php
+$src = new ScaffoldingArrayAccess();
+$pens = $src->fetchAll();         // Pen[] from method return
+$pens[0]->write();                // no completions (should resolve to Pen)
+
+$first = $pens[0];
+$first->color();                  // no completions (should resolve to Pen)
+```
+
+The same pattern works when the method is on `$this` (the demo worked
+before refactoring to `$src = new ...`). The variable resolution
+pipeline likely doesn't follow the chain `$src` → `ScaffoldingArrayAccess`
+→ `fetchAll()` → `Pen[]` → element type when `$src` is a local variable
+rather than `$this`.
+
+---
+
+### 20. Closure and arrow-function member completion fails in namespace context
+**Impact: Medium · Effort: Low-Medium**
+
+None of the examples in `ClosureMembersDemo` produce completions.
+Closure literals (`function() { ... }`), arrow functions (`fn() => ...`),
+and chained `bindTo()` results should all resolve to the `Closure` class
+and offer members like `bindTo()` and `call()`.
+
+The feature has passing unit tests (which define a minimal inline
+`Closure` class), so the failure is specific to the `example.php`
+context where `Closure` comes from stubs and the code is inside a
+`namespace Demo { }` block. The stub resolution or namespace-qualified
+lookup for the built-in `Closure` class may not be working in this
+context.
+
+```php
+$typedClosure = function(Pen $p): string { return $p->write(); };
+$typedClosure->bindTo($this);     // no completions (should offer Closure members)
+
+$typedArrow = fn(int $x): float => $x * 1.5;
+$typedArrow->bindTo($this);       // no completions
+
+$fn = function(): void {};
+$bound = $fn->bindTo($this);
+$bound->call($this);              // no completions
+```
+
+---
+
 <!-- ============================================================ -->
 <!--  TIER 4 — LOW-MEDIUM IMPACT                                  -->
 <!-- ============================================================ -->
 
 ## Low-Medium Impact
 
-### 19. Asymmetric visibility (PHP 8.4)
+### 21. Asymmetric visibility (PHP 8.4)
 **Impact: Low-Medium · Effort: Low**
 
 Separate from property hooks, PHP 8.4 allows asymmetric visibility on
@@ -689,7 +742,7 @@ is just to store the value; context-aware filtering can follow later.
 
 ---
 
-### 20. `str_contains` / `str_starts_with` / `str_ends_with` → non-empty-string narrowing
+### 22. `str_contains` / `str_starts_with` / `str_ends_with` → non-empty-string narrowing
 **Impact: Low-Medium · Effort: Low**
 
 When `str_contains($haystack, $needle)` appears in a condition and
@@ -706,7 +759,7 @@ See `StrContainingTypeSpecifyingExtension` in PHPStan.
 
 ---
 
-### 21. `count` / `sizeof` comparison → non-empty-array narrowing
+### 23. `count` / `sizeof` comparison → non-empty-array narrowing
 **Impact: Low-Medium · Effort: Low**
 
 `if (count($arr) > 0)` or `if (count($arr) >= 1)` narrows `$arr` to
@@ -724,7 +777,7 @@ branches in `TypeSpecifier::specifyTypesInCondition`.
 
 ## Low Impact
 
-### 22. Short-name collisions in `find_implementors`
+### 24. Short-name collisions in `find_implementors`
 **Impact: Low · Effort: Low**
 
 `class_implements_or_extends` matches interfaces by both short name and
@@ -740,7 +793,7 @@ before comparison.
 
 ---
 
-### 23. Fiber type resolution
+### 25. Fiber type resolution
 **Impact: Low · Effort: Low**
 
 `Generator<TKey, TValue, TSend, TReturn>` has dedicated support for
@@ -755,7 +808,7 @@ Generator extraction in `docblock/types.rs`.
 
 ---
 
-### 24. Non-empty-string propagation through string functions
+### 26. Non-empty-string propagation through string functions
 **Impact: Low · Effort: Low**
 
 PHPStan tracks `non-empty-string` through string-manipulating
@@ -773,7 +826,7 @@ See `NonEmptyStringFunctionsReturnTypeExtension` in PHPStan.
 
 ---
 
-### 25. `Closure::bind()` / `Closure::fromCallable()` return type preservation
+### 27. `Closure::bind()` / `Closure::fromCallable()` return type preservation
 **Impact: Low · Effort: Low-Medium**
 
 Variables holding closure literals, arrow functions, and first-class
@@ -789,7 +842,7 @@ See `ClosureBindDynamicReturnTypeExtension` and
 
 ---
 
-### 26. Remove deprecated text-search fallbacks
+### 28. Remove deprecated text-search fallbacks
 **Impact: Low · Effort: Medium**
 
 The go-to-definition subsystem now uses the precomputed `SymbolMap` as
@@ -821,7 +874,58 @@ would let that deprecated function be removed entirely.
 
 ---
 
-### 27. Non-array functions with dynamic return types
+### 29. Go-to-definition jumps to itself at definition sites
+**Impact: Low · Effort: Low**
+
+Ctrl+Click on a symbol at its own definition site offers GTD and jumps
+to itself instead of suppressing the action. Known cases:
+
+1. **`define()` constant name.** `define('APP_VERSION', '1.0.0')` is
+   the definition site for `APP_VERSION`. Ctrl+Click on the constant
+   name inside the `define()` call jumps to itself.
+
+2. **Method declarations.** `public function paramTypes(GtdAlpha $item): void {}`
+   is the definition site for `paramTypes`. Ctrl+Click on the method
+   name in the declaration jumps to itself.
+
+The fix should detect that the cursor position matches (or is within)
+the stored definition offset and return `None` instead of a
+self-referential `Location`. This check could be a single guard at the
+top of the GTD handler: if the resolved `Location` points to the same
+URI and range that the cursor is already in, return `None`.
+
+---
+
+### 30. Return type hint completion missing leading space before type
+**Impact: Low · Effort: Low**
+
+When completing a return type hint on a function that has no return type
+yet, the inserted text omits the space before the type name. For example,
+accepting `string` on:
+
+```php
+function typeHintDemo(User $user, string $name) { return $user; }
+```
+
+produces `:string` jammed against the closing parenthesis:
+
+```php
+function typeHintDemo(User $user, string $name):string { return $user; }
+```
+
+instead of the correct:
+
+```php
+function typeHintDemo(User $user, string $name): string { return $user; }
+```
+
+The fix should ensure the completion item's `textEdit` (or
+`additionalTextEdits`) includes the `: ` prefix with a space when
+inserting a return type after the parameter list.
+
+---
+
+### 31. Non-array functions with dynamic return types
 **Impact: Low · Effort: High**
 
 PHPStan also provides dynamic return type extensions for many non-array
@@ -852,14 +956,14 @@ return types (less impactful for class-based completion).
 
 ---
 
-### 28. Diagnostics
+### 32. Diagnostics
 **Impact: Low (large scope) · Effort: Very High**
 
 No error reporting (undefined methods, type mismatches, etc.).
 
 ---
 
-### 29. Code Actions
+### 33. Code Actions
 **Impact: Low · Effort: Very High**
 
 No quick fixes or refactoring suggestions. No `codeActionProvider` in
@@ -867,7 +971,7 @@ No quick fixes or refactoring suggestions. No `codeActionProvider` in
 `WorkspaceEdit` generation infrastructure beyond trivial `TextEdit`s for
 use-statement insertion.
 
-#### 29a. Extract Function refactoring
+#### 33a. Extract Function refactoring
 
 Select a range of statements inside a method/function and extract them into a
 new function. The LSP would need to:
@@ -919,14 +1023,18 @@ new function. The LSP would need to:
 | 16 | Partial result streaming | Medium | Medium-High |
 | 17 | Rename | Medium | Medium-High |
 | 18 | Array functions (new code paths) | Medium | High |
-| 19 | Asymmetric visibility (PHP 8.4) | Low-Medium | Low |
-| 20 | `str_contains` / `str_starts_with` narrowing | Low-Medium | Low |
-| 21 | `count` / `sizeof` → non-empty-array | Low-Medium | Low |
-| 22 | Short-name collisions | Low | Low |
-| 23 | Fiber type resolution | Low | Low |
-| 24 | Non-empty-string propagation | Low | Low |
-| 25 | `Closure::bind()` preservation | Low | Low-Medium |
-| 26 | Remove deprecated text-search fallbacks | Low | Medium |
-| 27 | Non-array dynamic return types | Low | High |
-| 28 | Diagnostics | Low | Very High |
-| 29 | Code Actions / Extract Function | Low | Very High |
+| 19 | Array element access on variable method chain | Medium | Low-Medium |
+| 20 | Closure member completion in namespace context | Medium | Low-Medium |
+| 21 | Asymmetric visibility (PHP 8.4) | Low-Medium | Low |
+| 22 | `str_contains` / `str_starts_with` narrowing | Low-Medium | Low |
+| 23 | `count` / `sizeof` → non-empty-array | Low-Medium | Low |
+| 24 | Short-name collisions | Low | Low |
+| 25 | Fiber type resolution | Low | Low |
+| 26 | Non-empty-string propagation | Low | Low |
+| 27 | `Closure::bind()` preservation | Low | Low-Medium |
+| 28 | Remove deprecated text-search fallbacks | Low | Medium |
+| 29 | GTD jumps to itself at definition sites | Low | Low |
+| 30 | Return type hint missing leading space | Low | Low |
+| 31 | Non-array dynamic return types | Low | High |
+| 32 | Diagnostics | Low | Very High |
+| 33 | Code Actions / Extract Function | Low | Very High |
