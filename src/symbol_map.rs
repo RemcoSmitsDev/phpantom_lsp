@@ -112,6 +112,35 @@ pub(crate) struct TemplateParamDef {
     pub scope_end: u32,
 }
 
+// ─── Call site structures ───────────────────────────────────────────────────
+
+/// A call expression site discovered during the AST walk.
+///
+/// Stored in `SymbolMap::call_sites`, sorted by `args_start`.
+/// Used by signature help to find the innermost call whose argument
+/// list contains the cursor and to compute the active parameter index
+/// from precomputed comma offsets.
+#[derive(Debug, Clone)]
+pub(crate) struct CallSite {
+    /// Byte offset immediately after the opening `(`.
+    /// The cursor must be > `args_start` to be "inside" the call.
+    pub args_start: u32,
+    /// Byte offset of the closing `)`.
+    /// When the parser recovered from an unclosed paren, this is the
+    /// span end the parser chose.
+    pub args_end: u32,
+    /// The call expression in the format `resolve_callable` expects:
+    ///   - `"functionName"` for standalone function calls
+    ///   - `"$subject->method"` for instance/null-safe method calls
+    ///   - `"ClassName::method"` for static method calls
+    ///   - `"new ClassName"` for constructor calls
+    pub call_expression: String,
+    /// Byte offsets of each top-level comma separator inside the
+    /// argument list.  Used to compute the active parameter index:
+    /// count how many comma offsets are < cursor offset.
+    pub comma_offsets: Vec<u32>,
+}
+
 // ─── Variable definition site structures ────────────────────────────────────
 
 /// A variable definition site discovered during the AST walk.
@@ -178,6 +207,10 @@ pub(crate) struct SymbolMap {
     /// (e.g. `TKey`, `TModel`) that appear in docblock types but are not
     /// actual class names.
     pub template_defs: Vec<TemplateParamDef>,
+    /// Call expression sites, sorted by `args_start`.
+    /// Used by signature help to find the innermost call containing the
+    /// cursor and to compute the active parameter index from AST data.
+    pub call_sites: Vec<CallSite>,
 }
 
 impl SymbolMap {
@@ -279,6 +312,18 @@ impl SymbolMap {
                     && cursor_offset < d.offset + 1 + d.name.len() as u32
             })
             .map(|d| &d.kind)
+    }
+
+    /// Find the innermost call site whose argument list contains `offset`.
+    ///
+    /// `call_sites` is sorted by `args_start`.  We want the innermost
+    /// (last) one whose range contains the cursor, so we iterate in
+    /// reverse and return the first match.
+    pub fn find_enclosing_call_site(&self, offset: u32) -> Option<&CallSite> {
+        self.call_sites
+            .iter()
+            .rev()
+            .find(|cs| offset >= cs.args_start && offset <= cs.args_end)
     }
 }
 
@@ -934,6 +979,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
     let mut var_defs = Vec::new();
     let mut scopes = Vec::new();
     let mut template_defs = Vec::new();
+    let mut call_sites = Vec::new();
     let trivias = program.trivia.as_slice();
 
     for stmt in program.statements.iter() {
@@ -943,6 +989,7 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
             &mut var_defs,
             &mut scopes,
             &mut template_defs,
+            &mut call_sites,
             trivias,
             content,
             0,
@@ -968,11 +1015,15 @@ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> Symbol
     // Sort template_defs by name_offset for binary search / reverse scan.
     template_defs.sort_by_key(|d| d.name_offset);
 
+    // Sort call_sites by args_start for reverse-scan lookup.
+    call_sites.sort_by_key(|cs| cs.args_start);
+
     SymbolMap {
         spans,
         var_defs,
         scopes,
         template_defs,
+        call_sites,
     }
 }
 
@@ -985,6 +1036,7 @@ fn extract_from_statement<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -998,6 +1050,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1011,6 +1064,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -1022,6 +1076,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -1033,6 +1088,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -1044,6 +1100,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -1055,6 +1112,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -1070,6 +1128,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1084,6 +1143,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1099,6 +1159,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1112,6 +1173,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1122,6 +1184,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1134,6 +1197,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1144,6 +1208,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1156,6 +1221,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1166,6 +1232,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1179,6 +1246,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1191,6 +1259,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1203,6 +1272,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1214,6 +1284,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1226,6 +1297,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1238,6 +1310,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1262,6 +1335,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1285,6 +1359,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1298,6 +1373,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1308,6 +1384,7 @@ fn extract_from_statement<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1321,6 +1398,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1356,6 +1434,7 @@ fn extract_from_statement<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -1370,6 +1449,7 @@ fn extract_from_statement<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -1385,6 +1465,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1440,6 +1521,7 @@ fn extract_from_statement<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1459,6 +1541,7 @@ fn extract_from_if_body<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -1471,6 +1554,7 @@ fn extract_from_if_body<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1482,6 +1566,7 @@ fn extract_from_if_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1492,6 +1577,7 @@ fn extract_from_if_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1504,6 +1590,7 @@ fn extract_from_if_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1518,6 +1605,7 @@ fn extract_from_if_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1530,6 +1618,7 @@ fn extract_from_if_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1541,6 +1630,7 @@ fn extract_from_if_body<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -1555,6 +1645,7 @@ fn extract_from_if_body<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -1572,6 +1663,7 @@ fn extract_from_while_body<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -1584,6 +1676,7 @@ fn extract_from_while_body<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1597,6 +1690,7 @@ fn extract_from_while_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1613,6 +1707,7 @@ fn extract_from_for_body<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -1625,6 +1720,7 @@ fn extract_from_for_body<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1638,6 +1734,7 @@ fn extract_from_for_body<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1654,6 +1751,7 @@ fn extract_from_switch_body<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -1670,6 +1768,7 @@ fn extract_from_switch_body<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -1680,12 +1779,14 @@ fn extract_from_switch_body<'a>(
 
 // ─── Class-like extractors ──────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_class<'a>(
     class: &Class<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -1704,6 +1805,7 @@ fn extract_from_class<'a>(
         var_defs,
         scopes,
         template_defs,
+        call_sites,
         trivias,
         content,
         0,
@@ -1755,18 +1857,21 @@ fn extract_from_class<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_interface<'a>(
     iface: &Interface<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -1785,6 +1890,7 @@ fn extract_from_interface<'a>(
         var_defs,
         scopes,
         template_defs,
+        call_sites,
         trivias,
         content,
         0,
@@ -1821,18 +1927,21 @@ fn extract_from_interface<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_trait<'a>(
     trait_def: &Trait<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -1851,6 +1960,7 @@ fn extract_from_trait<'a>(
         var_defs,
         scopes,
         template_defs,
+        call_sites,
         trivias,
         content,
         0,
@@ -1877,18 +1987,21 @@ fn extract_from_trait<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
         );
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_enum<'a>(
     enum_def: &Enum<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -1907,6 +2020,7 @@ fn extract_from_enum<'a>(
         var_defs,
         scopes,
         template_defs,
+        call_sites,
         trivias,
         content,
         0,
@@ -1944,6 +2058,7 @@ fn extract_from_enum<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
         );
@@ -1966,6 +2081,7 @@ fn extract_from_attribute_lists<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -1988,6 +2104,7 @@ fn extract_from_attribute_lists<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -1997,12 +2114,14 @@ fn extract_from_attribute_lists<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_class_member<'a>(
     member: &ClassLikeMember<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -2014,6 +2133,7 @@ fn extract_from_class_member<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -2028,6 +2148,7 @@ fn extract_from_class_member<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
             );
@@ -2051,6 +2172,7 @@ fn extract_from_class_member<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     0,
@@ -2060,12 +2182,14 @@ fn extract_from_class_member<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_method<'a>(
     method: &Method<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -2076,6 +2200,7 @@ fn extract_from_method<'a>(
         var_defs,
         scopes,
         template_defs,
+        call_sites,
         trivias,
         content,
         0,
@@ -2140,6 +2265,7 @@ fn extract_from_method<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 method_scope_start,
@@ -2161,6 +2287,7 @@ fn extract_from_method<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 method_scope_start,
@@ -2230,12 +2357,14 @@ fn extract_from_property<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_class_constant<'a>(
     constant: &ClassLikeConstant<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -2258,6 +2387,7 @@ fn extract_from_class_constant<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
             0,
@@ -2267,12 +2397,14 @@ fn extract_from_class_constant<'a>(
 
 // ─── Function extractor ─────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn extract_from_function<'a>(
     func: &Function<'a>,
     spans: &mut Vec<SymbolSpan>,
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
 ) {
@@ -2283,6 +2415,7 @@ fn extract_from_function<'a>(
         var_defs,
         scopes,
         template_defs,
+        call_sites,
         trivias,
         content,
         0,
@@ -2342,6 +2475,7 @@ fn extract_from_function<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 func_scope_start,
@@ -2362,6 +2496,7 @@ fn extract_from_function<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
             func_scope_start,
@@ -2486,6 +2621,7 @@ fn extract_from_expression<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -2601,6 +2737,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -2608,12 +2745,18 @@ fn extract_from_expression<'a>(
                 }
             }
             if let Some(ref args) = inst.argument_list {
+                // Emit call site for constructor: `new ClassName(...)`
+                let class_text = expr_to_subject_text(inst.class);
+                if !class_text.is_empty() {
+                    emit_call_site(format!("new {}", class_text), args, call_sites);
+                }
                 extract_from_arguments(
                     &args.arguments,
                     spans,
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2641,11 +2784,17 @@ fn extract_from_expression<'a>(
                             var_defs,
                             scopes,
                             template_defs,
+                            call_sites,
                             trivias,
                             content,
                             scope_start,
                         );
                     }
+                }
+                // Emit call site for function call
+                let func_text = expr_to_subject_text(func_call.function);
+                if !func_text.is_empty() {
+                    emit_call_site(func_text, &func_call.argument_list, call_sites);
                 }
                 extract_from_arguments(
                     &func_call.argument_list.arguments,
@@ -2653,6 +2802,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2666,6 +2816,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2673,6 +2824,12 @@ fn extract_from_expression<'a>(
 
                 if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
                     let member_name = ident.value.to_string();
+                    // Emit call site for method call: `$subject->method(...)`
+                    emit_call_site(
+                        format!("{}->{}", &subject_text, &member_name),
+                        &method_call.argument_list,
+                        call_sites,
+                    );
                     spans.push(SymbolSpan {
                         start: ident.span.start.offset,
                         end: ident.span.end.offset,
@@ -2690,6 +2847,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2703,6 +2861,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2710,6 +2869,14 @@ fn extract_from_expression<'a>(
 
                 if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
                     let member_name = ident.value.to_string();
+                    // Emit call site for null-safe method call.
+                    // Use `->` so resolve_callable handles it the same
+                    // as regular method calls.
+                    emit_call_site(
+                        format!("{}->{}", &subject_text, &member_name),
+                        &method_call.argument_list,
+                        call_sites,
+                    );
                     spans.push(SymbolSpan {
                         start: ident.span.start.offset,
                         end: ident.span.end.offset,
@@ -2727,6 +2894,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2740,6 +2908,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2747,6 +2916,12 @@ fn extract_from_expression<'a>(
 
                 if let ClassLikeMemberSelector::Identifier(ident) = &static_call.method {
                     let member_name = ident.value.to_string();
+                    // Emit call site for static method call: `Class::method(...)`
+                    emit_call_site(
+                        format!("{}::{}", &subject_text, &member_name),
+                        &static_call.argument_list,
+                        call_sites,
+                    );
                     spans.push(SymbolSpan {
                         start: ident.span.start.offset,
                         end: ident.span.end.offset,
@@ -2764,6 +2939,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -2782,6 +2958,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -2809,6 +2986,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -2836,6 +3014,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -2863,6 +3042,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -2897,6 +3077,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -2907,6 +3088,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -2961,6 +3143,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -2971,6 +3154,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -2985,6 +3169,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -2997,6 +3182,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3011,6 +3197,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3025,6 +3212,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3036,6 +3224,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3047,6 +3236,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3061,6 +3251,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3073,6 +3264,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3085,6 +3277,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3099,6 +3292,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3109,6 +3303,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3153,6 +3348,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         closure_scope_start,
@@ -3184,6 +3380,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     closure_scope_start,
@@ -3228,6 +3425,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         arrow_scope_start,
@@ -3243,6 +3441,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 arrow_scope_start,
@@ -3257,6 +3456,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3271,6 +3471,7 @@ fn extract_from_expression<'a>(
                                 var_defs,
                                 scopes,
                                 template_defs,
+                                call_sites,
                                 trivias,
                                 content,
                                 scope_start,
@@ -3282,6 +3483,7 @@ fn extract_from_expression<'a>(
                             var_defs,
                             scopes,
                             template_defs,
+                            call_sites,
                             trivias,
                             content,
                             scope_start,
@@ -3294,6 +3496,7 @@ fn extract_from_expression<'a>(
                             var_defs,
                             scopes,
                             template_defs,
+                            call_sites,
                             trivias,
                             content,
                             scope_start,
@@ -3311,6 +3514,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3327,6 +3531,7 @@ fn extract_from_expression<'a>(
                         var_defs,
                         scopes,
                         template_defs,
+                        call_sites,
                         trivias,
                         content,
                         scope_start,
@@ -3340,6 +3545,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3350,6 +3556,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3362,6 +3569,7 @@ fn extract_from_expression<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3377,6 +3585,7 @@ fn extract_from_expression<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
@@ -3448,6 +3657,7 @@ fn extract_from_arguments<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -3463,6 +3673,7 @@ fn extract_from_arguments<'a>(
             var_defs,
             scopes,
             template_defs,
+            call_sites,
             trivias,
             content,
             scope_start,
@@ -3478,6 +3689,7 @@ fn extract_from_array_elements<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -3491,6 +3703,7 @@ fn extract_from_array_elements<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3501,6 +3714,7 @@ fn extract_from_array_elements<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3513,6 +3727,7 @@ fn extract_from_array_elements<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3525,6 +3740,7 @@ fn extract_from_array_elements<'a>(
                     var_defs,
                     scopes,
                     template_defs,
+                    call_sites,
                     trivias,
                     content,
                     scope_start,
@@ -3544,6 +3760,7 @@ fn emit_class_expr_span<'a>(
     var_defs: &mut Vec<VarDefSite>,
     scopes: &mut Vec<(u32, u32)>,
     template_defs: &mut Vec<TemplateParamDef>,
+    call_sites: &mut Vec<CallSite>,
     trivias: &[Trivia<'a>],
     content: &str,
     scope_start: u32,
@@ -3591,12 +3808,40 @@ fn emit_class_expr_span<'a>(
                 var_defs,
                 scopes,
                 template_defs,
+                call_sites,
                 trivias,
                 content,
                 scope_start,
             );
         }
     }
+}
+
+// ─── Call site emission ─────────────────────────────────────────────────────
+
+/// Build and push a [`CallSite`] from an argument list and its call expression string.
+fn emit_call_site(
+    call_expression: String,
+    argument_list: &ArgumentList<'_>,
+    call_sites: &mut Vec<CallSite>,
+) {
+    if call_expression.is_empty() {
+        return;
+    }
+    let args_start = argument_list.left_parenthesis.end.offset;
+    let args_end = argument_list.right_parenthesis.start.offset;
+    let comma_offsets: Vec<u32> = argument_list
+        .arguments
+        .tokens
+        .iter()
+        .map(|t| t.start.offset)
+        .collect();
+    call_sites.push(CallSite {
+        args_start,
+        args_end,
+        call_expression,
+        comma_offsets,
+    });
 }
 
 // ─── Expression to subject text ─────────────────────────────────────────────
@@ -3682,6 +3927,32 @@ fn expr_to_subject_text(expr: &Expression<'_>) -> String {
 
         Expression::Parenthesized(paren) => expr_to_subject_text(paren.expression),
 
+        Expression::ArrayAccess(access) => {
+            let base = expr_to_subject_text(access.array);
+            if base.is_empty() {
+                return String::new();
+            }
+            // Preserve string keys for array-shape resolution;
+            // collapse everything else to `[]` (generic element access),
+            // matching the convention used by `extract_arrow_subject`.
+            let bracket = match access.index {
+                Expression::Literal(Literal::String(s)) => {
+                    // `s.raw` includes surrounding quotes (e.g. `'key'`).
+                    // Strip them to get the bare key, then re-wrap in
+                    // single quotes for the subject format.
+                    let raw = s.raw;
+                    let inner = raw
+                        .strip_prefix('\'')
+                        .and_then(|r| r.strip_suffix('\''))
+                        .or_else(|| raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
+                        .unwrap_or(raw);
+                    format!("['{}']", inner)
+                }
+                _ => "[]".to_string(),
+            };
+            format!("{}{}", base, bracket)
+        }
+
         _ => String::new(),
     }
 }
@@ -3736,6 +4007,13 @@ fn format_first_class_arg(args: &TokenSeparatedSequence<'_, Argument<'_>>) -> St
             // $variable
             Expression::Variable(Variable::Direct(dv)) => {
                 return dv.name.to_string();
+            }
+            // new ClassName(…) → "new ClassName()"
+            Expression::Instantiation(inst) => {
+                let class_text = expr_to_subject_text(inst.class);
+                if !class_text.is_empty() {
+                    return format!("new {}()", class_text);
+                }
             }
             _ => {}
         }

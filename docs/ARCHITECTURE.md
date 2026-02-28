@@ -8,7 +8,7 @@ PHPantom is a language server that provides completion and go-to-definition for 
 
 1. **Parsing** PHP files into lightweight `ClassInfo` / `FunctionInfo` structures (not a full AST — just the information needed for IDE features).
 2. **Caching** parsed results in an in-memory `ast_map` keyed by file URI.
-3. **Building** a precomputed symbol map (`symbol_maps`) during parsing for O(log n) go-to-definition lookups.
+3. **Building** a precomputed symbol map (`symbol_maps`) during parsing for O(log n) go-to-definition lookups and call-site detection for signature help.
 4. **Resolving** symbols on demand through a multi-phase lookup chain.
 5. **Merging** inherited members (from parent classes, traits, interfaces, and mixins) at resolution time.
 
@@ -24,7 +24,7 @@ src/
 ├── stubs.rs                # Embedded phpstorm-stubs (build-time generated index)
 ├── resolution.rs           # Multi-phase class/function lookup and name resolution
 ├── inheritance.rs          # Base class inheritance merging (traits, parent chain)
-├── symbol_map.rs           # Precomputed per-file symbol location map (SymbolSpan, VarDefSite, SymbolMap)
+├── symbol_map.rs           # Precomputed per-file symbol location map (SymbolSpan, VarDefSite, CallSite, SymbolMap)
 ├── virtual_members/
 │   ├── mod.rs              # VirtualMemberProvider trait, VirtualMembers struct, merge logic
 │   ├── laravel.rs          # LaravelModelProvider (relationships, scopes, casts, accessors)
@@ -144,6 +144,78 @@ Variable go-to-definition (`$var` → jump to definition) uses three layers:
 1. **Symbol map** (`var_defs`): the primary path. Finds the most recent `VarDefSite` before the cursor within the enclosing scope. When the cursor is physically on a definition token (parameter, foreach binding, catch variable), it returns `None` so the caller can fall through to type-hint resolution.
 2. **AST-based search** (`resolve_variable_definition_ast`): parses the file and walks the enclosing scope to find the definition site. Handles destructuring (`[$a, $b] = ...`, `list($a, $b) = ...`) and nested scopes correctly. Used as a fallback when the symbol map doesn't have a match.
 3. **Text-based search** (`resolve_variable_definition_text`): the original heuristic line scanner. Only activated when the AST parse fails.
+
+## Signature Help Architecture
+
+Signature help shows parameter hints when the cursor is inside the parentheses
+of a function or method call. Detection uses a **two-tier** strategy:
+
+### Tier 1: Precomputed Call Sites (primary)
+
+During `update_ast`, every call expression in the file is recorded as a
+`CallSite` in the `SymbolMap`. Each entry stores:
+
+| Field | Purpose |
+|---|---|
+| `args_start` | Byte offset immediately after the opening `(` |
+| `args_end` | Byte offset of the closing `)` |
+| `call_expression` | The call target in `resolve_callable` format (see below) |
+| `comma_offsets` | Byte offsets of each top-level comma separator |
+
+Call sites are emitted for all five AST call kinds: `Call::Function`,
+`Call::Method`, `Call::NullSafeMethod`, `Call::StaticMethod`, and
+`Expression::Instantiation`. The `call_expression` string is built by
+`expr_to_subject_text`, which recursively converts the AST expression into
+the text format the resolver expects:
+
+- `"functionName"` for standalone function calls
+- `"$subject->method"` for instance and null-safe method calls
+- `"ClassName::method"` for static method calls
+- `"new ClassName"` for constructor calls
+
+When a signature help request arrives, `detect_call_site_from_map` converts
+the LSP position to a byte offset and searches the `call_sites` vec in
+reverse for the innermost entry whose argument range contains the cursor.
+The active parameter index is computed by counting how many precomputed
+comma offsets fall before the cursor. This handles nesting, strings
+containing commas/parens, and arbitrary chain depth correctly because the
+offsets come from the parser's token stream.
+
+### Tier 2: Text-Based Fallback
+
+When the symbol map has no matching call site (typically because the parser
+could not recover the call node from incomplete code, e.g. an unclosed `(`
+while the user is typing), the text-based scanner
+`detect_call_site_text_fallback` fires. It walks backward from the cursor
+to find an unmatched `(`, extracts the call expression with simple
+character-level scanning, and counts top-level commas. This path handles
+simple calls reliably but cannot resolve property chains, method return
+chains, or expressions containing balanced parentheses.
+
+If the text fallback also fails to resolve the callable (e.g. because the
+class context is missing from the broken AST), a content-patching strategy
+inserts `);` at the cursor position and re-parses the file to recover
+class context for resolution.
+
+### Call Expression Resolution
+
+`resolve_callable` dispatches on the call expression format:
+
+1. **`new ClassName`** — loads the class via `class_loader`, finds
+   `__construct`. Returns an empty parameter list when no constructor
+   is defined.
+2. **`$subject->method`** — splits at the last `->`, resolves the subject
+   via `resolve_target_classes` (which handles `$this`, variables,
+   property chains, call return chains, array access, etc.), then looks
+   up the method on the resolved class.
+3. **`ClassName::method`** — resolves `self`/`static`/`parent` keywords
+   and bare class names via `class_loader`, with a fallback to
+   `resolve_target_classes` for class-string variables
+   (e.g. `$cls = Pen::class; $cls::make()`).
+4. **`functionName`** — resolves via `resolve_function_name` (use map,
+   namespace, stubs). Falls back to first-class callable resolution:
+   if the expression is a `$variable`, scans backward for
+   `$var = target(...)` and recursively resolves the underlying target.
 
 ## Symbol Resolution: `find_or_load_class`
 

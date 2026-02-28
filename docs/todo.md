@@ -1,9 +1,11 @@
 # PHPantom — Remaining Work
 
-> Last updated: 2025-07-15
+> Last updated: 2026-02-28
 
 Items are ordered by **impact** (descending), then **effort** (ascending)
-within the same impact tier — so high-impact quick wins come first.
+within the same impact tier — so high-impact quick wins come first. The
+Critical tier tracks internal refactors that must land before new features
+because multiple subsystems depend on their infrastructure.
 
 Each item carries two ratings:
 
@@ -15,12 +17,66 @@ Each item carries two ratings:
 ---
 
 <!-- ============================================================ -->
+<!--  TIER 0 — CRITICAL (infrastructure refactors)                -->
+<!-- ============================================================ -->
+
+## Critical
+
+### 1. Named-argument completion: migrate to symbol map
+**Impact: Critical · Effort: Low**
+
+`detect_named_arg_context` in `named_args.rs` uses `find_enclosing_open_paren`
+and `extract_call_expression` (character-level backward scanning) to detect
+which function or method call the cursor is inside. This suffers from chain-
+resolution failures on `$this->prop->method(`, `$obj->first()->second(`,
+`(new Foo())->bar(`, and strings containing parentheses.
+
+The `CallSite` vector and `find_enclosing_call_site` are now available in
+`SymbolMap` (added during the signature help refactor). Named-arg completion
+can use `find_enclosing_call_site` as its primary detection path and fall
+back to the text scanner for broken ASTs, mirroring the approach already
+working in signature help.
+
+`resolve_named_arg_params` also has an `else { vec![] }` bug: when the
+subject of a `->` call doesn't start with `$` (e.g. a chain result or
+bare class name), it returns no parameters. The fix is the same one
+applied to signature help's `resolve_callable`: route all subjects
+through `resolve_target_classes` instead of guarding on `starts_with('$')`.
+
+---
+
+### 2. Completion member access: add symbol-map primary path
+**Impact: Critical · Effort: Medium**
+
+`try_member_access_completion` calls `extract_completion_target` (in
+`target.rs`), which uses `collapse_continuation_lines`,
+`extract_arrow_subject`, and `extract_double_colon_subject` from
+`subject_extraction.rs`. This is pure character-level backward scanning
+with no symbol-map involvement (confirmed: zero references to
+`symbol_map` in the entire `completion/` directory).
+
+Hover and go-to-definition already use `SymbolMap::lookup` to get a
+pre-extracted `MemberAccess { subject_text, member_name, is_static,
+is_method_call }` from the AST. Completion should adopt the same
+"symbol map primary, text fallback" pattern so it benefits from the
+AST's correct handling of `(new Foo())->`, call-result chains, array
+access chains, and null-safe chains.
+
+The main challenge is that completion fires while the user is actively
+typing, so the AST is frequently broken at the cursor. The text scanner
+is more resilient in that scenario, which is why it should remain as a
+fallback rather than being removed. The symbol-map path would improve
+accuracy for all cases where the parser successfully recovers.
+
+---
+
+<!-- ============================================================ -->
 <!--  TIER 1 — HIGH IMPACT                                        -->
 <!-- ============================================================ -->
 
 ## High Impact
 
-### 1. Pipe operator (PHP 8.5)
+### 3. Pipe operator (PHP 8.5)
 **Impact: High · Effort: Low**
 
 PHP 8.5 introduced the pipe operator (`|>`):
@@ -46,7 +102,7 @@ callable syntax (`htmlspecialchars(...)`), reuse the existing
 
 ---
 
-### 2. Function-level `@template` generic resolution
+### 4. Function-level `@template` generic resolution
 **Impact: High · Effort: Medium**
 
 `MethodInfo` has `template_params` and `template_bindings` fields that
@@ -147,7 +203,7 @@ manifestation of this gap.
 
 ---
 
-### 3. Parse and resolve `($param is T ? A : B)` return types
+### 5. Parse and resolve `($param is T ? A : B)` return types
 **Impact: High · Effort: Medium**
 
 PHPStan's stubs use conditional return type syntax in docblocks:
@@ -186,7 +242,7 @@ extend the existing `ConditionalReturnType` infrastructure.
 
 ---
 
-### 4. Warn when composer.json is missing or classmap is not optimized
+### 6. Warn when composer.json is missing or classmap is not optimized
 **Impact: High · Effort: Medium**
 
 PHPantom relies on Composer artifacts (`vendor/composer/autoload_classmap.php`,
@@ -261,7 +317,7 @@ For the non-optimized classmap case, offer action buttons:
 
 ---
 
-### 5. Find References (`textDocument/references`)
+### 7. Find References (`textDocument/references`)
 **Impact: High · Effort: Medium-High**
 
 Can't find all usages of a symbol. The precomputed `SymbolMap` (built
@@ -285,7 +341,7 @@ variable within its scope" without re-parsing.
 
 ## Medium-High Impact
 
-### 6. File system watching for vendor and project changes
+### 8. File system watching for vendor and project changes
 **Impact: Medium-High · Effort: Medium**
 
 PHPantom loads Composer artifacts (classmap, PSR-4 mappings, autoload
@@ -343,7 +399,7 @@ supports glob patterns like `**/vendor/composer/autoload_*.php`.
 
 ## Medium Impact
 
-### 7. No reverse jump: implementation → interface method declaration
+### 9. No reverse jump: implementation → interface method declaration
 **Impact: Medium · Effort: Low**
 
 Go-to-implementation lets you jump from an interface method to its concrete
@@ -360,7 +416,7 @@ target.
 
 ---
 
-### 8. `BackedEnum::from()` / `::tryFrom()` return type refinement
+### 10. `BackedEnum::from()` / `::tryFrom()` return type refinement
 **Impact: Medium · Effort: Low**
 
 When calling `MyEnum::from($value)` or `MyEnum::tryFrom($value)`,
@@ -377,14 +433,14 @@ See `BackedEnumFromMethodDynamicReturnTypeExtension` in PHPStan.
 
 ---
 
-### 9. Document Symbols (`textDocument/documentSymbol`)
+### 11. Document Symbols (`textDocument/documentSymbol`)
 **Impact: Medium · Effort: Low**
 
 No outline view. Editors can't show a file's class/method/property structure.
 
 ---
 
-### 10. Workspace Symbols (`workspace/symbol`)
+### 12. Workspace Symbols (`workspace/symbol`)
 **Impact: Medium · Effort: Low-Medium**
 
 Can't search for classes/functions across the project. The `ast_map`
@@ -396,7 +452,7 @@ LSP `Location`s.
 
 ---
 
-### 11. No go-to-definition for built-in (stub) functions and constants
+### 13. No go-to-definition for built-in (stub) functions and constants
 **Impact: Medium · Effort: Medium**
 
 Clicking on a built-in function name like `array_map`, `strlen`, or
@@ -418,7 +474,7 @@ limitation.
 
 ---
 
-### 12. Property hooks (PHP 8.4)
+### 14. Property hooks (PHP 8.4)
 **Impact: Medium · Effort: Medium**
 
 PHP 8.4 introduced property hooks (`get` / `set`):
@@ -453,7 +509,7 @@ scopes, and parse the set-visibility modifier into a new
 
 ---
 
-### 13. Narrow types of `&$var` parameters after function calls
+### 15. Narrow types of `&$var` parameters after function calls
 **Impact: Medium · Effort: Medium**
 
 When a function takes a parameter by reference, the variable's type
@@ -482,7 +538,7 @@ extension) or use a built-in map for known functions.
 
 ---
 
-### 14. SPL iterator generic stubs
+### 16. SPL iterator generic stubs
 **Impact: Medium · Effort: Medium**
 
 PHPStan's `iterable.stub` provides full `@template TKey` /
@@ -503,7 +559,7 @@ certainly missing these generic annotations.  We should either:
 
 ---
 
-### 15. Partial result streaming via `$/progress`
+### 17. Partial result streaming via `$/progress`
 **Impact: Medium · Effort: Medium-High**
 
 The LSP spec (3.17) allows requests that return arrays — such as
@@ -583,7 +639,7 @@ developer arrive before vendor matches, even within a single phase.
 
 ---
 
-### 16. Rename (`textDocument/rename`)
+### 18. Rename (`textDocument/rename`)
 **Impact: Medium · Effort: Medium-High**
 
 No rename refactoring support. Rename builds on find-references (§8) —
@@ -598,7 +654,7 @@ position without text scanning.
 
 ---
 
-### 17. Array functions needing new code paths
+### 19. Array functions needing new code paths
 **Impact: Medium · Effort: High**
 
 These functions have return type semantics that don't fit into either
@@ -637,7 +693,7 @@ These functions have return type semantics that don't fit into either
 
 ## Low-Medium Impact
 
-### 18. Asymmetric visibility (PHP 8.4)
+### 20. Asymmetric visibility (PHP 8.4)
 **Impact: Low-Medium · Effort: Low**
 
 Separate from property hooks, PHP 8.4 allows asymmetric visibility on
@@ -667,7 +723,7 @@ is just to store the value; context-aware filtering can follow later.
 
 ---
 
-### 19. `str_contains` / `str_starts_with` / `str_ends_with` → non-empty-string narrowing
+### 21. `str_contains` / `str_starts_with` / `str_ends_with` → non-empty-string narrowing
 **Impact: Low-Medium · Effort: Low**
 
 When `str_contains($haystack, $needle)` appears in a condition and
@@ -684,7 +740,7 @@ See `StrContainingTypeSpecifyingExtension` in PHPStan.
 
 ---
 
-### 20. `count` / `sizeof` comparison → non-empty-array narrowing
+### 22. `count` / `sizeof` comparison → non-empty-array narrowing
 **Impact: Low-Medium · Effort: Low**
 
 `if (count($arr) > 0)` or `if (count($arr) >= 1)` narrows `$arr` to
@@ -702,7 +758,7 @@ branches in `TypeSpecifier::specifyTypesInCondition`.
 
 ## Low Impact
 
-### 21. Short-name collisions in `find_implementors`
+### 23. Short-name collisions in `find_implementors`
 **Impact: Low · Effort: Low**
 
 `class_implements_or_extends` matches interfaces by both short name and
@@ -718,7 +774,7 @@ before comparison.
 
 ---
 
-### 22. Fiber type resolution
+### 24. Fiber type resolution
 **Impact: Low · Effort: Low**
 
 `Generator<TKey, TValue, TSend, TReturn>` has dedicated support for
@@ -733,7 +789,7 @@ Generator extraction in `docblock/types.rs`.
 
 ---
 
-### 23. Non-empty-string propagation through string functions
+### 25. Non-empty-string propagation through string functions
 **Impact: Low · Effort: Low**
 
 PHPStan tracks `non-empty-string` through string-manipulating
@@ -751,7 +807,7 @@ See `NonEmptyStringFunctionsReturnTypeExtension` in PHPStan.
 
 ---
 
-### 24. `Closure::bind()` / `Closure::fromCallable()` return type preservation
+### 26. `Closure::bind()` / `Closure::fromCallable()` return type preservation
 **Impact: Low · Effort: Low-Medium**
 
 Variables holding closure literals, arrow functions, and first-class
@@ -767,7 +823,7 @@ See `ClosureBindDynamicReturnTypeExtension` and
 
 ---
 
-### 25. Remove deprecated text-search fallbacks
+### 27. Remove deprecated text-search fallbacks
 **Impact: Low · Effort: Medium**
 
 The go-to-definition subsystem now uses the precomputed `SymbolMap` as
@@ -799,7 +855,7 @@ would let that deprecated function be removed entirely.
 
 ---
 
-### 26. Non-array functions with dynamic return types
+### 28. Non-array functions with dynamic return types
 **Impact: Low · Effort: High**
 
 PHPStan also provides dynamic return type extensions for many non-array
@@ -830,14 +886,31 @@ return types (less impactful for class-based completion).
 
 ---
 
-### 27. Diagnostics
+### 29. Language construct signature help and hover
+**Impact: Low · Effort: Low**
+
+PHP language constructs that use parentheses (`unset()`, `isset()`, `empty()`,
+`eval()`, `exit()`, `die()`, `print()`, `list()`) are not function calls in the
+AST. Mago parses them as dedicated statement/expression nodes (e.g.
+`Statement::Unset`) with no `ArgumentList`, so no `CallSite` is emitted and
+neither signature help nor hover fires inside their parentheses. The phpstorm-stubs
+don't define them either since they are keywords, not functions.
+
+Supporting them requires emitting synthetic `CallSite` entries from the
+statement-level extraction in `symbol_map.rs` and adding hardcoded parameter
+metadata (e.g. `unset(mixed ...$vars): void`) in `resolve_callable`. Hover would
+need a similar hardcoded lookup.
+
+---
+
+### 30. Diagnostics
 **Impact: Low (large scope) · Effort: Very High**
 
 No error reporting (undefined methods, type mismatches, etc.).
 
 ---
 
-### 28. Code Actions
+### 31. Code Actions
 **Impact: Low · Effort: Very High**
 
 No quick fixes or refactoring suggestions. No `codeActionProvider` in
@@ -845,7 +918,7 @@ No quick fixes or refactoring suggestions. No `codeActionProvider` in
 `WorkspaceEdit` generation infrastructure beyond trivial `TextEdit`s for
 use-statement insertion.
 
-#### 28a. Extract Function refactoring
+#### 30a. Extract Function refactoring
 
 Select a range of statements inside a method/function and extract them into a
 new function. The LSP would need to:
@@ -879,31 +952,34 @@ new function. The LSP would need to:
 
 | # | Item | Impact | Effort |
 |---|---|---|---|
-| 1 | Pipe operator (PHP 8.5) | High | Low |
-| 2 | Function-level `@template` generic resolution | High | Medium |
-| 3 | Conditional return type syntax | High | Medium |
-| 4 | Composer environment warnings | High | Medium |
-| 5 | Find References | High | Medium-High |
-| 6 | File system watching | Medium-High | Medium |
-| 7 | Reverse jump: impl → interface | Medium | Low |
-| 8 | `BackedEnum::from()` refinement | Medium | Low |
-| 9 | Document Symbols | Medium | Low |
-| 10 | Workspace Symbols | Medium | Low-Medium |
-| 11 | Built-in stub go-to-definition | Medium | Medium |
-| 12 | Property hooks (PHP 8.4) | Medium | Medium |
-| 13 | Parameter out types (by-reference) | Medium | Medium |
-| 14 | SPL iterator generic stubs | Medium | Medium |
-| 15 | Partial result streaming | Medium | Medium-High |
-| 16 | Rename | Medium | Medium-High |
-| 17 | Array functions (new code paths) | Medium | High |
-| 18 | Asymmetric visibility (PHP 8.4) | Low-Medium | Low |
-| 19 | `str_contains` / `str_starts_with` narrowing | Low-Medium | Low |
-| 20 | `count` / `sizeof` → non-empty-array | Low-Medium | Low |
-| 21 | Short-name collisions | Low | Low |
-| 22 | Fiber type resolution | Low | Low |
-| 23 | Non-empty-string propagation | Low | Low |
-| 24 | `Closure::bind()` preservation | Low | Low-Medium |
-| 25 | Remove deprecated text-search fallbacks | Low | Medium |
-| 26 | Non-array dynamic return types | Low | High |
-| 27 | Diagnostics | Low | Very High |
-| 28 | Code Actions / Extract Function | Low | Very High |
+| 1 | Named-arg completion: symbol-map migration | Critical | Low |
+| 2 | Completion member access: symbol-map primary path | Critical | Medium |
+| 3 | Pipe operator (PHP 8.5) | High | Low |
+| 4 | Function-level `@template` generic resolution | High | Medium |
+| 5 | Conditional return type syntax | High | Medium |
+| 6 | Composer environment warnings | High | Medium |
+| 7 | Find References | High | Medium-High |
+| 8 | File system watching | Medium-High | Medium |
+| 9 | Reverse jump: impl → interface | Medium | Low |
+| 10 | `BackedEnum::from()` refinement | Medium | Low |
+| 11 | Document Symbols | Medium | Low |
+| 12 | Workspace Symbols | Medium | Low-Medium |
+| 13 | Built-in stub go-to-definition | Medium | Medium |
+| 14 | Property hooks (PHP 8.4) | Medium | Medium |
+| 15 | Parameter out types (by-reference) | Medium | Medium |
+| 16 | SPL iterator generic stubs | Medium | Medium |
+| 17 | Partial result streaming | Medium | Medium-High |
+| 18 | Rename | Medium | Medium-High |
+| 19 | Array functions (new code paths) | Medium | High |
+| 20 | Asymmetric visibility (PHP 8.4) | Low-Medium | Low |
+| 21 | `str_contains` / `str_starts_with` narrowing | Low-Medium | Low |
+| 22 | `count` / `sizeof` → non-empty-array | Low-Medium | Low |
+| 23 | Short-name collisions | Low | Low |
+| 24 | Fiber type resolution | Low | Low |
+| 25 | Non-empty-string propagation | Low | Low |
+| 26 | `Closure::bind()` preservation | Low | Low-Medium |
+| 27 | Remove deprecated text-search fallbacks | Low | Medium |
+| 28 | Non-array dynamic return types | Low | High |
+| 29 | Language construct signature help / hover | Low | Low |
+| 30 | Diagnostics | Low | Very High |
+| 31 | Code Actions / Extract Function | Low | Very High |

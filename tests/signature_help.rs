@@ -773,3 +773,414 @@ async fn single_signature_returned() {
     assert_eq!(sh.signatures.len(), 1);
     assert_eq!(sh.active_signature, Some(0));
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  AST-based chain resolution (property chains, method return chains, etc.)
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn property_chain_method_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_prop_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Inner {\n",
+        "    public function process(string $data, int $flags): bool { return true; }\n",
+        "}\n",
+        "class Outer {\n",
+        "    /** @var Inner */\n",
+        "    public Inner $inner;\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $outer = new Outer();\n",
+        "        $outer->inner->process();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 11, 31).await.unwrap();
+    assert!(sig_label(&sh).contains("process"));
+    assert!(sig_label(&sh).contains("string $data"));
+    assert!(sig_label(&sh).contains("int $flags"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn this_property_chain_method_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_this_prop_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Service {\n",
+        "    public function execute(string $cmd): string { return ''; }\n",
+        "}\n",
+        "class Controller {\n",
+        "    /** @var Service */\n",
+        "    public Service $service;\n",
+        "    public function run() {\n",
+        "        $this->service->execute();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 8, 32).await.unwrap();
+    assert!(sig_label(&sh).contains("execute"));
+    assert!(sig_label(&sh).contains("string $cmd"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn deep_property_chain_method_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_deep_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Engine {\n",
+        "    public function start(int $rpm): bool { return true; }\n",
+        "}\n",
+        "class Car {\n",
+        "    /** @var Engine */\n",
+        "    public Engine $engine;\n",
+        "}\n",
+        "class Garage {\n",
+        "    /** @var Car */\n",
+        "    public Car $car;\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $garage = new Garage();\n",
+        "        $garage->car->engine->start();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 15, 36).await.unwrap();
+    assert!(sig_label(&sh).contains("start"));
+    assert!(sig_label(&sh).contains("int $rpm"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn method_return_chain() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_method_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Builder {\n",
+        "    public function where(string $col): self { return $this; }\n",
+        "    public function limit(int $n): self { return $this; }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $b = new Builder();\n",
+        "        $b->where('name')->limit();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 8, 33).await.unwrap();
+    assert!(sig_label(&sh).contains("limit"));
+    assert!(sig_label(&sh).contains("int $n"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn function_return_chain() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_func_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Widget {\n",
+        "    public function configure(string $key, string $val): self { return $this; }\n",
+        "}\n",
+        "/** @return Widget */\n",
+        "function makeWidget(): Widget { return new Widget(); }\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        makeWidget()->configure();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 8, 32).await.unwrap();
+    assert!(sig_label(&sh).contains("configure"));
+    assert!(sig_label(&sh).contains("string $key"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn static_method_return_chain() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_static_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Query {\n",
+        "    public static function create(): self { return new self(); }\n",
+        "    public function filter(string $expr): self { return $this; }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        Query::create()->filter();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 7, 32).await.unwrap();
+    assert!(sig_label(&sh).contains("filter"));
+    assert!(sig_label(&sh).contains("string $expr"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn new_expression_chain() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_new_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Printer {\n",
+        "    public function print(string $text): void {}\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        (new Printer())->print();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 6, 31).await.unwrap();
+    assert!(sig_label(&sh).contains("print"));
+    assert!(sig_label(&sh).contains("string $text"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn nullsafe_method_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_nullsafe.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Formatter {\n",
+        "    public function format(string $pattern): string { return ''; }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        /** @var Formatter|null $fmt */\n",
+        "        $fmt = null;\n",
+        "        $fmt?->format();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 8, 22).await.unwrap();
+    assert!(sig_label(&sh).contains("format"));
+    assert!(sig_label(&sh).contains("string $pattern"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn property_then_method_chain_second_param() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_chain_2nd.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Logger {\n",
+        "    public function log(string $level, string $msg): void {}\n",
+        "}\n",
+        "class App {\n",
+        "    /** @var Logger */\n",
+        "    public Logger $logger;\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $app = new App();\n",
+        "        $app->logger->log('info', );\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let sh = sig_help_at(&backend, &uri, text, 11, 33).await.unwrap();
+    assert!(sig_label(&sh).contains("log"));
+    assert_eq!(active_param(&sh), 1);
+}
+
+#[tokio::test]
+async fn nested_call_correct_site() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_nested_site.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function outer(int $a, int $b): int { return 0; }\n",
+        "function inner(string $s): string { return ''; }\n",
+        "outer(inner(\n",
+    );
+
+    // Cursor inside inner() — should resolve to inner, param 0
+    let sh = sig_help_at(&backend, &uri, text, 3, 12).await.unwrap();
+    assert!(sig_label(&sh).contains("inner"));
+    assert!(sig_label(&sh).contains("string $s"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn zero_param_method_closed_parens() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_zero_param.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Pen {\n",
+        "    public function write(): string { return ''; }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $pen = new Pen();\n",
+        "        $pen->write();\n",
+        "    }\n",
+        "}\n",
+    );
+    // Cursor between ( and ) of write() — line 7, char 20
+    // "        $pen->write();" — '(' at char 19, ')' at 20
+    let result = sig_help_at(&backend, &uri, text, 7, 20).await;
+    assert!(
+        result.is_some(),
+        "signature help should fire for zero-param method"
+    );
+    let sh = result.unwrap();
+    assert!(sig_label(&sh).contains("write"));
+}
+
+#[tokio::test]
+async fn constructor_no_explicit_ctor() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_no_ctor.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Simple {\n",
+        "    public function greet(): string { return 'hi'; }\n",
+        "}\n",
+        "$obj = new Simple();\n",
+    );
+    // Cursor between ( and ) of new Simple() — line 4, char 18
+    // "$obj = new Simple();" — '(' at 17, ')' at 18
+    let result = sig_help_at(&backend, &uri, text, 4, 18).await;
+    assert!(
+        result.is_some(),
+        "signature help should fire for class with no __construct"
+    );
+    let sh = result.unwrap();
+    assert!(sig_label(&sh).contains("Simple"));
+}
+
+#[tokio::test]
+async fn generic_chain_with_new_expression_arg() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_generic_new_arg.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Product {\n",
+        "    public function getPrice(int $qty): float { return 0.0; }\n",
+        "}\n",
+        "/** @template T */\n",
+        "class Wrap {\n",
+        "    /** @return T */\n",
+        "    public function first(): mixed { return null; }\n",
+        "}\n",
+        "class Mapper {\n",
+        "    /**\n",
+        "     * @template T\n",
+        "     * @param T $item\n",
+        "     * @return Wrap<T>\n",
+        "     */\n",
+        "    public function wrap(object $item): Wrap { return new Wrap(); }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $mapper = new Mapper();\n",
+        "        $mapper->wrap(new Product())->first()->getPrice();\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Cursor between ( and ) of getPrice() — line 20
+    // "        $mapper->wrap(new Product())->first()->getPrice();"
+    //  '(' for getPrice is at char 54, ')' at 55
+    let sh = sig_help_at(&backend, &uri, text, 20, 56).await.unwrap();
+    assert!(sig_label(&sh).contains("getPrice"));
+    assert!(sig_label(&sh).contains("int $qty"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn array_access_method_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_array_access.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Pen {\n",
+        "    public function write(string $text): string { return ''; }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        /** @var list<Pen> $pens */\n",
+        "        $pens = [];\n",
+        "        $pens[0]->write();\n",
+        "    }\n",
+        "}\n",
+    );
+    // Line 8: "        $pens[0]->write();"
+    // '(' at char 23, ')' at 24
+    let result = sig_help_at(&backend, &uri, text, 8, 24).await;
+    assert!(
+        result.is_some(),
+        "signature help should fire for array access method call"
+    );
+    let sh = result.unwrap();
+    assert!(sig_label(&sh).contains("write"));
+}
+
+#[tokio::test]
+async fn class_string_variable_static_call() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_class_string.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Pen {\n",
+        "    public static function make(string $ink): static { return new static(); }\n",
+        "}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $cls = Pen::class;\n",
+        "        $cls::make();\n",
+        "    }\n",
+        "}\n",
+    );
+    // Line 7: "        $cls::make();"
+    // '(' at char 18, ')' at 19
+    let sh = sig_help_at(&backend, &uri, text, 7, 19).await.unwrap();
+    assert!(sig_label(&sh).contains("make"));
+    assert!(sig_label(&sh).contains("string $ink"));
+    assert_eq!(active_param(&sh), 0);
+}
+
+#[tokio::test]
+async fn first_class_callable_invocation() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///sig_fcc.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "function makePen(string $ink): Pen { return new Pen(); }\n",
+        "class Pen {}\n",
+        "class Demo {\n",
+        "    public function test() {\n",
+        "        $fn = makePen(...);\n",
+        "        $fn();\n",
+        "    }\n",
+        "}\n",
+    );
+    // Line 6: "        $fn();"
+    // '(' at char 11, ')' at 12
+    let sh = sig_help_at(&backend, &uri, text, 6, 12).await.unwrap();
+    assert!(sig_label(&sh).contains("makePen"));
+    assert!(sig_label(&sh).contains("string $ink"));
+    assert_eq!(active_param(&sh), 0);
+}

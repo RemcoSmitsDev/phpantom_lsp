@@ -5,9 +5,11 @@
 //! names, types, and return type) along with the index of the parameter
 //! currently being typed.
 //!
-//! The implementation reuses the call-expression detection helpers from
-//! `named_args` and the same type-resolution pipeline that powers
-//! completion and hover.
+//! The primary detection path uses precomputed [`CallSite`] data from the
+//! [`SymbolMap`] (AST-based, handles chains and nesting correctly).  When
+//! the symbol map has no matching call site (e.g. the parser couldn't
+//! recover an unclosed paren), we fall back to text-based backward
+//! scanning so that signature help still works on incomplete code.
 
 use tower_lsp::lsp_types::*;
 
@@ -17,6 +19,7 @@ use crate::completion::named_args::{
     split_args_top_level,
 };
 use crate::completion::resolver::ResolutionCtx;
+use crate::symbol_map::SymbolMap;
 use crate::types::*;
 
 /// Information about a signature help call site, extracted from the source
@@ -30,13 +33,45 @@ struct CallSiteContext {
     active_parameter: u32,
 }
 
-// ─── Detection ──────────────────────────────────────────────────────────────
+// ─── AST-based detection ────────────────────────────────────────────────────
 
-/// Detect whether the cursor is inside a function/method call and extract
-/// the call expression and active parameter index.
+/// Detect the call site using precomputed [`CallSite`] data from the
+/// symbol map.
+///
+/// Converts the LSP `Position` to a byte offset, finds the innermost
+/// `CallSite` whose argument list contains the cursor, and computes the
+/// active parameter index from the precomputed comma offsets.
+fn detect_call_site_from_map(
+    symbol_map: &SymbolMap,
+    content: &str,
+    position: Position,
+) -> Option<CallSiteContext> {
+    let cursor_byte_offset = crate::Backend::position_to_offset(content, position);
+    let cs = symbol_map.find_enclosing_call_site(cursor_byte_offset)?;
+    // Active parameter = number of commas before the cursor.
+    let active = cs
+        .comma_offsets
+        .iter()
+        .filter(|&&comma| comma < cursor_byte_offset)
+        .count() as u32;
+    Some(CallSiteContext {
+        call_expression: cs.call_expression.clone(),
+        active_parameter: active,
+    })
+}
+
+// ─── Text-based detection (fallback) ────────────────────────────────────────
+
+/// Detect whether the cursor is inside a function/method call using
+/// text-based backward scanning.
+///
+/// This is the **fallback** path used when the AST-based detection
+/// (via `detect_call_site_from_map`) has no hit — typically because the
+/// parser couldn't recover the call node from incomplete code (e.g. an
+/// unclosed `(`).
 ///
 /// Returns `None` if the cursor is not inside call parentheses.
-fn detect_call_site(content: &str, position: Position) -> Option<CallSiteContext> {
+fn detect_call_site_text_fallback(content: &str, position: Position) -> Option<CallSiteContext> {
     let chars: Vec<char> = content.chars().collect();
     let cursor = position_to_char_offset(&chars, position)?;
 
@@ -205,37 +240,61 @@ impl Backend {
     /// Returns `Some(SignatureHelp)` when the cursor is inside a
     /// function or method call and the callable can be resolved, or
     /// `None` otherwise.
+    ///
+    /// Detection strategy:
+    /// 1. **AST-based** — look up the precomputed `CallSite` in the
+    ///    symbol map.  This handles chains, nesting, and strings correctly.
+    /// 2. **Text fallback** — when the symbol map has no hit (e.g. the
+    ///    parser couldn't recover the call node from incomplete code),
+    ///    fall back to the text-based backward scanner.
     pub(crate) fn handle_signature_help(
         &self,
         uri: &str,
         content: &str,
         position: Position,
     ) -> Option<SignatureHelp> {
-        let site = detect_call_site(content, position)?;
         let ctx = self.file_context(uri);
 
-        // Try resolving with the current (possibly broken) AST first.
-        if let Some(result) = self.resolve_signature(&site, content, position, &ctx) {
+        // ── Primary path: AST-based detection via symbol map ────────
+        let symbol_map = self
+            .symbol_maps
+            .lock()
+            .ok()
+            .and_then(|m| m.get(uri).cloned());
+
+        if let Some(ref sm) = symbol_map
+            && let Some(site) = detect_call_site_from_map(sm, content, position)
+            && let Some(result) = self.resolve_signature(&site, content, position, &ctx)
+        {
             return Some(result);
         }
 
-        // If resolution failed, the parser may have choked on
-        // incomplete code (e.g. an unclosed `(`).  Patch the content
-        // by inserting `);` at the cursor position so the class body
-        // becomes syntactically valid, then re-parse and retry.
-        let patched = Self::patch_content_for_signature(content, position);
-        if patched != content {
-            let patched_classes = self.parse_php(&patched);
-            if !patched_classes.is_empty() {
-                let patched_ctx = FileContext {
-                    classes: patched_classes,
-                    use_map: ctx.use_map.clone(),
-                    namespace: ctx.namespace.clone(),
-                };
-                if let Some(result) =
-                    self.resolve_signature(&site, &patched, position, &patched_ctx)
-                {
-                    return Some(result);
+        // ── Fallback: text-based detection ──────────────────────────
+        // The parser may not have produced a call node (e.g. unclosed
+        // paren while typing).  The text scanner handles this because
+        // it only needs an unmatched `(`.
+        if let Some(site) = detect_call_site_text_fallback(content, position) {
+            // Try with current AST first.
+            if let Some(result) = self.resolve_signature(&site, content, position, &ctx) {
+                return Some(result);
+            }
+
+            // Patch content (insert `);` at cursor) and retry with
+            // a re-parsed AST so resolution can find class context.
+            let patched = Self::patch_content_for_signature(content, position);
+            if patched != content {
+                let patched_classes = self.parse_php(&patched);
+                if !patched_classes.is_empty() {
+                    let patched_ctx = FileContext {
+                        classes: patched_classes,
+                        use_map: ctx.use_map.clone(),
+                        namespace: ctx.namespace.clone(),
+                    };
+                    if let Some(result) =
+                        self.resolve_signature(&site, &patched, position, &patched_ctx)
+                    {
+                        return Some(result);
+                    }
                 }
             }
         }
@@ -286,12 +345,20 @@ impl Backend {
             let class_name = class_name.trim();
             let ci = class_loader(class_name)?;
             let merged = Self::resolve_class_fully(&ci, &class_loader);
-            let ctor = merged.methods.iter().find(|m| m.name == "__construct")?;
             let fqn = format_fqn(&merged.name, &merged.file_namespace);
+            // When the class has no explicit __construct, show an
+            // empty-parameter signature so the user still sees the
+            // class name and return type in the signature popup.
+            let (parameters, return_type) =
+                if let Some(ctor) = merged.methods.iter().find(|m| m.name == "__construct") {
+                    (ctor.parameters.clone(), ctor.return_type.clone())
+                } else {
+                    (vec![], None)
+                };
             return Some(ResolvedCallable {
                 label_prefix: fqn,
-                parameters: ctor.parameters.clone(),
-                return_type: ctor.return_type.clone(),
+                parameters,
+                return_type,
             });
         }
 
@@ -303,7 +370,7 @@ impl Backend {
             let owner_classes: Vec<ClassInfo> =
                 if subject == "$this" || subject == "self" || subject == "static" {
                     current_class.cloned().into_iter().collect()
-                } else if subject.starts_with('$') {
+                } else {
                     let rctx = ResolutionCtx {
                         current_class,
                         all_classes: &ctx.classes,
@@ -313,8 +380,6 @@ impl Backend {
                         function_loader: Some(&function_loader_cl),
                     };
                     Self::resolve_target_classes(subject, crate::AccessKind::Arrow, &rctx)
-                } else {
-                    vec![]
                 };
 
             for owner in &owner_classes {
@@ -347,7 +412,21 @@ impl Backend {
                     .and_then(|cc| cc.parent_class.as_ref())
                     .and_then(|p| class_loader(p))
             } else {
-                class_loader(class_part)
+                // Try as a literal class name first, then fall back to
+                // resolving as a class-string variable (e.g. `$cls = Pen::class; $cls::make()`).
+                class_loader(class_part).or_else(|| {
+                    let rctx = ResolutionCtx {
+                        current_class,
+                        all_classes: &ctx.classes,
+                        content,
+                        cursor_offset,
+                        class_loader: &class_loader,
+                        function_loader: Some(&function_loader_cl),
+                    };
+                    Self::resolve_target_classes(class_part, crate::AccessKind::DoubleColon, &rctx)
+                        .into_iter()
+                        .next()
+                })
             };
 
             let owner = owner_class?;
@@ -365,17 +444,62 @@ impl Backend {
         }
 
         // ── Standalone function: `functionName` ─────────────────────
-        let func = self.resolve_function_name(expr, &ctx.use_map, &ctx.namespace)?;
-        let fqn = if let Some(ref ns) = func.namespace {
-            format!("{}\\{}", ns, func.name)
-        } else {
-            func.name.clone()
-        };
-        Some(ResolvedCallable {
-            label_prefix: fqn,
-            parameters: func.parameters.clone(),
-            return_type: func.return_type.clone(),
-        })
+        if let Some(func) = self.resolve_function_name(expr, &ctx.use_map, &ctx.namespace) {
+            let fqn = if let Some(ref ns) = func.namespace {
+                format!("{}\\{}", ns, func.name)
+            } else {
+                func.name.clone()
+            };
+            return Some(ResolvedCallable {
+                label_prefix: fqn,
+                parameters: func.parameters.clone(),
+                return_type: func.return_type.clone(),
+            });
+        }
+
+        // ── Variable callable invocation: `$fn()` where `$fn = target(...)` ──
+        if expr.starts_with('$')
+            && let Some(callable_target) =
+                Self::extract_callable_target_from_variable(expr, content, cursor_offset)
+        {
+            return self.resolve_callable(&callable_target, content, position, ctx);
+        }
+
+        None
+    }
+
+    /// Scan backward from `cursor_offset` for an assignment like
+    /// `$fn = someTarget(...)` and return the callable target string
+    /// (e.g. `"makePen"`, `"$obj->method"`, `"ClassName::method"`).
+    ///
+    /// This enables signature help for first-class callable invocations:
+    /// `$fn = makePen(...); $fn()` shows `makePen`'s parameters.
+    fn extract_callable_target_from_variable(
+        var_name: &str,
+        content: &str,
+        cursor_offset: u32,
+    ) -> Option<String> {
+        let search_area = content.get(..cursor_offset as usize)?;
+        let assign_prefix = format!("{} = ", var_name);
+        let assign_pos = search_area.rfind(&assign_prefix)?;
+        let rhs_start = assign_pos + assign_prefix.len();
+
+        // Find the terminating `;`.
+        let remaining = &content[rhs_start..];
+        let semi_pos = remaining.find(';')?;
+        let rhs_text = remaining[..semi_pos].trim();
+
+        // Must end with `(...)` — the first-class callable syntax marker.
+        let callable_text = rhs_text.strip_suffix("(...)")?.trim_end();
+        if callable_text.is_empty() {
+            return None;
+        }
+
+        // Return the target in the format `resolve_callable` expects:
+        //   - `$this->method` or `$obj->method` → instance method
+        //   - `ClassName::method` → static method
+        //   - `functionName` → standalone function
+        Some(callable_text.to_string())
     }
 
     /// Insert `);` at the cursor position so that an unclosed call
@@ -442,7 +566,7 @@ fn clamp_active_param(active: u32, params: &[ParameterInfo]) -> u32 {
 mod tests {
     use super::*;
 
-    // ── detect_call_site ────────────────────────────────────────────
+    // ── detect_call_site_text_fallback ──────────────────────────────
 
     #[test]
     fn detect_simple_function_call() {
@@ -451,7 +575,7 @@ mod tests {
             line: 1,
             character: 4,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "foo");
         assert_eq!(site.active_parameter, 0);
     }
@@ -463,7 +587,7 @@ mod tests {
             line: 1,
             character: 8,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "foo");
         assert_eq!(site.active_parameter, 1);
     }
@@ -475,7 +599,7 @@ mod tests {
             line: 1,
             character: 13,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "foo");
         assert_eq!(site.active_parameter, 2);
     }
@@ -487,7 +611,7 @@ mod tests {
             line: 1,
             character: 10,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "$obj->bar");
         assert_eq!(site.active_parameter, 0);
     }
@@ -499,7 +623,7 @@ mod tests {
             line: 1,
             character: 9,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "Foo::bar");
         assert_eq!(site.active_parameter, 0);
     }
@@ -511,7 +635,7 @@ mod tests {
             line: 1,
             character: 8,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "new Foo");
         assert_eq!(site.active_parameter, 0);
     }
@@ -523,7 +647,7 @@ mod tests {
             line: 1,
             character: 6,
         };
-        assert!(detect_call_site(content, pos).is_none());
+        assert!(detect_call_site_text_fallback(content, pos).is_none());
     }
 
     #[test]
@@ -534,7 +658,7 @@ mod tests {
             line: 1,
             character: 8,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "bar");
         assert_eq!(site.active_parameter, 0);
     }
@@ -546,7 +670,7 @@ mod tests {
             line: 1,
             character: 12,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "foo");
         assert_eq!(site.active_parameter, 1);
     }
@@ -558,7 +682,7 @@ mod tests {
             line: 1,
             character: 16,
         };
-        let site = detect_call_site(content, pos).unwrap();
+        let site = detect_call_site_text_fallback(content, pos).unwrap();
         assert_eq!(site.call_expression, "foo");
         assert_eq!(site.active_parameter, 1);
     }
@@ -735,5 +859,195 @@ mod tests {
     #[test]
     fn clamp_empty_params() {
         assert_eq!(clamp_active_param(0, &[]), 0);
+    }
+
+    // ── detect_call_site_from_map ───────────────────────────────────
+
+    /// Helper: parse PHP source and build a SymbolMap, then call
+    /// `detect_call_site_from_map` at the given line/character.
+    fn map_detect(content: &str, line: u32, character: u32) -> Option<CallSiteContext> {
+        use bumpalo::Bump;
+        use mago_database::file::FileId;
+
+        let arena = Bump::new();
+        let file_id = FileId::new("test.php");
+        let program = mago_syntax::parser::parse_file_content(&arena, file_id, content);
+        let sm = crate::symbol_map::extract_symbol_map(program, content);
+        let pos = Position { line, character };
+        detect_call_site_from_map(&sm, content, pos)
+    }
+
+    #[test]
+    fn map_simple_function_call() {
+        // "foo($a, );" — cursor on the space before `)`, after the comma
+        //  f o o ( $ a ,   ) ;
+        //  0 1 2 3 4 5 6 7 8 9   (col on line 1)
+        let content = "<?php\nfoo($a, );";
+        let site = map_detect(content, 1, 7).unwrap();
+        assert_eq!(site.call_expression, "foo");
+        assert_eq!(site.active_parameter, 1);
+    }
+
+    #[test]
+    fn map_function_call_first_param() {
+        // "foo($a);" — cursor on `$` inside parens
+        //  f o o ( $ a ) ;
+        //  0 1 2 3 4 5 6 7
+        let content = "<?php\nfoo($a);";
+        let site = map_detect(content, 1, 5).unwrap();
+        assert_eq!(site.call_expression, "foo");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_method_call() {
+        // "$obj->bar($x);" — cursor on `$x` inside parens
+        //  $ o b j - > b a r (  $  x  )  ;
+        //  0 1 2 3 4 5 6 7 8 9 10 11 12 13
+        let content = "<?php\n$obj->bar($x);";
+        let site = map_detect(content, 1, 11).unwrap();
+        assert_eq!(site.call_expression, "$obj->bar");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_property_chain_method_call() {
+        // "$this->prop->method($x);" — cursor on `$x` inside method parens
+        //  $ t h i s - > p r o  p  -  >  m  e  t  h  o  d  (  $  x  )  ;
+        //  0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+        let content = "<?php\n$this->prop->method($x);";
+        let site = map_detect(content, 1, 22).unwrap();
+        assert_eq!(site.call_expression, "$this->prop->method");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_chained_method_result() {
+        // "$obj->first()->second($x);" — cursor inside second()'s parens
+        //  $ o b j - > f i r s  t  (  )  -  >  s  e  c  o  n  d  (  $  x  )  ;
+        //  0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25
+        let content = "<?php\n$obj->first()->second($x);";
+        let site = map_detect(content, 1, 24).unwrap();
+        assert_eq!(site.call_expression, "$obj->first()->second");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_static_method_call() {
+        // "Foo::bar($x);" — cursor on `$x` inside parens
+        //  F o o : : b a r (  $  x  )  ;
+        //  0 1 2 3 4 5 6 7 8  9 10 11 12
+        let content = "<?php\nFoo::bar($x);";
+        let site = map_detect(content, 1, 10).unwrap();
+        assert_eq!(site.call_expression, "Foo::bar");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_constructor_call() {
+        // "new Foo($x);" — cursor on `$x` inside parens
+        //  n e w   F o o (  $  x  )  ;
+        //  0 1 2 3 4 5 6 7  8  9 10 11
+        let content = "<?php\nnew Foo($x);";
+        let site = map_detect(content, 1, 9).unwrap();
+        assert_eq!(site.call_expression, "new Foo");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_nested_call_inner() {
+        // "foo(bar($x));" — cursor inside bar()'s parens on `$x`
+        //  f o o ( b a r (  $  x  )  )  ;
+        //  0 1 2 3 4 5 6 7  8  9 10 11 12
+        let content = "<?php\nfoo(bar($x));";
+        let site = map_detect(content, 1, 9).unwrap();
+        assert_eq!(site.call_expression, "bar");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_nested_call_outer() {
+        // "foo(bar($x), $y);" — cursor on `$y` in foo()'s second arg
+        //  f o o ( b a r (  $  x  )  ,     $  y  )  ;
+        //  0 1 2 3 4 5 6 7  8  9 10 11 12 13 14 15 16
+        let content = "<?php\nfoo(bar($x), $y);";
+        let site = map_detect(content, 1, 14).unwrap();
+        assert_eq!(site.call_expression, "foo");
+        assert_eq!(site.active_parameter, 1);
+    }
+
+    #[test]
+    fn map_string_with_commas() {
+        // "foo('a,b', $x);" — comma inside string not counted
+        //  f o o ( '  a  ,  b  '  ,     $  x  )  ;
+        //  0 1 2 3 4  5  6  7  8  9 10 11 12 13 14
+        let content = "<?php\nfoo('a,b', $x);";
+        let site = map_detect(content, 1, 11).unwrap();
+        assert_eq!(site.call_expression, "foo");
+        assert_eq!(site.active_parameter, 1);
+    }
+
+    #[test]
+    fn map_nullsafe_method_call() {
+        // "$obj?->format($x);" — cursor on `$x` inside parens
+        //  $ o b j ?  -  >  f  o  r  m  a  t  (  $  x  )  ;
+        //  0 1 2 3 4  5  6  7  8  9 10 11 12 13 14 15 16 17
+        let content = "<?php\n$obj?->format($x);";
+        let site = map_detect(content, 1, 15).unwrap();
+        assert_eq!(site.call_expression, "$obj->format");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_new_expression_chain() {
+        // "(new Foo())->method($x);" — cursor on `$x`
+        //  (  n  e  w     F  o  o  (  )  )  -  >  m  e  t  h  o  d  (  $  x  )  ;
+        //  0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17 18 19 20 21 22 23
+        let content = "<?php\n(new Foo())->method($x);";
+        let site = map_detect(content, 1, 21).unwrap();
+        assert_eq!(site.call_expression, "Foo->method");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_none_outside_parens() {
+        // "foo();" — cursor on `;` after closing paren
+        //  f o o ( ) ;
+        //  0 1 2 3 4 5
+        let content = "<?php\nfoo();";
+        assert!(map_detect(content, 1, 5).is_none());
+    }
+
+    #[test]
+    fn map_deep_property_chain() {
+        // "$a->b->c->d($x);" — cursor on `$x` inside d()'s parens
+        //  $ a - > b -  >  c  -  >  d  (  $  x  )  ;
+        //  0 1 2 3 4 5  6  7  8  9 10 11 12 13 14 15
+        let content = "<?php\n$a->b->c->d($x);";
+        let site = map_detect(content, 1, 13).unwrap();
+        assert_eq!(site.call_expression, "$a->b->c->d");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_function_return_chain() {
+        // "app()->make($x);" — cursor on `$x` inside make()'s parens
+        //  a p p (  )  -  >  m  a  k  e  (  $  x  )  ;
+        //  0 1 2 3  4  5  6  7  8  9 10 11 12 13 14 15
+        let content = "<?php\napp()->make($x);";
+        let site = map_detect(content, 1, 13).unwrap();
+        assert_eq!(site.call_expression, "app()->make");
+        assert_eq!(site.active_parameter, 0);
+    }
+
+    #[test]
+    fn map_third_parameter() {
+        // "foo($a, $b, $c);" — cursor on `$c` after two commas
+        //  f o o ( $  a  ,     $  b  ,     $  c  )  ;
+        //  0 1 2 3 4  5  6  7  8  9 10 11 12 13 14 15
+        let content = "<?php\nfoo($a, $b, $c);";
+        let site = map_detect(content, 1, 13).unwrap();
+        assert_eq!(site.call_expression, "foo");
+        assert_eq!(site.active_parameter, 2);
     }
 }

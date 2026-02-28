@@ -1316,6 +1316,11 @@ class SignatureHelpDemo
         $user->setStatus(Status::Active);          // instance method
         User::findByEmail('alice@example.com');    // static method
         new User('Bob', 'bob@example.com');        // constructor
+
+        // Chains resolve through return types and properties:
+        $user->getProfile()->setBio('Hello');                       // method return chain
+        (new User('X', 'x@x.com'))->setStatus(Status::Active);     // (new ...)->method
+        new User('X', 'x@x.com')->setStatus(Status::Active);     // PHP 8.4 style
     }
 }
 
