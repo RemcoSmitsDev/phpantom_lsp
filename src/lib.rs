@@ -58,6 +58,7 @@ pub mod docblock;
 mod hover;
 pub(crate) mod inheritance;
 mod parser;
+mod references;
 mod resolution;
 mod server;
 mod signature_help;
@@ -219,6 +220,13 @@ pub struct Backend {
     ///
     /// When empty (no workspace root), vendor-skipping is disabled.
     pub(crate) vendor_uri_prefix: Mutex<String>,
+    /// The vendor directory name (e.g. `"vendor"` or a custom path from
+    /// `composer.json`'s `config.vendor-dir`).
+    ///
+    /// Cached during `initialized` so that cross-file scans (find
+    /// references, go-to-implementation) can skip the vendor directory
+    /// without re-reading `composer.json` on every request.
+    pub(crate) vendor_dir_name: Mutex<String>,
 }
 
 impl Backend {
@@ -237,6 +245,7 @@ impl Backend {
             client: None,
             workspace_root: Arc::new(Mutex::new(None)),
             vendor_uri_prefix: Mutex::new(String::new()),
+            vendor_dir_name: Mutex::new("vendor".to_string()),
             psr4_mappings: Arc::new(Mutex::new(Vec::new())),
             use_map: Arc::new(Mutex::new(HashMap::new())),
             namespace_map: Arc::new(Mutex::new(HashMap::new())),

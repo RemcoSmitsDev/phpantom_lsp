@@ -210,10 +210,23 @@ impl Backend {
             }
         }
 
-        // Try PSR-4 resolution.
-        // resolve_class_in_file parses, caches, and uses keyword_offset
-        // (AST-based), falling back to text search only when the parser
-        // fails.
+        // Try Composer classmap: direct FQN → file path lookup.
+        // This covers vendor classes that haven't been loaded into ast_map
+        // yet (cold Ctrl+Click on a type hint never used in completion).
+        for fqn in &candidates {
+            if let Ok(cmap) = self.classmap.lock()
+                && let Some(file_path) = cmap.get(fqn.as_str()).cloned()
+            {
+                drop(cmap);
+                if let Some(location) = self.resolve_class_in_file(&file_path, fqn) {
+                    return Some(location);
+                }
+            }
+        }
+
+        // Try PSR-4 resolution as a last resort.
+        // PSR-4 mappings only cover user code (from composer.json).
+        // Vendor classes are resolved by the classmap above.
         let workspace_root = self
             .workspace_root
             .lock()

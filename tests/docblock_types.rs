@@ -921,7 +921,7 @@ async fn test_docblock_property_cross_file_psr4() {
     )
     .unwrap();
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
 
     // Open a file that uses @var Logger

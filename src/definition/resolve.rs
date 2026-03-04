@@ -97,7 +97,7 @@ impl Backend {
     ///
     /// Returns a cloned [`SymbolKind`] to avoid holding the mutex lock
     /// across the resolution logic.
-    pub(super) fn lookup_symbol_map(
+    pub(crate) fn lookup_symbol_map(
         &self,
         uri: &str,
         offset: u32,
@@ -236,9 +236,10 @@ impl Backend {
                 self.resolve_class_reference(uri, content, name, *is_fqn, cursor_offset)
             }
 
-            SymbolKind::ClassDeclaration { .. } => {
+            SymbolKind::ClassDeclaration { .. } | SymbolKind::MemberDeclaration { .. } => {
                 // The cursor is on a class/interface/trait/enum declaration
-                // name — the user is already at the definition site.
+                // name or a method/property/constant declaration name —
+                // the user is already at the definition site.
                 None
             }
 
@@ -316,10 +317,6 @@ impl Backend {
         // Classes discovered during autoload scanning (classmap, opened
         // files, previously navigated-to vendor files) live in
         // class_index (FQN → URI) and ast_map (URI → [ClassInfo]).
-        // This covers vendor classes whose namespaces may not appear in
-        // the root composer.json PSR-4 mappings (e.g. classmap-only
-        // packages or packages whose PSR-4 entry wasn't merged into the
-        // root autoload_psr4.php).
         for fqn in &candidates {
             let target_uri = self
                 .class_index
@@ -333,7 +330,23 @@ impl Backend {
             }
         }
 
+        // Cross-file via Composer classmap: direct FQN → file path lookup.
+        // This covers vendor classes that haven't been loaded into ast_map
+        // yet (cold Ctrl+Click on a class never used in completion/hover).
+        for fqn in &candidates {
+            if let Ok(cmap) = self.classmap.lock()
+                && let Some(file_path) = cmap.get(fqn.as_str()).cloned()
+            {
+                drop(cmap);
+                if let Some(location) = self.resolve_class_in_file(&file_path, fqn) {
+                    return Some(location);
+                }
+            }
+        }
+
         // Cross-file via PSR-4: parse on demand and cache.
+        // PSR-4 mappings only cover user code (from composer.json).
+        // Vendor classes are resolved by the classmap above.
         let workspace_root = self
             .workspace_root
             .lock()
@@ -758,10 +771,24 @@ impl Backend {
             }
         }
 
+        // Try Composer classmap: direct FQN → file path lookup.
+        {
+            let candidates = [fqn.as_str(), parent_name.as_str()];
+            for candidate in &candidates {
+                if let Ok(cmap) = self.classmap.lock()
+                    && let Some(file_path) = cmap.get(*candidate).cloned()
+                {
+                    drop(cmap);
+                    if let Some(location) = self.resolve_class_in_file(&file_path, candidate) {
+                        return Some(location);
+                    }
+                }
+            }
+        }
+
         // Try PSR-4 resolution as a last resort.
-        // resolve_class_in_file parses, caches, and uses keyword_offset
-        // (AST-based), falling back to text search only when the parser
-        // fails.
+        // PSR-4 mappings only cover user code (from composer.json).
+        // Vendor classes are resolved by the classmap above.
         let workspace_root = self
             .workspace_root
             .lock()

@@ -920,7 +920,7 @@ async fn test_implementation_classmap_file_scan() {
     let classmap = parse_autoload_classmap(dir.path(), "vendor");
     assert_eq!(classmap.len(), 3, "classmap should have 3 entries");
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
     if let Ok(mut cm) = backend.classmap().lock() {
         *cm = classmap;
@@ -991,7 +991,7 @@ async fn test_implementation_psr4_directory_scan() {
     fs::write(src.join("Notifiers/SmsNotifier.php"), sms_notifier_php).unwrap();
 
     // NO classmap — simulate a project without `composer dump-autoload -o`.
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
 
     // Only open the interface file.
@@ -1069,7 +1069,7 @@ async fn test_implementation_psr4_scan_skips_classmap_files() {
     .unwrap();
 
     let classmap = parse_autoload_classmap(dir.path(), "vendor");
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
     if let Ok(mut cm) = backend.classmap().lock() {
         *cm = classmap;
@@ -1123,7 +1123,7 @@ async fn test_implementation_psr4_scan_abstract_class() {
     fs::write(src.join("Base/Handler.php"), abstract_php).unwrap();
     fs::write(src.join("Handlers/ConcreteHandler.php"), concrete_php).unwrap();
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
 
     let iface_uri = Url::from_file_path(src.join("Base/Handler.php")).unwrap();
@@ -1185,7 +1185,7 @@ async fn test_implementation_method_via_psr4_scan() {
     fs::write(src.join("Services/UserService.php"), service_php).unwrap();
     fs::write(src.join("Repos/UserRepository.php"), impl_php).unwrap();
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
 
     // Open the interface and the service file (but NOT the implementor).

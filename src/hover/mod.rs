@@ -365,7 +365,7 @@ impl Backend {
                 )
             }
 
-            SymbolKind::ClassDeclaration { .. } => {
+            SymbolKind::ClassDeclaration { .. } | SymbolKind::MemberDeclaration { .. } => {
                 // The user is already at the definition site — showing
                 // hover here would just repeat what they can already see.
                 None

@@ -54,18 +54,16 @@ users. Item 14 builds on the code action infrastructure from 10-11.
 ## Sprint 2 — Refactoring & references
 
 Rename and Extract Function are the two refactoring pillars. Find
-References is a prerequisite for Rename and broadly useful on its own.
+References provides the variable/symbol usage tracking infrastructure
+that both depend on and is now complete.
 
 | # | Item | Effort | Domain | Doc Link |
 |---|---|---|---|---|
-| 15 | Find References (`textDocument/references`) | Medium-High | LSP Features | [todo-lsp-features.md §1](todo-lsp-features.md#1-find-references-textdocumentreferences) |
 | 16 | Rename (`textDocument/rename`) | Medium-High | LSP Features | [todo-lsp-features.md §7](todo-lsp-features.md#7-rename-textdocumentrename) |
 | 17 | Extract Function refactoring | Very High | Code Actions | [todo-actions.md §3](todo-actions.md#3-extract-function-refactoring) |
 
-**Why this order:** Find References (15) provides the variable/symbol
-usage tracking infrastructure that Rename (16) and Extract Function (17)
-both depend on. Rename is a smaller step that validates the
-infrastructure before tackling Extract Function.
+**Why this order:** Rename (16) is a smaller step that validates the
+Find References infrastructure before tackling Extract Function (17).
 
 ---
 

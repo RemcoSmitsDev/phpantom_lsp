@@ -85,3 +85,109 @@ class loader or use-map) and verify it lives under
 does) before classifying. The short-name-only path could remain as a
 fast-path fallback when the FQN is already in the
 `Illuminate\Database\Eloquent\Relations` namespace.
+
+---
+
+## 4. Go-to-implementation misses transitive implementors
+**Impact: Medium · Effort: Medium**
+
+`find_implementors` only finds classes that directly implement or extend
+the target interface/abstract class (plus one level of interface-extends
+and parent-class chains). It does not discover classes that extend a
+non-final concrete class which itself implements the target.
+
+**Example:**
+
+```php
+interface Renderable {}
+class BaseView implements Renderable {}  // found ✓
+class HtmlView extends BaseView {}       // missed ✗
+class JsonView extends HtmlView {}       // missed ✗
+```
+
+PhpStorm finds all three. PHPantom only finds `BaseView`.
+
+**Fix:** After the initial scan, collect all non-final concrete classes
+in the result set and re-scan for classes that extend them. Repeat until
+no new implementors are discovered (fixed-point iteration). The
+`seen_names` set prevents infinite loops. This only affects the
+`class_implements_or_extends` check — the five-phase file discovery
+pipeline stays the same.
+
+### Scanning strategy
+
+Only Go-to-implementation and Find References do multi-file scanning.
+All other features (completion, go-to-definition, hover, diagnostics)
+use maps or known file names and never walk directories.
+
+For both GTI and Find References, the scanning should follow these
+principles:
+
+- **Vendor code:** the classmap is the sole source of truth. Never walk
+  vendor directories. Vendor PSR-4 mappings are not loaded at all (see
+  §7). If the classmap is missing or stale, vendor classes fail to
+  resolve visibly (fix: run `composer dump-autoload`).
+- **User code:** walk user PSR-4 roots from `composer.json`. User files
+  may have been created since the last `dump-autoload`, so a filesystem
+  walk is appropriate.
+
+### Shared pre-filter for file scanning
+
+Both GTI (Phases 3 and 5) and Find References read raw file contents
+and use `raw.contains(target_short)` to skip files cheaply before
+parsing. This produces many false positives because `target_short` can
+appear in comments, strings, variable names, or as a substring of
+unrelated identifiers.
+
+A tighter regex-based pre-filter could eliminate most false positives.
+For a class name like `Renderable`, searching for a pattern like
+`\bRenderable\b` followed by a likely PHP context character (`;`, `(`,
+`,`, `{`, or preceded by `\`, `implements`, `extends`, `new`, `use`)
+would reject files that only mention the name in a comment or string.
+
+This should be extracted into a shared utility (e.g.
+`source_likely_references_name(raw: &str, name: &str) -> bool`) that
+both GTI and Find References can use. The exact pattern can be tuned
+over time without touching the callers.
+
+---
+
+## 5. Go-to-implementation Phase 5 should only walk user PSR-4 roots
+**Impact: Low · Effort: Low (fixed)**
+
+**Status:** Fixed. PSR-4 mappings now come exclusively from
+`composer.json` (user code only). Vendor PSR-4 mappings are no longer
+loaded (see §7), so Phase 5 inherently walks only user roots.
+
+---
+
+## 6. Go-to-definition does not check the classmap
+**Impact: Medium · Effort: Low (fixed)**
+
+**Status:** Fixed. `resolve_class_reference`, `resolve_self_static_parent`,
+and `resolve_type_hint_string_to_location` now check the Composer classmap
+(FQN → file path) between the class_index lookup and the PSR-4 fallback.
+A cold Ctrl+Click on a vendor class resolves through the classmap without
+needing vendor PSR-4 mappings.
+
+---
+
+## 7. Vendor PSR-4 mappings removed
+**Impact: Low · Effort: Low (fixed)**
+
+**Status:** Fixed. `parse_vendor_autoload_psr4` has been removed.
+`parse_composer_json` no longer reads `vendor/composer/autoload_psr4.php`.
+PSR-4 mappings come exclusively from the project's own `composer.json`
+(`autoload.psr-4` and `autoload-dev.psr-4`). The `is_vendor` flag on
+`Psr4Mapping` has been removed.
+
+All resolution paths that could hit a vendor class now check the classmap
+first (§6). If the classmap is missing or stale, vendor classes fail to
+resolve visibly (fix: run `composer dump-autoload`). This reduces startup
+time and memory for projects with large dependency trees.
+
+**Note for Rename Symbol:** when rename support is implemented, the
+handler should reject renames for symbols whose definition lives under
+the vendor directory. The user cannot meaningfully rename third-party
+code. Use `vendor_uri_prefix` to detect this and return an appropriate
+error message.

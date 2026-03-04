@@ -64,6 +64,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+                references_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
             server_info: Some(ServerInfo {
@@ -88,26 +89,14 @@ impl LanguageServer for Backend {
             let php_version = composer::detect_php_version(&root).unwrap_or_default();
             self.set_php_version(php_version);
 
-            let mappings = composer::parse_composer_json(&root);
+            let (mappings, vendor_dir) = composer::parse_composer_json(&root);
             let mapping_count = mappings.len();
 
-            // Determine the vendor directory (needed for autoload files).
-            let vendor_dir = {
-                let composer_path = root.join("composer.json");
-                if let Ok(content) = std::fs::read_to_string(&composer_path) {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                        json.get("config")
-                            .and_then(|c| c.get("vendor-dir"))
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.trim_end_matches('/').to_string())
-                            .unwrap_or_else(|| "vendor".to_string())
-                    } else {
-                        "vendor".to_string()
-                    }
-                } else {
-                    "vendor".to_string()
-                }
-            };
+            // Cache the vendor dir name so cross-file scans can skip it
+            // without re-reading composer.json on every request.
+            if let Ok(mut vdn) = self.vendor_dir_name.lock() {
+                *vdn = vendor_dir.clone();
+            }
 
             // Store the vendor URI prefix so diagnostics can skip vendor files.
             let vendor_path = root.join(&vendor_dir);
@@ -344,6 +333,27 @@ impl LanguageServer for Backend {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         self.handle_completion(params).await
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+        let include_declaration = params.context.include_declaration;
+
+        let content = self.get_file_content(&uri);
+
+        if let Some(content) = content {
+            let result =
+                crate::util::catch_panic_unwind_safe("references", &uri, Some(position), || {
+                    self.find_references(&uri, &content, position, include_declaration)
+                });
+
+            if let Some(locations) = result {
+                return Ok(locations);
+            }
+        }
+
+        Ok(None)
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {

@@ -462,7 +462,7 @@ async fn test_goto_definition_class_from_autoload_files() {
     )
     .unwrap();
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
 
     // Simulate server initialization — parse autoload files
@@ -940,7 +940,7 @@ async fn test_goto_definition_function_return_type_cross_file() {
     )
     .unwrap();
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
 
     // Simulate loading autoload files

@@ -662,6 +662,17 @@ fn extract_from_class_member<'a>(member: &'a ClassLikeMember<'a>, ctx: &mut Extr
 }
 
 fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut ExtractionCtx<'a>) {
+    // Method name — declaration site span for find-references and rename.
+    let is_static = method.modifiers.iter().any(|m| m.is_static());
+    ctx.spans.push(SymbolSpan {
+        start: method.name.span.start.offset,
+        end: method.name.span.end.offset,
+        kind: SymbolKind::MemberDeclaration {
+            name: method.name.value.to_string(),
+            is_static,
+        },
+    });
+
     // Attributes (PHP 8) on the method.
     extract_from_attribute_lists(&method.attribute_lists, ctx, 0);
 
@@ -833,6 +844,19 @@ fn extract_from_class_constant<'a>(
     constant: &'a ClassLikeConstant<'a>,
     ctx: &mut ExtractionCtx<'a>,
 ) {
+    // Constant name(s) — declaration site spans for find-references and rename.
+    // Class constants are always accessed statically (Foo::CONST).
+    for item in constant.items.iter() {
+        ctx.spans.push(SymbolSpan {
+            start: item.name.span.start.offset,
+            end: item.name.span.end.offset,
+            kind: SymbolKind::MemberDeclaration {
+                name: item.name.value.to_string(),
+                is_static: true,
+            },
+        });
+    }
+
     // Docblock.
     if let Some((doc_text, doc_offset)) =
         get_docblock_text_with_offset(ctx.trivias, ctx.content, constant)

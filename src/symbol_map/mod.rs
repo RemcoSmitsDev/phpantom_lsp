@@ -90,6 +90,20 @@ pub(crate) enum SymbolKind {
     /// A constant name in a navigable context (`define()` name,
     /// class constant access, standalone constant reference).
     ConstantReference { name: String },
+
+    /// A method, property, or constant name at its *declaration* site.
+    ///
+    /// Not navigable for go-to-definition or hover (the cursor is
+    /// already at the definition), but needed for find-references and
+    /// rename so that the declaration site participates in the match.
+    MemberDeclaration {
+        /// The member name (e.g. `"save"`, `"name"`, `"MAX_SIZE"`).
+        /// For properties this is the name WITHOUT the `$` prefix.
+        name: String,
+        /// Whether this is a static member (`static function`, `static $prop`,
+        /// or class constant — constants are always accessed statically).
+        is_static: bool,
+    },
 }
 
 // ─── Template parameter definition site structures ──────────────────────────

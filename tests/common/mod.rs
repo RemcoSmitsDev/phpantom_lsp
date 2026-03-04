@@ -378,7 +378,7 @@ pub fn create_psr4_workspace(
         fs::write(&full, content).expect("failed to write PHP file");
     }
 
-    let mappings = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
     let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
     (backend, dir)
 }

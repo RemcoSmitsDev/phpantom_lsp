@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Find References.** "Find All References" locates every usage of a symbol across the project. Supports classes, interfaces, traits, enums, methods, properties, constants, functions, and variables. Variable references are scoped to the enclosing function or closure. Cross-file scanning lazily indexes user files on demand (vendor and stub files are excluded, matching PhpStorm's behaviour). The workspace walk respects `.gitignore` rules, so generated/cached directories (blade cache, Symfony `var/cache/`, `node_modules/`, etc.) are automatically skipped.
+
 ### Changed
 
 - **Faster class resolution.** Fully-resolved classes (inheritance + virtual members) are now cached and reused across completion, hover, and go-to-definition within each request cycle. The cache is automatically cleared whenever a file changes, so results are never stale.
@@ -31,6 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Vendor class resolution simplified.** Vendor PSR-4 mappings (`vendor/composer/autoload_psr4.php`) are no longer loaded. The Composer classmap is the sole source of truth for vendor code. Go-to-definition now checks the classmap for vendor classes instead of relying on vendor PSR-4. If the classmap is missing or stale, vendor classes fail to resolve visibly instead of being silently papered over (fix: run `composer dump-autoload`). The `config.vendor-dir` setting is read once at startup and cached across all features.
 - **Named-argument resolution for non-variable subjects.** Named arguments now resolve correctly when the call target is a bare class name, a chain result, or a static method whose class name requires variable/chain resolution.
 - **GTD for `@method`/`@property` on interfaces.** Go-to-definition now walks implemented interfaces (own and from parents) before checking `@mixin` classes, so virtual members declared on interfaces resolve correctly.
 - **`?->` null-safe chain resolution.** The `->` inside `?->` no longer confuses subject splitting across completion, go-to-definition, and signature help.

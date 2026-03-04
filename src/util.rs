@@ -11,6 +11,7 @@
 /// find variables, call expressions, balanced parentheses, `new`
 /// expressions, etc.) live in [`crate::subject_extraction`].
 use std::panic::{self, AssertUnwindSafe, UnwindSafe};
+use std::path::{Path, PathBuf};
 
 use tower_lsp::lsp_types::*;
 
@@ -71,6 +72,92 @@ pub(crate) fn catch_panic_unwind_safe<T>(
     f: impl FnOnce() -> T,
 ) -> Option<T> {
     catch_panic(label, uri, position, AssertUnwindSafe(f))
+}
+
+/// Recursively collect all `.php` files under a directory, skipping the
+/// directory named `vendor_dir_name` and hidden directories (`.git`,
+/// `.idea`, etc.).
+///
+/// Used by Go-to-implementation (Phase 5) which walks PSR-4 source
+/// directories.  Does **not** consult `.gitignore` — PSR-4 roots are
+/// curated source directories where every `.php` file is relevant.
+///
+/// Silently skips directories and files that cannot be read (e.g.
+/// permission errors, broken symlinks).
+pub(crate) fn collect_php_files(dir: &Path, vendor_dir_name: &str) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                    && (name == vendor_dir_name || name.starts_with('.'))
+                {
+                    continue;
+                }
+                result.extend(collect_php_files(&path, vendor_dir_name));
+            } else if path.extension().is_some_and(|ext| ext == "php") {
+                result.push(path);
+            }
+        }
+    }
+    result
+}
+
+/// Recursively collect all `.php` files under a workspace root,
+/// respecting `.gitignore` rules (including nested and global
+/// gitignore files).
+///
+/// Used by Find References which walks the entire workspace root.
+/// Unlike [`collect_php_files`], this uses the `ignore` crate's
+/// [`WalkBuilder`] so that generated/cached directories listed in
+/// `.gitignore` (e.g. `storage/framework/views/`, `var/cache/`,
+/// `node_modules/`) are automatically skipped.
+///
+/// The vendor directory is always skipped regardless of `.gitignore`
+/// content, since some projects commit their vendor directory.
+///
+/// Hidden files and directories are skipped by default (handled by
+/// the `ignore` crate).
+pub(crate) fn collect_php_files_gitignore(root: &Path, vendor_dir_name: &str) -> Vec<PathBuf> {
+    use ignore::WalkBuilder;
+
+    let mut result = Vec::new();
+    let vendor_owned = vendor_dir_name.to_string();
+
+    let walker = WalkBuilder::new(root)
+        // Respect .gitignore, .git/info/exclude, global gitignore
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        // Skip hidden files/dirs (.git, .idea, etc.)
+        .hidden(true)
+        // Read parent .gitignore files
+        .parents(true)
+        // Also respect .ignore files (ripgrep convention)
+        .ignore(true)
+        // Always skip the vendor directory, even if not gitignored
+        .filter_entry(move |entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name == vendor_owned)
+            {
+                return false;
+            }
+            true
+        })
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
+            result.push(path.to_path_buf());
+        }
+    }
+
+    result
 }
 
 /// Convert a byte offset in `content` to an LSP `Position` (line, character).

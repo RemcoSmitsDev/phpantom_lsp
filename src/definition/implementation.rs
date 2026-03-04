@@ -17,7 +17,7 @@
 ///    declaration position; for method-level requests, return the method
 ///    position in each implementing class.
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tower_lsp::lsp_types::*;
 
@@ -27,27 +27,7 @@ use crate::Backend;
 use crate::completion::resolver::ResolutionCtx;
 use crate::symbol_map::SymbolKind;
 use crate::types::{ClassInfo, ClassLikeKind, FileContext, MAX_INHERITANCE_DEPTH};
-use crate::util::{find_class_at_offset, position_to_offset, short_name};
-
-/// Recursively collect all `.php` files under a directory.
-///
-/// Walks the directory tree rooted at `dir` and returns the paths of all
-/// files whose extension is `php`.  Silently skips directories and files
-/// that cannot be read (e.g. permission errors, broken symlinks).
-fn collect_php_files(dir: &Path) -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                result.extend(collect_php_files(&path));
-            } else if path.extension().is_some_and(|ext| ext == "php") {
-                result.push(path);
-            }
-        }
-    }
-    result
-}
+use crate::util::{collect_php_files, find_class_at_offset, position_to_offset, short_name};
 
 impl Backend {
     /// Entry point for `textDocument/implementation`.
@@ -309,8 +289,10 @@ impl Backend {
     /// 2. All classes loadable via `class_index`
     /// 3. Classmap files not yet loaded — string pre-filter then parse
     /// 4. Embedded PHP stubs — string pre-filter then lazy parse
-    /// 5. PSR-4 directories — walk for `.php` files not covered by the
-    ///    classmap, string pre-filter then parse
+    /// 5. User PSR-4 directories — walk for `.php` files not covered by
+    ///    the classmap, string pre-filter then parse.  Vendor PSR-4 roots
+    ///    are skipped because vendor classes are assumed complete in the
+    ///    classmap (Phase 3).
     ///
     /// Returns the list of concrete `ClassInfo` values (non-interface,
     /// non-abstract).
@@ -439,18 +421,29 @@ impl Backend {
             }
         }
 
-        // ── Phase 5: scan PSR-4 directories for files not in classmap ───
+        // ── Phase 5: scan user PSR-4 directories for files not in classmap
         // The user may have created classes that are not yet in the
-        // classmap (e.g. they haven't run `composer dump-autoload -o`).
-        // Walk every PSR-4 root directory, skip files already covered by
-        // the classmap or already loaded, then apply the same string
-        // pre-filter → parse → check pipeline.
+        // classmap.  Walk user PSR-4 roots only — vendor classes are
+        // assumed complete in the classmap (Phase 3) and should not
+        // require a filesystem walk.
         if let Some(workspace_root) = self
             .workspace_root
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
         {
+            // The vendor dir name is needed by collect_php_files even
+            // though we only walk user PSR-4 roots.  A fallback mapping
+            // like `"" => "."` resolves to the workspace root, so the
+            // walk must still skip the vendor directory (and hidden
+            // directories like .git).
+            let vendor_dir_name = self
+                .vendor_dir_name
+                .lock()
+                .ok()
+                .map(|v| v.clone())
+                .unwrap_or_else(|| "vendor".to_string());
+
             let psr4_dirs: Vec<PathBuf> = self
                 .psr4_mappings
                 .lock()
@@ -473,7 +466,7 @@ impl Backend {
                 .unwrap_or_default();
 
             for dir in &psr4_dirs {
-                for php_file in collect_php_files(dir) {
+                for php_file in collect_php_files(dir, &vendor_dir_name) {
                     // Skip files already covered by the classmap (Phase 3).
                     if classmap_paths.contains(&php_file) {
                         continue;

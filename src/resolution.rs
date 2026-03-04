@@ -96,6 +96,11 @@ impl Backend {
         }
 
         // ── Phase 2: Try PSR-4 resolution ──
+        // PSR-4 mappings come exclusively from composer.json (user code).
+        // Vendor code is covered by the classmap (Phase 1.5).  If a
+        // vendor class is missing from the classmap, it fails visibly
+        // rather than being silently resolved, making stale classmaps
+        // obvious (fix: run `composer dump-autoload`).
         if let Some(workspace_root) = self
             .workspace_root
             .lock()

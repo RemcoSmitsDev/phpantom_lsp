@@ -15,6 +15,7 @@ mago-syntax = "1.8"
 mago-database = "1.8"
 mago-span = "1.8"
 bumpalo = "3"
+ignore = "0.4"
 
 [dev-dependencies]
 datatest-stable = "0.2"

@@ -4,13 +4,24 @@ This document explains how PHPantom resolves PHP symbols — classes, interfaces
 
 ## Overview
 
-PHPantom is a language server that provides completion and go-to-definition for PHP projects. It works by:
+PHPantom is a language server for PHP projects. It provides completion, go-to-definition, go-to-implementation, find references, hover, signature help, and diagnostics. It works by:
 
 1. **Parsing** PHP files into lightweight `ClassInfo` / `FunctionInfo` structures (not a full AST — just the information needed for IDE features).
 2. **Caching** parsed results in an in-memory `ast_map` keyed by file URI.
 3. **Building** a precomputed symbol map (`symbol_maps`) during parsing for O(log n) go-to-definition lookups and call-site detection for signature help.
 4. **Resolving** symbols on demand through a multi-phase lookup chain.
 5. **Merging** inherited members (from parent classes, traits, interfaces, and mixins) at resolution time.
+
+### Multi-file scanning
+
+Most features (completion, go-to-definition, hover, signature help, diagnostics) use maps or known file names and never walk directories. Only two features do multi-file scanning:
+
+- **Go-to-implementation** scans for concrete classes that implement an interface or extend an abstract class (see `find_implementors`). Walks PSR-4 source directories only.
+- **Find References** scans for all occurrences of a symbol across the project (see `ensure_workspace_indexed`). Walks the entire workspace root.
+
+Both features follow the same principle for vendor code: the Composer classmap is the source of truth. Vendor directories are never walked. User PSR-4 roots from `composer.json` are walked because user files change between `dump-autoload` runs.
+
+The two walkers differ in scope because GTI only needs class declarations (which live in PSR-4 roots), while Find References needs any usage of a symbol, which could be in a standalone script, config file, or `index.php` at the project root.
 
 ## Module Layout
 
@@ -33,7 +44,7 @@ src/
 │   ├── laravel.rs          # LaravelModelProvider (relationships, scopes, casts, accessors)
 │   └── phpdoc.rs           # PHPDocProvider (@method, @property, @property-read, @property-write, @mixin)
 ├── subject_extraction.rs   # Shared helpers for extracting subjects before ->, ?->, ::
-├── util.rs                 # Position conversion, class lookup, logging
+├── util.rs                 # Position conversion, class lookup, logging, directory walkers (collect_php_files, collect_php_files_gitignore)
 ├── parser/
 │   ├── mod.rs              # Top-level parse entry points (parse_php, parse_functions, …)
 │   ├── classes.rs          # Class, interface, trait, enum, and anonymous class extraction
@@ -95,6 +106,13 @@ src/
 │   │   ├── var_definition.rs # AST walk finding variable definition sites
 │   │   └── type_hint.rs    # AST walk extracting type hints at definition sites
 │   └── implementation.rs   # Go-to-implementation (interface/abstract → concrete classes)
+├── references/
+│   ├── mod.rs              # Find References handler: same-file and cross-file symbol scanning
+│   └── tests.rs            # Unit tests for find-references
+├── diagnostics/
+│   ├── mod.rs              # Diagnostic collection and publishing (skips vendor files)
+│   ├── deprecated.rs       # @deprecated usage diagnostics (strikethrough)
+│   └── unused_imports.rs   # Unused use-statement dimming
 build.rs                    # Parses PhpStormStubsMap.php, generates stub index
 stubs/                      # Composer vendor dir for jetbrains/phpstorm-stubs
 tests/
@@ -126,7 +144,8 @@ During `update_ast`, every navigable symbol occurrence in a file is recorded as 
 | `Variable` | `$variable` tokens (both usage and definition sites) |
 | `FunctionCall` | Standalone function call names |
 | `SelfStaticParent` | `self`, `static`, `parent` keywords in navigable contexts |
-| `ConstantReference` | Constant names (reserved for future use) |
+| `ConstantReference` | Constant names (`define()` name, class constant access, standalone constant reference) |
+| `MemberDeclaration` | Method, property, or constant name at its declaration site (not navigable for go-to-definition, but needed for find-references) |
 
 When a go-to-definition request arrives, `resolve_definition` converts the cursor position to a byte offset and does a binary search on the symbol map. If a `SymbolSpan` is found, it dispatches directly to the appropriate resolution path — no text scanning needed. If the offset falls in a gap (whitespace, string interior, comment interior, etc.), the request is instantly rejected.
 
@@ -238,20 +257,25 @@ When the LSP needs to resolve a class name (e.g. during completion on `Iterator:
 ```
 find_or_load_class("Iterator")
 │
-├── Phase 0: class_index (FQN → URI)
-│   Fast lookup for classes indexed by fully-qualified name.
-│   Handles classes that don't follow PSR-4 (e.g. Composer autoload_files).
-│   ↓ miss
-│
 ├── Phase 1: ast_map scan
-│   Searches all already-parsed files by short class name.
+│   Searches all already-parsed files by short class name + namespace.
 │   This is where cached results from previous phases are found on
-│   subsequent lookups — a stub parsed in Phase 3 is cached here and
-│   found in Phase 1 next time.
+│   subsequent lookups — a classmap file parsed in Phase 1.5 or a
+│   stub parsed in Phase 3 is cached here and found in Phase 1
+│   next time.
 │   ↓ miss
 │
-├── Phase 2: PSR-4 resolution (user code)
-│   Uses Composer PSR-4 mappings to locate the file on disk.
+├── Phase 1.5: Composer classmap (FQN → file path)
+│   Direct hash lookup in the classmap parsed from
+│   vendor/composer/autoload_classmap.php.  More targeted than PSR-4
+│   and covers classes that don't follow PSR-4 conventions.  When the
+│   user runs `composer dump-autoload -o`, *all* classes (including
+│   vendor) end up in the classmap, giving complete coverage.
+│   ↓ miss
+│
+├── Phase 2: PSR-4 resolution
+│   Uses PSR-4 mappings from composer.json to locate the file on disk.
+│   These mappings only cover user code (vendor PSR-4 is not loaded).
 │   Example: "App\Models\User" → workspace/src/Models/User.php
 │   Reads, parses, resolves names, caches in ast_map.
 │   ↓ miss
@@ -269,6 +293,7 @@ find_or_load_class("Iterator")
 
 Every phase that successfully parses a file caches the result in `ast_map`. This means:
 
+- Phase 1.5 (classmap) files are parsed once, then found via Phase 1.
 - Phase 2 (PSR-4) files are parsed once, then found via Phase 1.
 - Phase 3 (stubs) are parsed once, then found via Phase 1.
 - Files opened in the editor are parsed on `didOpen`/`didChange` and always in Phase 1.
@@ -476,9 +501,12 @@ At resolution time, `merge_traits_into` loads the `UnitEnum` or `BackedEnum` stu
 `composer.rs` parses:
 
 - `composer.json` → `autoload.psr-4` and `autoload-dev.psr-4` mappings
-- `vendor/composer/autoload_psr4.php` → vendor package mappings
 
-These mappings are used by Phase 2 of `find_or_load_class` to locate PHP files on disk from fully-qualified class names.
+PSR-4 mappings come exclusively from the project's own `composer.json`. Vendor PSR-4 (`vendor/composer/autoload_psr4.php`) is not loaded. The Composer classmap is the sole source of truth for vendor code.
+
+**Design principle:** if the classmap is missing or stale, vendor classes fail to resolve visibly rather than being silently papered over by PSR-4. This makes the problem obvious to the user (fix: run `composer dump-autoload`). User PSR-4 roots are walked by Go-to-implementation (Phase 5) and Find References because user files change between `dump-autoload` runs.
+
+**Vendor dir detection:** the `config.vendor-dir` setting is read from `composer.json` once during `initialized` (via `parse_composer_json`, which returns both the PSR-4 mappings and the vendor dir name). The vendor dir name is cached on `Backend.vendor_dir_name` and a `file://` URI prefix is stored in `Backend.vendor_uri_prefix` for fast vendor-file detection at runtime.
 
 ### Autoload Files
 
@@ -535,11 +563,15 @@ find_implementors("Cacheable", "App\\Contracts\\Cacheable")
 
 ### Phase 5 Scope: User Code Only (by design)
 
-Phase 5 walks PSR-4 roots from `composer.json` (`autoload` and `autoload-dev`), **not** from `vendor/composer/autoload_psr4.php`. This means it only discovers classes in the user's own source directories (e.g. `src/`, `app/`, `tests/`), not in vendor dependencies.
+Phase 5 walks PSR-4 roots from `composer.json` (`autoload` and `autoload-dev`). Since PSR-4 mappings are sourced exclusively from the project's own `composer.json` (vendor PSR-4 is not loaded), Phase 5 inherently only discovers classes in the user's own source directories (e.g. `src/`, `app/`, `tests/`). Vendor dependencies are fully covered by the classmap (Phase 3).
 
-This is intentional. Vendor dependencies are managed by Composer and don't change during development — they are fully covered by the classmap (`composer dump-autoload -o`). The user's own files, on the other hand, change constantly and may not be in the classmap yet. Phase 5 exists specifically to catch those newly-created or not-yet-indexed user classes.
+Phase 5 exists to catch newly-created or not-yet-indexed user classes that are missing from the classmap (e.g. the user hasn't run `composer dump-autoload -o`).
 
-Do not "fix" this by adding vendor PSR-4 roots to the Phase 5 walk — that would scan tens of thousands of vendor files on every go-to-implementation request for no benefit, since Phase 3 already covers them via the classmap.
+Note: `collect_php_files` still receives the vendor dir name because a fallback mapping like `"" => "."` resolves to the workspace root, where the walk must skip the vendor directory (and hidden directories like `.git`).
+
+### Known Limitation: Transitive Implementors
+
+`find_implementors` currently misses classes that transitively implement the target through a concrete intermediate class. For example, if `BaseView implements Renderable` and `HtmlView extends BaseView`, only `BaseView` is found. PhpStorm finds both. See `todo-bugs.md` §4 for the fix plan.
 
 ### String Pre-Filter
 
@@ -552,6 +584,28 @@ Phases 3–5 avoid expensive parsing by first reading the raw file content and c
 ### Member-Level Implementation
 
 When the cursor is on a method call (e.g. `$repo->find()`), `resolve_member_implementations` first resolves the subject to candidate classes. If any candidate is an interface or abstract class, `find_implementors` is called and each implementor is checked for the specific method. Only classes that directly define (override) the method are returned — inherited-but-not-overridden methods are excluded.
+
+## Find References: `ensure_workspace_indexed`
+
+When the user invokes "Find All References", PHPantom scans all user files for occurrences of the symbol. Vendor files are excluded (matching PhpStorm's behaviour).
+
+### Indexing
+
+Before scanning, `ensure_workspace_indexed` ensures all user files have symbol maps:
+
+1. **Phase 1: class_index files (user only)** — files already known from `update_ast` calls. Vendor and stub URIs are skipped.
+2. **Phase 2: `.gitignore`-aware workspace walk** — uses the `ignore` crate's `WalkBuilder` to recursively discover PHP files under the workspace root, respecting `.gitignore` rules (including nested and global gitignore files). This automatically skips generated/cached directories like `storage/framework/views/` (Laravel blade cache), `var/cache/` (Symfony), and `node_modules/`. The vendor directory is always skipped regardless of `.gitignore` content. Hidden directories are skipped by default.
+
+### Cross-file scanning
+
+The `user_file_symbol_maps()` helper snapshots all symbol maps whose URI does not fall under the vendor directory or the internal stub scheme. Four scanners use this snapshot:
+
+- `find_class_references` — matches `ClassReference` spans by resolved FQN
+- `find_member_references` — matches `MemberAccess` and `MemberDeclaration` spans by member name
+- `find_function_references` — matches `FunctionCall` spans by resolved FQN
+- `find_constant_references` — matches `ConstantReference` spans by name
+
+Variable references (`$this`, local variables) are scoped to the enclosing function/class in the current file only, and do not use the cross-file scan.
 
 ## Union Type Completion (by design)
 

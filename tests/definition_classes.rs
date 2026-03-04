@@ -1,6 +1,7 @@
 mod common;
 
 use common::{create_psr4_workspace, create_test_backend};
+use phpantom_lsp::Backend;
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -588,40 +589,41 @@ async fn test_goto_definition_whitespace_returns_none() {
 
 #[tokio::test]
 async fn test_goto_definition_vendor_cross_file() {
-    let (backend, _dir) = create_psr4_workspace(
-        r#"{
-            "autoload": {
-                "psr-4": {
-                    "App\\": "src/"
-                }
-            }
-        }"#,
-        &[
-            (
-                "vendor/composer/autoload_psr4.php",
-                concat!(
-                    "<?php\n",
-                    "$vendorDir = dirname(__DIR__);\n",
-                    "$baseDir = dirname($vendorDir);\n",
-                    "\n",
-                    "return array(\n",
-                    "    'Monolog\\\\' => array($vendorDir . '/monolog/monolog/src/Monolog'),\n",
-                    ");\n",
-                ),
-            ),
-            (
-                "vendor/monolog/monolog/src/Monolog/Logger.php",
-                concat!(
-                    "<?php\n",
-                    "namespace Monolog;\n",
-                    "\n",
-                    "class Logger {\n",
-                    "    public function info(string $msg): void {}\n",
-                    "}\n",
-                ),
-            ),
-        ],
-    );
+    // Vendor classes are resolved via the Composer classmap, not vendor
+    // PSR-4.  This test verifies that a cold Ctrl+Click on a vendor class
+    // (never loaded by completion/hover) resolves through the classmap.
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    std::fs::write(
+        dir.path().join("composer.json"),
+        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+    )
+    .expect("failed to write composer.json");
+
+    // Create the vendor PHP file on disk.
+    let vendor_file = dir
+        .path()
+        .join("vendor/monolog/monolog/src/Monolog/Logger.php");
+    std::fs::create_dir_all(vendor_file.parent().unwrap()).unwrap();
+    std::fs::write(
+        &vendor_file,
+        concat!(
+            "<?php\n",
+            "namespace Monolog;\n",
+            "\n",
+            "class Logger {\n",
+            "    public function info(string $msg): void {}\n",
+            "}\n",
+        ),
+    )
+    .unwrap();
+
+    let (mappings, _vendor_dir) = phpantom_lsp::composer::parse_composer_json(dir.path());
+    let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), mappings);
+
+    // Populate classmap with the vendor class.
+    if let Ok(mut cm) = backend.classmap().lock() {
+        cm.insert("Monolog\\Logger".to_string(), vendor_file.clone());
+    }
 
     let uri = Url::parse("file:///app.php").unwrap();
     let text = concat!(
@@ -659,10 +661,7 @@ async fn test_goto_definition_vendor_cross_file() {
     };
 
     let result = backend.goto_definition(params).await.unwrap();
-    assert!(
-        result.is_some(),
-        "Should resolve vendor class via PSR-4 autoload"
-    );
+    assert!(result.is_some(), "Should resolve vendor class via classmap");
 
     match result.unwrap() {
         GotoDefinitionResponse::Scalar(location) => {

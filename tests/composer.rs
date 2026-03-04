@@ -1,6 +1,6 @@
 use phpantom_lsp::composer::{
     extract_require_once_paths, normalise_path, parse_autoload_classmap, parse_autoload_files,
-    parse_composer_json, parse_vendor_autoload_psr4, resolve_class_path,
+    parse_composer_json, resolve_class_path,
 };
 use std::fs;
 use std::path::Path;
@@ -45,7 +45,7 @@ fn test_parse_basic_psr4() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     assert_eq!(mappings.len(), 1);
     assert_eq!(mappings[0].prefix, "Klarna\\");
     assert_eq!(mappings[0].base_path, "src/Klarna/");
@@ -68,7 +68,7 @@ fn test_parse_autoload_dev() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     assert_eq!(mappings.len(), 2);
 
     // Longest prefix first
@@ -90,7 +90,7 @@ fn test_parse_array_paths() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     assert_eq!(mappings.len(), 2);
     assert_eq!(mappings[0].prefix, "App\\");
     assert_eq!(mappings[0].base_path, "src/");
@@ -101,14 +101,14 @@ fn test_parse_array_paths() {
 #[test]
 fn test_parse_no_composer_json() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
-    let mappings = parse_composer_json(dir.path());
+    let (mappings, _vendor_dir) = parse_composer_json(dir.path());
     assert!(mappings.is_empty());
 }
 
 #[test]
 fn test_parse_invalid_json() {
     let ws = TestWorkspace::new("not valid json {{{");
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     assert!(mappings.is_empty());
 }
 
@@ -123,7 +123,7 @@ fn test_parse_no_psr4_section() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     assert!(mappings.is_empty());
 }
 
@@ -143,7 +143,7 @@ fn test_resolve_simple_class() {
         "<?php\nnamespace Klarna;\nclass Customer {}\n",
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "Klarna\\Customer");
 
     assert!(result.is_some());
@@ -167,7 +167,7 @@ fn test_resolve_nested_namespace() {
         "<?php\nnamespace Klarna\\Rest;\nclass Order {}\n",
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "Klarna\\Rest\\Order");
 
     assert!(result.is_some());
@@ -191,7 +191,7 @@ fn test_resolve_strips_leading_backslash() {
         "<?php\nnamespace Klarna;\nclass Customer {}\n",
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "\\Klarna\\Customer");
 
     assert!(result.is_some());
@@ -209,7 +209,7 @@ fn test_resolve_nonexistent_file_returns_none() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "Klarna\\DoesNotExist");
 
     assert!(result.is_none());
@@ -227,7 +227,7 @@ fn test_resolve_no_matching_prefix() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "Acme\\Foo");
 
     assert!(result.is_none());
@@ -250,7 +250,7 @@ fn test_resolve_longest_prefix_wins() {
         "<?php\nnamespace Klarna\\Rest\\Tests;\nclass OrderTest {}\n",
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "Klarna\\Rest\\Tests\\OrderTest");
 
     assert!(result.is_some());
@@ -270,7 +270,7 @@ fn test_resolve_builtin_types_return_none() {
         }"#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
 
     for builtin in &[
         "self", "static", "parent", "string", "int", "float", "bool", "array", "object", "mixed",
@@ -301,7 +301,7 @@ fn test_resolve_array_paths_first_match() {
         "<?php\nnamespace App;\nclass Service {}\n",
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     let result = resolve_class_path(&mappings, ws.root(), "App\\Service");
 
     assert!(result.is_some());
@@ -322,116 +322,8 @@ fn test_normalise_path_converts_backslashes() {
 }
 
 #[test]
-fn test_vendor_autoload_basic() {
-    let ws = TestWorkspace::new(r#"{"name": "test/project"}"#);
-
-    // Create the vendor autoload file
-    ws.create_php_file(
-        "vendor/composer/autoload_psr4.php",
-        r#"<?php
-
-// autoload_psr4.php @generated by Composer
-
-$vendorDir = dirname(__DIR__);
-$baseDir = dirname($vendorDir);
-
-return array(
-    'voku\\' => array($vendorDir . '/voku/portable-ascii/src/voku'),
-    'Webmozart\\Assert\\' => array($vendorDir . '/webmozart/assert/src'),
-);
-"#,
-    );
-
-    let mappings = parse_vendor_autoload_psr4(ws.root(), "vendor");
-    assert_eq!(mappings.len(), 2);
-
-    assert_eq!(mappings[0].prefix, "voku\\");
-    assert_eq!(
-        mappings[0].base_path,
-        "vendor/voku/portable-ascii/src/voku/"
-    );
-
-    assert_eq!(mappings[1].prefix, "Webmozart\\Assert\\");
-    assert_eq!(mappings[1].base_path, "vendor/webmozart/assert/src/");
-}
-
-#[test]
-fn test_vendor_autoload_multiple_paths_per_prefix() {
-    let ws = TestWorkspace::new(r#"{"name": "test/project"}"#);
-
-    ws.create_php_file(
-        "vendor/composer/autoload_psr4.php",
-        r#"<?php
-
-$vendorDir = dirname(__DIR__);
-$baseDir = dirname($vendorDir);
-
-return array(
-    'phpDocumentor\\Reflection\\' => array($vendorDir . '/phpdocumentor/reflection-docblock/src', $vendorDir . '/phpdocumentor/type-resolver/src', $vendorDir . '/phpdocumentor/reflection-common/src'),
-);
-"#,
-    );
-
-    let mappings = parse_vendor_autoload_psr4(ws.root(), "vendor");
-    assert_eq!(mappings.len(), 3);
-
-    assert!(
-        mappings
-            .iter()
-            .all(|m| m.prefix == "phpDocumentor\\Reflection\\")
-    );
-    assert_eq!(
-        mappings[0].base_path,
-        "vendor/phpdocumentor/reflection-docblock/src/"
-    );
-    assert_eq!(
-        mappings[1].base_path,
-        "vendor/phpdocumentor/type-resolver/src/"
-    );
-    assert_eq!(
-        mappings[2].base_path,
-        "vendor/phpdocumentor/reflection-common/src/"
-    );
-}
-
-#[test]
-fn test_vendor_autoload_basedir_entries() {
-    let ws = TestWorkspace::new(r#"{"name": "test/project"}"#);
-
-    ws.create_php_file(
-        "vendor/composer/autoload_psr4.php",
-        r#"<?php
-
-$vendorDir = dirname(__DIR__);
-$baseDir = dirname($vendorDir);
-
-return array(
-    'App\\' => array($baseDir . '/src'),
-    'App\\Tests\\' => array($baseDir . '/tests'),
-);
-"#,
-    );
-
-    let mappings = parse_vendor_autoload_psr4(ws.root(), "vendor");
-    assert_eq!(mappings.len(), 2);
-
-    assert_eq!(mappings[0].prefix, "App\\");
-    assert_eq!(mappings[0].base_path, "src/");
-
-    assert_eq!(mappings[1].prefix, "App\\Tests\\");
-    assert_eq!(mappings[1].base_path, "tests/");
-}
-
-#[test]
-fn test_vendor_autoload_missing_file_returns_empty() {
-    let ws = TestWorkspace::new(r#"{"name": "test/project"}"#);
-    // No vendor directory at all — should not panic
-    let mappings = parse_vendor_autoload_psr4(ws.root(), "vendor");
-    assert!(mappings.is_empty());
-}
-
-#[test]
-fn test_vendor_autoload_custom_vendor_dir() {
+fn test_parse_composer_json_returns_vendor_dir() {
+    // parse_composer_json returns the vendor dir from config.vendor-dir
     let ws = TestWorkspace::new(
         r#"{
             "config": {
@@ -440,31 +332,17 @@ fn test_vendor_autoload_custom_vendor_dir() {
         }"#,
     );
 
-    ws.create_php_file(
-        "php-packages/composer/autoload_psr4.php",
-        r#"<?php
-
-$vendorDir = dirname(__DIR__);
-$baseDir = dirname($vendorDir);
-
-return array(
-    'Monolog\\' => array($vendorDir . '/monolog/monolog/src/Monolog'),
-);
-"#,
-    );
-
-    // parse_composer_json should pick up the custom vendor-dir and find the vendor autoload
-    let mappings = parse_composer_json(ws.root());
-    assert_eq!(mappings.len(), 1);
-    assert_eq!(mappings[0].prefix, "Monolog\\");
-    assert_eq!(
-        mappings[0].base_path,
-        "php-packages/monolog/monolog/src/Monolog/"
-    );
+    let (mappings, vendor_dir) = parse_composer_json(ws.root());
+    assert_eq!(vendor_dir, "php-packages");
+    // No PSR-4 sections → no mappings
+    assert!(mappings.is_empty());
 }
 
 #[test]
-fn test_vendor_autoload_integrated_with_composer_json() {
+fn test_parse_composer_json_excludes_vendor_psr4() {
+    // Even when vendor/composer/autoload_psr4.php exists, its mappings
+    // should NOT appear in the result — only composer.json's own
+    // autoload.psr-4 entries are returned.
     let ws = TestWorkspace::new(
         r#"{
             "autoload": {
@@ -489,62 +367,12 @@ return array(
 "#,
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
 
-    // Should have App\ from composer.json, plus App\ and Monolog\ from vendor autoload
-    assert!(mappings.len() >= 2);
-
-    // Monolog should be present (from vendor autoload)
-    let monolog = mappings.iter().find(|m| m.prefix == "Monolog\\");
-    assert!(monolog.is_some());
-    assert_eq!(
-        monolog.unwrap().base_path,
-        "vendor/monolog/monolog/src/Monolog/"
-    );
-
-    // App\ from composer.json should be present
-    let app_entries: Vec<_> = mappings.iter().filter(|m| m.prefix == "App\\").collect();
-    assert!(!app_entries.is_empty());
-    assert!(app_entries.iter().any(|m| m.base_path == "src/"));
-}
-
-#[test]
-fn test_vendor_autoload_resolve_vendor_class() {
-    let ws = TestWorkspace::new(
-        r#"{
-            "autoload": {
-                "psr-4": {
-                    "App\\": "src/"
-                }
-            }
-        }"#,
-    );
-
-    ws.create_php_file(
-        "vendor/composer/autoload_psr4.php",
-        r#"<?php
-
-$vendorDir = dirname(__DIR__);
-$baseDir = dirname($vendorDir);
-
-return array(
-    'Monolog\\' => array($vendorDir . '/monolog/monolog/src/Monolog'),
-);
-"#,
-    );
-
-    // Create the actual vendor PHP file so resolve_class_path can find it
-    ws.create_php_file(
-        "vendor/monolog/monolog/src/Monolog/Logger.php",
-        "<?php\nnamespace Monolog;\nclass Logger {}\n",
-    );
-
-    let mappings = parse_composer_json(ws.root());
-    let result = resolve_class_path(&mappings, ws.root(), "Monolog\\Logger");
-
-    assert!(result.is_some());
-    let path = result.unwrap();
-    assert!(path.ends_with("vendor/monolog/monolog/src/Monolog/Logger.php"));
+    // Only App\ from composer.json — Monolog\ from vendor autoload is excluded
+    assert_eq!(mappings.len(), 1);
+    assert_eq!(mappings[0].prefix, "App\\");
+    assert_eq!(mappings[0].base_path, "src/");
 }
 
 #[test]
@@ -563,7 +391,7 @@ fn test_prefix_without_trailing_backslash() {
         "<?php\nnamespace App;\nclass Service {}\n",
     );
 
-    let mappings = parse_composer_json(ws.root());
+    let (mappings, _vendor_dir) = parse_composer_json(ws.root());
     // The prefix gets normalised to "App\"
     assert_eq!(mappings[0].prefix, "App\\");
 

@@ -36,9 +36,7 @@ impl Backend {
         let mut namespaces: HashSet<String> = HashSet::new();
 
         // Collect the project's own PSR-4 prefixes (without trailing
-        // `\`) so we can gate which cache entries are eligible.  Vendor
-        // packages are excluded — you would never declare a namespace
-        // that lives inside a vendor package.
+        // `\`) so we can gate which cache entries are eligible.
         let psr4_prefixes: Vec<String> = self
             .psr4_mappings
             .lock()
@@ -46,7 +44,6 @@ impl Backend {
             .map(|mappings| {
                 mappings
                     .iter()
-                    .filter(|m| !m.is_vendor)
                     .map(|m| m.prefix.trim_end_matches('\\').to_string())
                     .filter(|p| !p.is_empty())
                     .collect()

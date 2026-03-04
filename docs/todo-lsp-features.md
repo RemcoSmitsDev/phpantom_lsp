@@ -10,24 +10,6 @@ within the same impact tier.
 
 ---
 
-## 1. Find References (`textDocument/references`)
-**Impact: High · Effort: Medium-High**
-
-Can't find all usages of a symbol. The precomputed `SymbolMap` (built
-during `update_ast` for every open file) already records every navigable
-symbol occurrence with byte offsets and a typed `SymbolKind` — class
-references, member accesses, variables, function calls, etc. This is
-exactly the index a find-references implementation needs for the current
-file. The main work is cross-file scanning: iterating `ast_map` entries
-(and lazily parsing uncached files) to collect matching symbol spans
-across the project.
-
-The `SymbolMap` also stores variable definition sites (`var_defs`) with
-scope boundaries, which directly supports "find all references to this
-variable within its scope" without re-parsing.
-
----
-
 ## 2. Document Highlighting (`textDocument/documentHighlight`)
 **Impact: Medium-High · Effort: Low**
 
@@ -249,6 +231,13 @@ which makes generating the text edits straightforward.
 For member renames, the stored `name_offset` on `MethodInfo`,
 `PropertyInfo`, and `ConstantInfo` provides the declaration-site edit
 position without text scanning.
+
+**Vendor rejection:** The rename handler must reject renames for symbols
+whose definition lives under the vendor directory. Users cannot
+meaningfully rename third-party code. Use `vendor_uri_prefix` to detect
+this and return an error via `prepareRename` (the LSP spec's
+`textDocument/prepareRename` request exists specifically so the server
+can reject a rename before the user types a new name).
 
 ---
 
