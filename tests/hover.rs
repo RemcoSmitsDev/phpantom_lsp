@@ -3,8 +3,8 @@
 mod common;
 
 use common::{
-    create_psr4_workspace, create_test_backend, create_test_backend_with_function_stubs,
-    create_test_backend_with_stdclass_stub,
+    create_psr4_workspace, create_test_backend, create_test_backend_with_closure_stub,
+    create_test_backend_with_function_stubs, create_test_backend_with_stdclass_stub,
 };
 use phpantom_lsp::Backend;
 use tower_lsp::lsp_types::*;
@@ -3262,7 +3262,7 @@ function demo(): void {
 
 #[test]
 fn hover_closure_in_parenthesized_callable_union() {
-    let backend = create_test_backend();
+    let backend = create_test_backend_with_closure_stub();
     let uri = "file:///test.php";
     let content = r#"<?php
 class Builder {

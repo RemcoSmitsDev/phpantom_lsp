@@ -223,6 +223,49 @@ static STDCLASS_STUB: &str = "\
 class stdClass {}
 ";
 
+// ─── Closure class stub ─────────────────────────────────────────────────────
+
+static CLOSURE_CLASS_STUB: &str = "\
+<?php
+/**
+ * Class used to represent anonymous functions.
+ * @link https://php.net/manual/en/class.closure.php
+ */
+final class Closure
+{
+    private function __construct() {}
+
+    /**
+     * @param callable $callback
+     * @return Closure
+     */
+    public static function fromCallable(callable $callback): Closure {}
+
+    /**
+     * @param object|null $newThis
+     * @param string|null $newScope
+     * @return Closure|null
+     */
+    public function bindTo(?object $newThis, ?string $newScope = \"static\"): ?Closure {}
+
+    /**
+     * @param Closure|null $closure
+     * @param object|null $newThis
+     * @param string|null $newScope
+     * @return Closure|null
+     */
+    public static function bind(?Closure $closure, ?object $newThis, ?string $newScope = \"static\"): ?Closure {}
+
+    /**
+     * @param mixed ...$args
+     * @return mixed
+     */
+    public function call(object $newThis, mixed ...$args): mixed {}
+
+    public function __invoke(): mixed {}
+}
+";
+
 // ─── Exception class stubs ──────────────────────────────────────────────────
 
 static EXCEPTION_CLASS_STUB: &str = "\
@@ -306,6 +349,15 @@ pub fn create_test_backend_with_exception_stubs() -> Backend {
 pub fn create_test_backend_with_stdclass_stub() -> Backend {
     let mut stubs: HashMap<&'static str, &'static str> = HashMap::new();
     stubs.insert("stdClass", STDCLASS_STUB);
+    Backend::new_test_with_stubs(stubs)
+}
+
+/// Create a test backend whose `stub_index` contains a minimal `Closure`
+/// stub.  This makes hover tests that resolve `\Closure` from stubs
+/// self-contained — they work without phpstorm-stubs installed.
+pub fn create_test_backend_with_closure_stub() -> Backend {
+    let mut stubs: HashMap<&'static str, &'static str> = HashMap::new();
+    stubs.insert("Closure", CLOSURE_CLASS_STUB);
     Backend::new_test_with_stubs(stubs)
 }
 

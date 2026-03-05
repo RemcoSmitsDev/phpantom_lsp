@@ -73,6 +73,8 @@ jobs:
           if ! git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
             # Create an orphan gh-pages branch without leaving the current checkout.
             # Build an empty tree and commit it, then push as the new branch.
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             empty_tree="$(git hash-object -t tree /dev/null)"
             commit="$(git commit-tree "$empty_tree" -m 'Initial gh-pages branch')"
             git push origin "$commit:refs/heads/gh-pages"
