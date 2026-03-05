@@ -27,7 +27,7 @@ PHPantom focuses on deep type intelligence. Here's how it compares:
 | Hover | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Signature help | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Find references | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Diagnostics | 🚧 | ✅ | ✅ | ✅ | ✅ |
+| Diagnostics | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Rename / refactoring | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Time to ready | **10 ms** | 1 min 25 s | 3 min 17 s | 15 min 39 s | 19 min 38 s |
 | RAM usage | **7 MB** | 520 MB | 3.9 GB | 498 MB | 2.0 GB |

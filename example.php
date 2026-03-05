@@ -1825,6 +1825,31 @@ class RemoveUnusedImportDemo
 }
 
 
+// ── Diagnostic: Unknown Member Access ───────────────────────────────────────
+// When PHPantom resolves the subject type but the member does not exist after
+// full resolution (inheritance, traits, virtual members), a yellow "Method
+// 'X' not found on class 'Y'" warning appears.  Suppressed when __call,
+// __callStatic, or __get magic methods are present on the resolved class.
+
+class UnknownMemberDemo
+{
+    public function demo(): void
+    {
+        $user = new User('test', 'test@example.com');
+
+        // These resolve fine — no warning:
+        $user->getEmail();
+        $user->getName();
+
+        // Try: uncomment the next line to see the warning:
+        $user->nonexistentMethod();
+
+        // Static access — unknown constant gets a warning:
+        User::MISSING_CONST;
+    }
+}
+
+
 // ── Hover: Enum Case Listing ────────────────────────────────────────────────
 // Hover on `Status` → shows all enum cases inside the code block.
 // Hover on `Priority` → shows backed enum cases with their string values.
@@ -3175,6 +3200,27 @@ namespace Illuminate\Database\Eloquent {
     abstract class Model {
         /** @return \Illuminate\Database\Eloquent\Builder<static> */
         public static function query() {}
+
+        /** @return \Illuminate\Database\Eloquent\Relations\HasMany<\Illuminate\Database\Eloquent\Model, $this> */
+        public function hasMany(string $related, ?string $foreignKey = null, ?string $localKey = null) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\HasOne<\Illuminate\Database\Eloquent\Model, $this> */
+        public function hasOne(string $related, ?string $foreignKey = null, ?string $localKey = null) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\BelongsTo<\Illuminate\Database\Eloquent\Model, $this> */
+        public function belongsTo(string $related, ?string $foreignKey = null, ?string $ownerKey = null) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<\Illuminate\Database\Eloquent\Model, $this> */
+        public function belongsToMany(string $related, ?string $table = null) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\MorphOne<\Illuminate\Database\Eloquent\Model, $this> */
+        public function morphOne(string $related, string $name) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\MorphMany<\Illuminate\Database\Eloquent\Model, $this> */
+        public function morphMany(string $related, string $name) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\MorphTo<\Illuminate\Database\Eloquent\Model, $this> */
+        public function morphTo(?string $name = null, ?string $type = null, ?string $id = null) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\MorphToMany<\Illuminate\Database\Eloquent\Model, $this> */
+        public function morphToMany(string $related, string $name) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\HasManyThrough<\Illuminate\Database\Eloquent\Model, \Illuminate\Database\Eloquent\Model, $this> */
+        public function hasManyThrough(string $related, string $through) {}
+        /** @return \Illuminate\Database\Eloquent\Relations\HasOneThrough<\Illuminate\Database\Eloquent\Model, \Illuminate\Database\Eloquent\Model, $this> */
+        public function hasOneThrough(string $related, string $through) {}
     }
 
     /**
@@ -3233,15 +3279,16 @@ namespace Illuminate\Database\Eloquent\Relations {
         /** @return static */
         public function orderBy(string $column, string $direction = 'asc'): static { return $this; }
     }
-    class HasMany {}
-    class HasOne {}
-    class BelongsTo {}
-    class BelongsToMany {}
-    class MorphOne {}
-    class MorphMany {}
-    class MorphTo {}
-    class MorphToMany {}
-    class HasManyThrough {}
+    class HasMany extends Relation {}
+    class HasOne extends Relation {}
+    class BelongsTo extends Relation {}
+    class BelongsToMany extends Relation {}
+    class MorphOne extends Relation {}
+    class MorphMany extends Relation {}
+    class MorphTo extends Relation {}
+    class MorphToMany extends Relation {}
+    class HasManyThrough extends Relation {}
+    class HasOneThrough extends Relation {}
 }
 
 namespace Illuminate\Database\Eloquent\Attributes {

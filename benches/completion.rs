@@ -569,26 +569,20 @@ $b->a()->b()->c()->d()->e()->
 // (`lib/WorseReflection/Tests/Benchmarks/fixtures/diagnostics/*.test`),
 // copied to `benches/fixtures/diagnostics/*.php`.  PHPactor runs its
 // `MissingMemberProvider` (missing member detection) on each fixture; we
-// run all three of our diagnostic providers (deprecated, unused imports,
-// unknown classes).
-//
-// Only fixtures that exercise diagnostics we actually implement are
-// enabled.  The others are listed here for parity once the corresponding
-// features land:
-//
-//   "lots_of_missing_methods" — needs unresolved-member-access diagnostic
-//                               (see docs/todo/diagnostics.md §2)
-//   "method_chain"            — needs unresolved-member-access diagnostic
-//   "phpstan"                 — needs unresolved-member-access diagnostic;
-//                               also ~5 000 lines with hundreds of
-//                               unresolvable vendor class refs
+// run all four of our diagnostic providers (deprecated, unused imports,
+// unknown classes, unknown members).
 
-/// PHPactor diagnostic fixture files that are fair to benchmark today.
-/// Each file exercises known-class resolution (our unknown-class provider)
-/// without requiring member-level diagnostics we haven't implemented yet.
+/// PHPactor diagnostic fixture files used for benchmarking.
+/// Each file exercises class resolution (unknown-class provider) and/or
+/// member resolution (unknown-member provider).
 const DIAGNOSTIC_FIXTURES: &[&str] = &[
     "lots_of_new_generic_objects", // 66 lines — repeated `new` of a @template class
     "lots_of_new_objects",         // 62 lines — repeated `new` of a plain class
+    "lots_of_missing_methods",     // ~1175 lines — many unresolved member accesses
+    "method_chain",                // fluent chain of ->bang() calls
+                                   // "phpstan" is excluded: ~5 000 lines with hundreds of unresolvable
+                                   // vendor class refs that dominate the benchmark without exercising
+                                   // our member-level diagnostics meaningfully.
 ];
 
 fn bench_diagnostics_phpactor_fixtures(c: &mut Criterion) {
@@ -610,6 +604,7 @@ fn bench_diagnostics_phpactor_fixtures(c: &mut Criterion) {
                     backend.collect_deprecated_diagnostics(&uri, black_box(content), &mut out);
                     backend.collect_unused_import_diagnostics(&uri, content, &mut out);
                     backend.collect_unknown_class_diagnostics(&uri, content, &mut out);
+                    backend.collect_unknown_member_diagnostics(&uri, content, &mut out);
                     black_box(out)
                 })
             },

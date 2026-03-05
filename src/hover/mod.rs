@@ -551,24 +551,18 @@ impl Backend {
             &class_loader,
             Some(&function_loader as &dyn Fn(&str) -> Option<FunctionInfo>),
         ) {
-            let short_type = shorten_type_string(&type_str);
-
             // When the type is a template parameter, show its variance
             // and bound (e.g. "**template-covariant** `TNode` of `AstNode`")
             // above the code block so the user sees the constraint.
             let template_line = self.find_template_info_for_type(&type_str, uri, cursor_offset);
 
-            let ns = resolve_type_namespace(&type_str, &class_loader);
-            let ns_line = namespace_line(&ns);
-            let code_block = format!(
-                "```php\n<?php\n{}{} = {}\n```",
-                ns_line, var_name, short_type
+            let hover_body = build_variable_hover_body(
+                &var_name,
+                &type_str,
+                &class_loader,
+                template_line.as_deref(),
             );
-            return if let Some(tpl) = template_line {
-                Some(make_hover(format!("{}\n\n{}", tpl, code_block)))
-            } else {
-                Some(make_hover(code_block))
-            };
+            return Some(make_hover(hover_body));
         }
 
         // Fall back to ClassInfo-based resolution (handles cases the
@@ -588,14 +582,11 @@ impl Backend {
             return Some(make_hover(format!("```php\n<?php\n{}\n```", var_name)));
         }
 
-        let ns_line = namespace_line(&types[0].file_namespace);
         let type_names: Vec<&str> = types.iter().map(|c| c.name.as_str()).collect();
         let type_str = type_names.join("|");
 
-        Some(make_hover(format!(
-            "```php\n<?php\n{}{} = {}\n```",
-            ns_line, var_name, type_str
-        )))
+        let hover_body = build_variable_hover_body(&var_name, &type_str, &class_loader, None);
+        Some(make_hover(hover_body))
     }
 
     /// Produce hover information for a class reference.
@@ -1046,6 +1037,96 @@ impl Backend {
 /// find the type (e.g. a cross-file FQN like `\App\Models\User` that
 /// is not loaded), falls back to extracting the namespace directly from
 /// the FQN string.
+/// Build the hover body for a variable, rendering union types as
+/// separate code blocks separated by a horizontal rule (`---`).
+///
+/// For a single type (or scalar/generic) this produces one code block
+/// showing e.g. `$user = User`.
+///
+/// For a union like `Lamp|Faucet` it produces two code blocks
+/// (`$ambiguous = Lamp` and `$ambiguous = Faucet`) joined by a
+/// markdown horizontal rule so the editor renders a visible divider.
+fn build_variable_hover_body(
+    var_name: &str,
+    type_str: &str,
+    class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
+    template_line: Option<&str>,
+) -> String {
+    // Split the type string on `|` at the top level (respecting
+    // angle brackets so that `Generator<int, Foo>|null` is not
+    // split inside the generic parameters).
+    let parts = split_top_level_union(type_str);
+
+    // Count how many parts are non-trivial class types (not scalars,
+    // not `null`, not `void`, etc.).  Only render separate blocks when
+    // there are 2+ class-like types; a simple `Foo|null` should stay
+    // in one block.
+    let class_like_count = parts
+        .iter()
+        .filter(|p| !crate::docblock::type_strings::is_scalar(p) && **p != "null" && **p != "void")
+        .count();
+
+    // When there is only one component, or only one class-like type
+    // (the rest being scalars / null), render a single code block.
+    if parts.len() <= 1 || class_like_count < 2 {
+        let short_type = shorten_type_string(type_str);
+        let ns = resolve_type_namespace(type_str, class_loader);
+        let ns_line = namespace_line(&ns);
+        let code_block = format!(
+            "```php\n<?php\n{}{} = {}\n```",
+            ns_line, var_name, short_type
+        );
+        return if let Some(tpl) = template_line {
+            format!("{}\n\n{}", tpl, code_block)
+        } else {
+            code_block
+        };
+    }
+
+    // Multiple union branches — render each as its own code block
+    // separated by a markdown horizontal rule.
+    let mut blocks: Vec<String> = Vec::with_capacity(parts.len());
+    for part in &parts {
+        let short = shorten_type_string(part);
+        let ns = resolve_type_namespace(part, class_loader);
+        let ns_line = namespace_line(&ns);
+        blocks.push(format!(
+            "```php\n<?php\n{}{} = {}\n```",
+            ns_line, var_name, short
+        ));
+    }
+
+    let body = blocks.join("\n\n---\n\n");
+    if let Some(tpl) = template_line {
+        format!("{}\n\n{}", tpl, body)
+    } else {
+        body
+    }
+}
+
+/// Split a type string on top-level `|` characters, respecting
+/// angle brackets (`<…>`) and parentheses (`(…)`) so that
+/// `Generator<int, Foo>|null` splits into `["Generator<int, Foo>", "null"]`
+/// rather than breaking inside the generic parameters.
+fn split_top_level_union(type_str: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0u32;
+    let mut start = 0;
+    for (i, ch) in type_str.char_indices() {
+        match ch {
+            '<' | '(' | '{' => depth += 1,
+            '>' | ')' | '}' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                parts.push(&type_str[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&type_str[start..]);
+    parts
+}
+
 fn resolve_type_namespace(
     type_str: &str,
     class_loader: &dyn Fn(&str) -> Option<ClassInfo>,

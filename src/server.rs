@@ -3,6 +3,14 @@
 /// This module contains the `impl LanguageServer for Backend` block,
 /// which handles all LSP protocol messages (initialize, didOpen, didChange,
 /// didClose, completion, etc.).
+///
+/// **Diagnostic debouncing.** `did_open` publishes diagnostics immediately
+/// (the user just opened the file, they want to see issues right away).
+/// `did_change` debounces: each keystroke bumps a per-file version counter
+/// and sleeps for 200 ms.  If another edit arrives before the timer fires,
+/// the version counter won't match and the stale handler skips publishing.
+/// tower-lsp runs each notification handler as an independent async task,
+/// so the sleep only blocks that handler, not the server.
 use std::collections::HashSet;
 use std::path::PathBuf;
 

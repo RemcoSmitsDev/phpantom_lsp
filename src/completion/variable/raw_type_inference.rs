@@ -78,12 +78,48 @@ impl AssignmentAccumulator {
 
     /// Merge another accumulator's results into this one.
     ///
-    /// Used when recursing into block-like constructs (if/else, loops,
+    /// Used when recursing into block-like constructs (loops,
     /// try/catch).  The inner accumulator's base replaces ours if
     /// present; incremental/push entries are appended.
     fn merge(&mut self, other: AssignmentAccumulator) {
         if let Some(base) = other.base_type {
             self.set_base(base);
+        }
+        for (k, v) in other.incremental_keys {
+            self.add_incremental_key(k, v);
+        }
+        self.push_types.extend(other.push_types);
+    }
+
+    /// Merge a branch accumulator by **unioning** its base type with
+    /// ours instead of overwriting.
+    ///
+    /// Used for if/else and try/catch branches where the variable may
+    /// be assigned a different type in each branch.  The result after
+    /// the whole if/else is the union of all branch types (e.g.
+    /// `Lamp|Faucet`).  Incremental keys and push types are still
+    /// appended normally.
+    fn merge_union(&mut self, other: AssignmentAccumulator) {
+        if let Some(other_base) = other.base_type {
+            match self.base_type.take() {
+                Some(existing) => {
+                    // Union the two base types, deduplicating components.
+                    let mut parts: Vec<&str> = existing.split('|').collect();
+                    for part in other_base.split('|') {
+                        if !parts.contains(&part) {
+                            parts.push(part);
+                        }
+                    }
+                    // Reborrow issue: collect owned strings.
+                    let joined = parts.join("|");
+                    self.base_type = Some(joined);
+                    // Do NOT clear incremental/push — they may have
+                    // accumulated from earlier branches.
+                }
+                None => {
+                    self.base_type = Some(other_base);
+                }
+            }
         }
         for (k, v) in other.incremental_keys {
             self.add_incremental_key(k, v);
@@ -322,8 +358,21 @@ fn accumulate_assignment_raw_types<'b>(
                 acc.merge(inner);
             }
             Statement::If(if_stmt) => {
-                let inner = accumulate_if_assignment_raw_types(if_stmt, ctx);
-                acc.merge(inner);
+                // When the cursor is *inside* one of the if/else branches,
+                // only that branch's type applies — don't union with the
+                // other branches.  The union is only correct *after* the
+                // entire if/else structure.
+                let if_end = stmt.span().end.offset;
+                if ctx.cursor_offset <= if_end {
+                    // Cursor is inside this if statement — find which
+                    // branch contains it and use only that branch.
+                    let inner = accumulate_if_branch_at_cursor(if_stmt, ctx);
+                    acc.merge(inner);
+                } else {
+                    // Cursor is past the if statement — union all branches.
+                    let inner = accumulate_if_assignment_raw_types(if_stmt, ctx);
+                    acc.merge(inner);
+                }
             }
             Statement::Foreach(foreach) => {
                 let body_stmts: Box<dyn Iterator<Item = &Statement>> = match &foreach.body {
@@ -442,7 +491,10 @@ fn infer_expression_type_string<'b>(
 }
 
 /// Accumulate assignment raw types from all branches of an if
-/// statement.
+/// statement, **unioning** the base types from each branch.
+///
+/// For example, `if (…) { $x = new Lamp(); } else { $x = new Faucet(); }`
+/// produces a base type of `Lamp|Faucet` rather than just `Faucet`.
 fn accumulate_if_assignment_raw_types(
     if_stmt: &If<'_>,
     ctx: &VarResolutionCtx<'_>,
@@ -452,33 +504,121 @@ fn accumulate_if_assignment_raw_types(
     match &if_stmt.body {
         IfBody::Statement(body) => {
             let inner = accumulate_assignment_raw_types(std::iter::once(body.statement), ctx);
-            acc.merge(inner);
+            acc.merge_union(inner);
             for else_if in body.else_if_clauses.iter() {
                 let inner =
                     accumulate_assignment_raw_types(std::iter::once(else_if.statement), ctx);
-                acc.merge(inner);
+                acc.merge_union(inner);
             }
             if let Some(ref else_clause) = body.else_clause {
                 let inner =
                     accumulate_assignment_raw_types(std::iter::once(else_clause.statement), ctx);
-                acc.merge(inner);
+                acc.merge_union(inner);
             }
         }
         IfBody::ColonDelimited(body) => {
             let inner = accumulate_assignment_raw_types(body.statements.iter(), ctx);
-            acc.merge(inner);
+            acc.merge_union(inner);
             for else_if in body.else_if_clauses.iter() {
                 let inner = accumulate_assignment_raw_types(else_if.statements.iter(), ctx);
-                acc.merge(inner);
+                acc.merge_union(inner);
             }
             if let Some(ref else_clause) = body.else_clause {
                 let inner = accumulate_assignment_raw_types(else_clause.statements.iter(), ctx);
-                acc.merge(inner);
+                acc.merge_union(inner);
             }
         }
     }
 
     acc
+}
+
+/// When the cursor is inside an if/else statement, find which specific
+/// branch contains it and return only that branch's assignments.
+///
+/// This prevents hover from showing `Lamp|Faucet` inside the else branch
+/// when only `Faucet` is assigned there.  The union is only appropriate
+/// after the entire if/else exits.
+fn accumulate_if_branch_at_cursor(
+    if_stmt: &If<'_>,
+    ctx: &VarResolutionCtx<'_>,
+) -> AssignmentAccumulator {
+    match &if_stmt.body {
+        IfBody::Statement(body) => {
+            let then_span = body.statement.span();
+            if ctx.cursor_offset >= then_span.start.offset
+                && ctx.cursor_offset <= then_span.end.offset
+            {
+                return accumulate_assignment_raw_types(std::iter::once(body.statement), ctx);
+            }
+            for else_if in body.else_if_clauses.iter() {
+                let ei_span = else_if.statement.span();
+                if ctx.cursor_offset >= ei_span.start.offset
+                    && ctx.cursor_offset <= ei_span.end.offset
+                {
+                    return accumulate_assignment_raw_types(
+                        std::iter::once(else_if.statement),
+                        ctx,
+                    );
+                }
+            }
+            if let Some(ref else_clause) = body.else_clause {
+                let el_span = else_clause.statement.span();
+                if ctx.cursor_offset >= el_span.start.offset
+                    && ctx.cursor_offset <= el_span.end.offset
+                {
+                    return accumulate_assignment_raw_types(
+                        std::iter::once(else_clause.statement),
+                        ctx,
+                    );
+                }
+            }
+        }
+        IfBody::ColonDelimited(body) => {
+            // For colon-delimited if bodies, approximate the span of
+            // each branch using the colon/keyword boundaries.
+            let then_start = body.colon.start.offset;
+            let then_end = body
+                .else_if_clauses
+                .first()
+                .map(|ei| ei.elseif.span().start.offset)
+                .or_else(|| {
+                    body.else_clause
+                        .as_ref()
+                        .map(|ec| ec.r#else.span().start.offset)
+                })
+                .unwrap_or(body.endif.span().start.offset);
+            if ctx.cursor_offset >= then_start && ctx.cursor_offset < then_end {
+                return accumulate_assignment_raw_types(body.statements.iter(), ctx);
+            }
+            for (i, else_if) in body.else_if_clauses.iter().enumerate() {
+                let ei_start = else_if.colon.start.offset;
+                let ei_end = body
+                    .else_if_clauses
+                    .get(i + 1)
+                    .map(|next| next.elseif.span().start.offset)
+                    .or_else(|| {
+                        body.else_clause
+                            .as_ref()
+                            .map(|ec| ec.r#else.span().start.offset)
+                    })
+                    .unwrap_or(body.endif.span().start.offset);
+                if ctx.cursor_offset >= ei_start && ctx.cursor_offset < ei_end {
+                    return accumulate_assignment_raw_types(else_if.statements.iter(), ctx);
+                }
+            }
+            if let Some(ref else_clause) = body.else_clause {
+                let el_start = else_clause.colon.start.offset;
+                let el_end = body.endif.span().start.offset;
+                if ctx.cursor_offset >= el_start && ctx.cursor_offset < el_end {
+                    return accumulate_assignment_raw_types(else_clause.statements.iter(), ctx);
+                }
+            }
+        }
+    }
+
+    // Couldn't determine which branch — fall back to union.
+    accumulate_if_assignment_raw_types(if_stmt, ctx)
 }
 
 /// Extract a raw type string from an expression.

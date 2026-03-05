@@ -96,6 +96,121 @@ function test() {
 }
 
 #[test]
+fn hover_ambiguous_variable_shows_union_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Lamp {
+    public function dim(): void {}
+    public function turnOff(): void {}
+}
+
+class Faucet {
+    public function drip(): void {}
+    public function turnOff(): void {}
+}
+
+class Consumer {
+    public function run(): void {
+        if (rand(0, 1)) {
+            $ambiguous = new Lamp();
+        } else {
+            $ambiguous = new Faucet();
+        }
+        $ambiguous->turnOff();
+    }
+}
+"#;
+
+    // Hover on `$ambiguous` at line 18 (the usage after the if/else)
+    let hover = hover_at(&backend, uri, content, 18, 9).expect("expected hover on $ambiguous");
+    let text = hover_text(&hover);
+
+    // Both union branches should appear.
+    assert!(
+        text.contains("Lamp") && text.contains("Faucet"),
+        "hover should show both union types Lamp and Faucet, got: {}",
+        text
+    );
+
+    // The two types should be rendered as separate code blocks
+    // separated by a horizontal rule (`---`).
+    assert!(
+        text.contains("---"),
+        "union hover should use a horizontal rule separator, got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_ambiguous_variable_inside_if_branch_shows_single_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Lamp {
+    public function dim(): void {}
+    public function turnOff(): void {}
+}
+
+class Faucet {
+    public function drip(): void {}
+    public function turnOff(): void {}
+}
+
+class Consumer {
+    public function run(): void {
+        if (rand(0, 1)) {
+            $ambiguous = new Lamp();
+            $ambiguous->dim();
+        } else {
+            $ambiguous = new Faucet();
+            $ambiguous->drip();
+        }
+        $ambiguous->turnOff();
+    }
+}
+"#;
+
+    // Hover on `$ambiguous` inside the if branch (line 15, the usage `$ambiguous->dim()`)
+    let hover = hover_at(&backend, uri, content, 15, 13).expect("expected hover inside if branch");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Lamp"),
+        "inside the if branch, should show Lamp: {}",
+        text
+    );
+    assert!(
+        !text.contains("Faucet"),
+        "inside the if branch, should NOT show Faucet: {}",
+        text
+    );
+
+    // Hover on `$ambiguous` inside the else branch (line 18, the usage `$ambiguous->drip()`)
+    let hover =
+        hover_at(&backend, uri, content, 18, 13).expect("expected hover inside else branch");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Faucet"),
+        "inside the else branch, should show Faucet: {}",
+        text
+    );
+    assert!(
+        !text.contains("Lamp"),
+        "inside the else branch, should NOT show Lamp: {}",
+        text
+    );
+
+    // Hover on `$ambiguous` after the if/else (line 20, `$ambiguous->turnOff()`)
+    let hover = hover_at(&backend, uri, content, 20, 9).expect("expected hover after if/else");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Lamp") && text.contains("Faucet"),
+        "after the if/else, should show both Lamp and Faucet: {}",
+        text
+    );
+}
+
+#[test]
 fn hover_suppressed_on_parameter_definition_site() {
     let backend = create_test_backend();
     let uri = "file:///test.php";

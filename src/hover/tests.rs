@@ -280,3 +280,120 @@ fn shorten_type_string_parenthesized_callable_union() {
         "(Closure(static): mixed)|string|array|Expression"
     );
 }
+
+// ─── split_top_level_union tests ────────────────────────────────────────────
+
+#[test]
+fn split_union_simple() {
+    assert_eq!(split_top_level_union("Lamp|Faucet"), vec!["Lamp", "Faucet"]);
+}
+
+#[test]
+fn split_union_single_type() {
+    assert_eq!(split_top_level_union("Lamp"), vec!["Lamp"]);
+}
+
+#[test]
+fn split_union_three_types() {
+    assert_eq!(
+        split_top_level_union("Lamp|Faucet|Switch"),
+        vec!["Lamp", "Faucet", "Switch"]
+    );
+}
+
+#[test]
+fn split_union_with_null() {
+    assert_eq!(split_top_level_union("Lamp|null"), vec!["Lamp", "null"]);
+}
+
+#[test]
+fn split_union_preserves_generics() {
+    assert_eq!(
+        split_top_level_union("Generator<int, Foo>|null"),
+        vec!["Generator<int, Foo>", "null"]
+    );
+}
+
+#[test]
+fn split_union_nested_generics() {
+    assert_eq!(
+        split_top_level_union("Collection<int, User>|array<string, int>|null"),
+        vec!["Collection<int, User>", "array<string, int>", "null"]
+    );
+}
+
+#[test]
+fn split_union_parenthesized_callable() {
+    assert_eq!(
+        split_top_level_union("(Closure(string): int)|string|array"),
+        vec!["(Closure(string): int)", "string", "array"]
+    );
+}
+
+#[test]
+fn split_union_array_shape() {
+    assert_eq!(
+        split_top_level_union("array{name: string, age: int}|null"),
+        vec!["array{name: string, age: int}", "null"]
+    );
+}
+
+// ─── build_variable_hover_body tests ────────────────────────────────────────
+
+#[test]
+fn variable_hover_body_single_type() {
+    let body = build_variable_hover_body("$user", "User", &|_| None, None);
+    assert_eq!(body, "```php\n<?php\n$user = User\n```");
+}
+
+#[test]
+fn variable_hover_body_union_splits_into_blocks() {
+    let body = build_variable_hover_body("$ambiguous", "Lamp|Faucet", &|_| None, None);
+    assert_eq!(
+        body,
+        "```php\n<?php\n$ambiguous = Lamp\n```\n\n---\n\n```php\n<?php\n$ambiguous = Faucet\n```"
+    );
+}
+
+#[test]
+fn variable_hover_body_union_with_template_line() {
+    let body =
+        build_variable_hover_body("$item", "Lamp|Faucet", &|_| None, Some("**template** `T`"));
+    assert!(body.starts_with("**template** `T`\n\n"));
+    assert!(body.contains("$item = Lamp"));
+    assert!(body.contains("---"));
+    assert!(body.contains("$item = Faucet"));
+}
+
+#[test]
+fn variable_hover_body_generic_union_not_split() {
+    // A single generic type is not split even though it contains `|` inside `<>`.
+    let body = build_variable_hover_body("$gen", "Generator<int, Foo>", &|_| None, None);
+    assert!(!body.contains("---"));
+    assert!(body.contains("$gen = Generator<int, Foo>"));
+}
+
+#[test]
+fn variable_hover_body_three_way_union() {
+    let body = build_variable_hover_body("$x", "A|B|C", &|_| None, None);
+    let blocks: Vec<&str> = body.split("\n\n---\n\n").collect();
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[0].contains("$x = A"));
+    assert!(blocks[1].contains("$x = B"));
+    assert!(blocks[2].contains("$x = C"));
+}
+
+#[test]
+fn variable_hover_body_nullable_class_not_split() {
+    // `Foo|null` has only one class-like type, so it should stay in a single block.
+    let body = build_variable_hover_body("$x", "Foo|null", &|_| None, None);
+    assert!(!body.contains("---"), "Foo|null should not split: {}", body);
+    assert!(body.contains("$x = Foo|null"), "got: {}", body);
+}
+
+#[test]
+fn variable_hover_body_scalar_not_split() {
+    let body = build_variable_hover_body("$val", "string", &|_| None, None);
+    assert!(!body.contains("---"));
+    assert!(body.contains("$val = string"));
+}

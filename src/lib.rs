@@ -1,4 +1,8 @@
-//! PHPantom — a lightweight PHP language server.
+//! PHPantom — a fast, lightweight PHP language server.
+//!
+//! Diagnostics are debounced: each `did_change` bumps a per-file version
+//! counter and spawns a delayed task. The task only publishes if its
+//! version still matches (i.e. no newer edit arrived in the meantime).
 //!
 //! This crate is organised into the following modules:
 //!
@@ -121,7 +125,8 @@ pub use virtual_members::resolve_class_fully;
 ///   `find_class_by_name`, plus `log`, `get_classes_for_uri`
 /// - `definition` — `resolve_definition`, member resolution, function resolution
 /// - `diagnostics` — `publish_diagnostics_for_file`, `clear_diagnostics_for_file`,
-///   `collect_deprecated_diagnostics`, `collect_unused_import_diagnostics`
+///   `collect_deprecated_diagnostics`, `collect_unused_import_diagnostics`,
+///   `collect_unknown_class_diagnostics`, `collect_unknown_member_diagnostics`
 /// - `highlight` — `handle_document_highlight` (same-file symbol occurrence highlighting)
 pub struct Backend {
     pub(crate) name: String,

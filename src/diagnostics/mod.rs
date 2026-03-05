@@ -11,6 +11,10 @@
 //! - **Unknown class diagnostics** — report `ClassReference` spans that
 //!   cannot be resolved through any resolution phase (use-map, local
 //!   classes, same-namespace, class_index, classmap, PSR-4, stubs).
+//! - **Unknown member diagnostics** — report `MemberAccess` spans where
+//!   the member does not exist on the resolved class after full
+//!   resolution (inheritance + virtual member providers).  Suppressed
+//!   when the class has `__call` / `__callStatic` / `__get` magic methods.
 //!
 //! Diagnostics are published **asynchronously** via [`Backend::schedule_diagnostics`].
 //! On every `did_change` event a version counter is bumped and the
@@ -24,6 +28,7 @@
 
 mod deprecated;
 pub(crate) mod unknown_classes;
+pub(crate) mod unknown_members;
 mod unused_imports;
 
 use std::sync::atomic::Ordering;
@@ -81,6 +86,9 @@ impl Backend {
 
         // ── Unknown class references ────────────────────────────────────
         self.collect_unknown_class_diagnostics(uri_str, content, &mut diagnostics);
+
+        // ── Unknown member access ───────────────────────────────────────
+        self.collect_unknown_member_diagnostics(uri_str, content, &mut diagnostics);
 
         client.publish_diagnostics(uri, diagnostics, None).await;
     }
