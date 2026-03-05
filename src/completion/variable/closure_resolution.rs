@@ -18,9 +18,26 @@
 /// typed as `callable(TValue): mixed` (with `TValue` already substituted
 /// through generic resolution), and infers `$u` as the concrete element
 /// type.
+use std::cell::Cell;
+
 use mago_span::HasSpan;
 use mago_syntax::ast::sequence::TokenSeparatedSequence;
 use mago_syntax::ast::*;
+
+/// Maximum recursion depth for callable parameter inference.
+///
+/// When a closure parameter is untyped, the resolver infers its type
+/// from the enclosing method's signature by resolving the receiver
+/// object.  If that receiver text itself contains the same variable
+/// (e.g. nested closures reusing `$q`), the resolution re-enters this
+/// path, creating an infinite cycle.  This cap breaks the cycle.
+const MAX_CLOSURE_INFER_DEPTH: u32 = 4;
+
+thread_local! {
+    /// Tracks the current recursion depth of callable parameter
+    /// inference to prevent stack overflow from nested closures.
+    static CLOSURE_INFER_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
 
 use crate::docblock::replace_self_in_type;
 use crate::parser::extract_hint_string;
@@ -616,9 +633,22 @@ fn infer_callable_params_from_receiver(
     arg_idx: usize,
     ctx: &VarResolutionCtx<'_>,
 ) -> Vec<String> {
+    // Guard against infinite recursion when nested closures reuse the
+    // same variable name (e.g. `$q` in both an outer and inner closure).
+    // The cycle is: infer_callable_params_from_receiver →
+    // resolve_target_classes → resolve_variable_types →
+    // walk_statements_for_assignments → try_resolve_closure_in_call_args
+    // → infer_callable_params_from_receiver → ∞
+    let depth = CLOSURE_INFER_DEPTH.with(|d| d.get());
+    if depth >= MAX_CLOSURE_INFER_DEPTH {
+        return vec![];
+    }
+    CLOSURE_INFER_DEPTH.with(|d| d.set(depth + 1));
+
     let start = obj_start as usize;
     let end = obj_end as usize;
     if end > ctx.content.len() {
+        CLOSURE_INFER_DEPTH.with(|d| d.set(depth));
         return vec![];
     }
     let obj_text = ctx.content[start..end].trim();
@@ -631,14 +661,17 @@ fn infer_callable_params_from_receiver(
     // Replace `$this` / `static` tokens with the receiver class FQN
     // so that `resolve_closure_params_with_inferred` resolves them
     // against the declaring class rather than the user's current class.
-    if let Some(receiver) = receiver_classes.first() {
+    let result = if let Some(receiver) = receiver_classes.first() {
         params
             .into_iter()
             .map(|ty| replace_self_in_type(&ty, &receiver.name))
             .collect()
     } else {
         params
-    }
+    };
+
+    CLOSURE_INFER_DEPTH.with(|d| d.set(depth));
+    result
 }
 
 /// Infer callable parameter types for a closure passed at position

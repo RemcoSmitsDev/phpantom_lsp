@@ -48,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Nested closures with reused parameter names no longer crash.** Hovering or requesting diagnostics on code with nested closures that reuse the same variable name (e.g. `$q` in both an outer and inner closure callback) no longer causes a stack overflow. The callable parameter inference now caps its recursion depth to break the cycle.
 - **Scope methods on Builder variables.** Hover, signature help, and deprecation diagnostics now find model-specific members (e.g. Eloquent scope methods injected onto `Builder<Model>`) even when the resolved-class cache holds a differently-scoped entry for the same base class.
 - **Go-to-implementation no longer produces false positives across namespaces.** Two interfaces with the same short name in different namespaces (e.g. `App\Logger` and `Vendor\Logger`) no longer cross-match. Implementor scanning and deduplication now use fully-qualified names when available.
 - **Vendor class resolution simplified.** Vendor PSR-4 mappings (`vendor/composer/autoload_psr4.php`) are no longer loaded. The Composer classmap is the sole source of truth for vendor code. Go-to-definition now checks the classmap for vendor classes instead of relying on vendor PSR-4. If the classmap is missing or stale, vendor classes fail to resolve visibly instead of being silently papered over (fix: run `composer dump-autoload`). The `config.vendor-dir` setting is read once at startup and cached across all features.
