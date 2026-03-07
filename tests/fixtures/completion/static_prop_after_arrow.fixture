@@ -1,7 +1,7 @@
 // test: static property access after chained arrow accessor resolves type
 // feature: completion
 // Adapted from phpactor WorseClassMemberCompletorTest 'Static property with previous arrow accessor'
-// ignore: mixed arrow then static accessor chaining ($obj->prop::$static) not resolved
+
 // expect: $foo
 ---
 <?php

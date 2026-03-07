@@ -388,3 +388,22 @@ fn test_parenthesized_property_invocation() {
         "Expected subject to contain call parens (), got: {subject}"
     );
 }
+
+#[test]
+fn test_inline_new_expression_method_chain() {
+    // (new Foo)->bar()->
+    let input = "(new Foo)->bar()->";
+    let chars: Vec<char> = input.chars().collect();
+    let col = chars.len();
+    let result = detect_access_operator(&chars, col);
+    assert!(
+        result.is_some(),
+        "Expected Some from detect_access_operator"
+    );
+    let (subject, kind) = result.unwrap();
+    assert_eq!(kind, AccessKind::Arrow);
+    assert_eq!(
+        subject, "Foo->bar()",
+        "Expected subject 'Foo->bar()', got: {subject}"
+    );
+}

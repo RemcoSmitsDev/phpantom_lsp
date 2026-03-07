@@ -68,6 +68,20 @@ class InstanceCompletionDemo
 }
 
 
+// ── Mixed Accessor Chaining ─────────────────────────────────────────────────
+
+class MixedAccessorDemo
+{
+    public function demo(): void
+    {
+        $foobar = new StaticPropHolder();
+        $foobar->holder::$shared;                 // $obj->prop::$static chain
+
+        // Inline (new Foo)->method() chaining
+        (new Pen())->write();                     // resolves Pen then write()
+    }
+}
+
 // ── Method & Property Chaining ──────────────────────────────────────────────
 
 class ChainingDemo
@@ -303,6 +317,11 @@ class ConditionalReturnDemo
 
         $appPen = app(Pen::class);                // conditional on standalone function
         $appPen->write();
+
+        // Literal string conditional return type
+        $mapper = new TreeMapperImpl();
+        $result = $mapper->map('foo', 'bar');
+        $result->write();                         // "foo" → Pen (literal string match)
     }
 }
 
@@ -544,6 +563,7 @@ class CollectionForeachDemo
 /**
  * @phpstan-type UserData array{name: string, email: string, age: int}
  * @phpstan-type StatusInfo array{code: int, label: string}
+ * @phpstan-type UserList array<int, Profile>
  */
 class TypeAliasDemo
 {
@@ -554,6 +574,11 @@ class TypeAliasDemo
 
         $status = $this->getStatus();
         $status['label'];                 // StatusInfo alias → array shape keys
+
+        // Type alias resolves through foreach iteration
+        foreach ($this->getUsers() as $user) {
+            $user->getDisplayName();      // UserList → array<int, Profile> → Profile
+        }
     }
 
     /** @return UserData */
@@ -566,6 +591,12 @@ class TypeAliasDemo
     public function getStatus(): array
     {
         return ['code' => 200, 'label' => 'OK'];
+    }
+
+    /** @return UserList */
+    public function getUsers(): array
+    {
+        return [];
     }
 }
 
@@ -1931,6 +1962,28 @@ class ImplementMethodsDemo extends ScaffoldingAbstractShape implements Scaffoldi
 // ═══════════════════════════════════════════════════════════════════════════
 // ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 // ┃  SCAFFOLDING — Supporting definitions below this line.              ┃
+
+// StaticPropHolder — used by MixedAccessorDemo
+class StaticPropHolder
+{
+    public static string $shared = 'hello';
+
+    /** @var self */
+    public self $holder;
+}
+
+// TreeMapperImpl — used by ConditionalReturnDemo (literal string conditional)
+class TreeMapperImpl
+{
+    /**
+     * @return ($signature is "foo" ? Pen : Marker)
+     */
+    public function map(string $signature, mixed $source): Pen|Marker
+    {
+        return new Pen();
+    }
+}
+
 // ┃  Everything below exists to support the demos above.               ┃
 // ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 //

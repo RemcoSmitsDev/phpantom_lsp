@@ -1,11 +1,11 @@
 # PHPantom — Ignored Fixture Tasks
 
-There are **228 fixture tests** in `tests/fixtures/`. Of these, **183
-pass** and **45 are ignored** because they exercise features or bug
+There are **228 fixture tests** in `tests/fixtures/`. Of these, **188
+pass** and **40 are ignored** because they exercise features or bug
 fixes that are not yet implemented. Each ignored fixture has a
 `// ignore:` comment explaining what is missing.
 
-This document groups the 45 ignored fixtures by the underlying work
+This document groups the 40 ignored fixtures by the underlying work
 needed to un-ignore them. Tasks are ordered by the number of fixtures
 they unblock (descending), then by estimated effort. Once a task is
 complete, remove the `// ignore:` line from each fixture, verify the
@@ -218,29 +218,6 @@ name is a variable, resolve the variable's type. If it is
 
 ---
 
-## 10. Mixed `->` then `::` accessor chaining (2 fixtures)
-
-**Ref:** [bugs.md §10](bugs.md#10-mixed-arrow-then-static-accessor-chaining-not-resolved)
-**Impact: Low · Effort: Low**
-
-`$obj->prop::$staticProp` and `$obj->method()::staticMethod()` are not
-resolved. The subject extractor does not handle a transition from `->`
-to `::` within the same chain.
-
-**Fixtures:**
-
-- [ ] `completion/static_prop_after_arrow.fixture` — `$obj->prop::$staticProp` chain
-- [ ] `member_access/static_property_instance.fixture` — same pattern in member_access context
-
-**Implementation notes:**
-
-In subject extraction (or the AST-based chain walker), when processing
-a chain segment that switches from instance (`->`) to static (`::`)
-access, resolve the instance segment first, then use its result type as
-the class for the static access.
-
----
-
 ## 11. `class-string<T>` on interface method not inherited (1 fixture)
 
 **Ref:** [type-inference.md §25](type-inference.md#25-class-stringt-on-interface-method-not-inherited)
@@ -303,21 +280,6 @@ class-string argument at the call site.
 
 ---
 
-## 19. Inline `(new Foo)->method()` chaining (1 fixture)
-
-**Ref:** [bugs.md §12](bugs.md#12-inline-new-foo-method-chaining-not-resolved)
-**Impact: Medium · Effort: Low-Medium**
-
-Parenthesized `new` expressions used inline as the root of a method
-chain do not resolve for completion. `$x = (new Foo())` works, but
-`(new Foo())->method()->` does not.
-
-**Fixture:**
-
-- [ ] `member_access/new_no_parenthesis.fixture` — `(new Foo)->bar()->` resolves
-
----
-
 ## 20. Elseif chain narrowing with `is_*()` (1 fixture)
 
 **Ref:** [type-inference.md §3](type-inference.md#3-parse-and-resolve-param-is-t--a--b-return-types) (related)
@@ -347,36 +309,6 @@ existing `array_pop`/`array_shift` handling.
 **Fixture:**
 
 - [ ] `function/iterator_to_array.fixture` — `iterator_to_array($gen)` resolves element type
-
----
-
-## 22. Literal string conditional return type (1 fixture)
-
-**Ref:** [type-inference.md §24](type-inference.md#24-literal-string-conditional-return-type)
-**Impact: Low · Effort: Low-Medium**
-
-Conditional return types using literal string comparison
-(`$param is "foo"`) are not resolved. Only class/interface type
-conditions work today.
-
-**Fixture:**
-
-- [ ] `type/conditional_return_type_string.fixture` — literal string conditional resolves correct branch
-
----
-
-## 23. `@phpstan-type` alias in foreach context (1 fixture)
-
-**Ref:** [type-inference.md §29](type-inference.md#29-phpstan-type-alias-in-foreach-context)
-**Impact: Low · Effort: Low**
-
-When a method's return type uses a `@phpstan-type` alias and the result
-is iterated in a `foreach`, the alias is not resolved before extracting
-the foreach value type.
-
-**Fixture:**
-
-- [ ] `type/phpstan_type_alias.fixture` — type alias resolves for foreach iteration
 
 ---
 
@@ -435,17 +367,13 @@ argument to the right side and returns the result.
 
 ## Summary by effort
 
-Quick wins (Low effort, 1 fixture each):
-
-| Task | Fixture |
-|---|---|
-| §23 `@phpstan-type` in foreach | `type/phpstan_type_alias` |
-
-Moderate wins (Low-Medium effort, multiple fixtures):
+Moderate wins (Low-Medium effort, few fixtures):
 
 | Task | Fixtures |
 |---|---|
-| §10 Mixed `->` then `::` chaining | 2 |
+| §24 Variable scope isolation in closures | 1 |
+| §25 Pass-by-reference parameter type inference | 1 |
+| §26 Pipe operator (PHP 8.5) | 1 |
 
 Biggest unlocks (Medium effort, many fixtures):
 

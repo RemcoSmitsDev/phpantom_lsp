@@ -1,6 +1,6 @@
 // test: conditional return type resolves based on literal string argument
 // feature: completion
-// ignore: literal string conditional return type resolution not yet supported (only class-string conditions work)
+
 // Adapted from phpactor type/conditional-type2.test
 // expect: strMethod(
 ---

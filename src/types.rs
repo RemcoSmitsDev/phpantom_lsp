@@ -830,6 +830,10 @@ pub enum ParamCondition {
 
     /// `$param is \SomeType` — a general type check (e.g. `\Closure`, `string`).
     IsType(String),
+
+    /// `$param is "literal"` — when the condition checks against a literal
+    /// string value (e.g. `$signature is "foo"`).
+    LiteralString(String),
 }
 
 /// A trait `insteadof` adaptation.

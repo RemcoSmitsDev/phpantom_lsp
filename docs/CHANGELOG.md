@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`@phpstan-type` aliases in foreach.** Type aliases defined via `@phpstan-type` or `@psalm-type` now resolve correctly when the aliased type is iterated in a `foreach` loop, destructured with `list()`/`[]`, or used as a foreach key type.
+- **Mixed `->` then `::` accessor chains.** Expressions like `$obj->prop::$staticProp` and `$obj->method()::staticMethod()` now resolve through the full chain instead of losing the instance prefix.
+- **Inline `(new Foo)->method()` chaining.** Parenthesized `new` expressions used as the root of a method chain now resolve for completion. Previously only assigned `new` expressions (`$x = new Foo()`) worked.
+- **Literal string conditional return types.** Conditional return types that check against a literal string value (`$param is "foo" ? A : B`) now resolve the correct branch when the call-site argument is a matching string literal.
 - **Inherited `@method` and `@property` tags.** Virtual members declared via `@method` or `@property` on a parent class now appear on child classes. Previously only the declaring class itself surfaced these members.
 - **Class constant and enum case assignment resolution.** Assigning from a class constant (`$x = Foo::SOME_CONST`) or enum case (`$x = Status::Active`) now resolves the variable's type correctly for subsequent completion.
 - **Sequential assert narrowing.** Multiple `assert($x instanceof A); assert($x instanceof B);` statements now accumulate, showing members from both types. Previously only the last assertion's narrowing applied.

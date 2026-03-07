@@ -1,7 +1,7 @@
 // test: static property accessible from instance variable via :: access
 // feature: completion
 // Adapted from phpactor WorseClassMemberCompletorTest 'Static property with previous arrow accessor'
-// ignore: mixed arrow then static accessor chaining ($obj->prop::$static) not resolved
+
 // expect: $foo
 ---
 <?php

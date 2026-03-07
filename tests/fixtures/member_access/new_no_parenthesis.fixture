@@ -1,7 +1,7 @@
 // test: inline new expression method chaining resolves return type
 // feature: completion
 // Adapted from phpactor new/new-no-parenthesis.test
-// ignore: inline (new Foo)->method() chaining not resolved
+
 // expect: format(
 ---
 <?php

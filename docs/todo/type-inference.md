@@ -681,19 +681,6 @@ property_narrowing_negated, combination/property_instanceof).
 
 ---
 
-
-
-## 24. Literal string conditional return type
-**Impact: Low · Effort: Low-Medium**
-
-Conditional return types using literal string comparison
-(`$param is "foo"`) are not resolved. Only class/interface type checks
-work in the conditional return type parser today.
-
-**Discovered via:** fixture conversion (conditional_return_type_string).
-
----
-
 ## 25. `class-string<T>` on interface method not inherited
 **Impact: Medium · Effort: Medium**
 
@@ -729,17 +716,6 @@ does not check for `__invoke` when the callee is a variable holding
 an object type.
 
 **Discovered via:** fixture conversion (call_expression/invoke_return_type).
-
----
-
-## 29. `@phpstan-type` alias in foreach context
-**Impact: Low · Effort: Low**
-
-When a method's return type uses a `@phpstan-type` alias and the result
-is iterated in a `foreach`, the alias is not resolved before the
-foreach value type is extracted.
-
-**Discovered via:** fixture conversion (type/phpstan_type_alias).
 
 ---
 

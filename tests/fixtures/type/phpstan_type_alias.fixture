@@ -1,7 +1,7 @@
 // test: @phpstan-type alias resolves in method return type
 // feature: completion
 // Adapted from phpactor type-alias/phpstan-type-alias.test
-// ignore: @phpstan-type alias not resolved when used as return type in foreach
+
 // expect: getName(
 ---
 <?php

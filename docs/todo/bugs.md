@@ -138,33 +138,6 @@ error message.
 
 ---
 
-## 10. Mixed arrow then static accessor chaining not resolved
-**Impact: Low · Effort: Low**
-
-Chaining `$obj->prop::$staticProp` or `$obj->method()::staticMethod()`
-is not resolved. The subject extractor does not handle a transition from
-`->` to `::` within the same chain.
-
-**Discovered via:** fixture conversion (completion/static_prop_after_arrow).
-
----
-
-## 12. Inline `(new Foo)->method()` chaining not resolved
-**Impact: Medium · Effort: Low-Medium**
-
-Parenthesized `new` expressions used as the start of a chain are not
-resolved for completion:
-
-```php
-(new Foo())->method()-><cursor>
-```
-
-The parenthesized `new` expression is handled for simple variable
-assignment (`$x = (new Foo())`), but not when it appears inline as the
-root of a chain that feeds into completion or further resolution.
-
----
-
 ## 13. Evict transiently-loaded files from ast_map after GTI and Find References
 **Impact: Low · Effort: Low**
 

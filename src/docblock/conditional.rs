@@ -195,13 +195,18 @@ fn find_token_at_depth(s: &str, token: char) -> Option<usize> {
     None
 }
 
-/// Parse a condition string like `class-string<TClass>`, `null`, or `\Closure`.
+/// Parse a condition string like `class-string<TClass>`, `null`, `"foo"`, or `\Closure`.
 fn parse_condition(s: &str) -> ParamCondition {
     let s = s.trim();
     if s.starts_with("class-string") {
         ParamCondition::ClassString
     } else if s.eq_ignore_ascii_case("null") {
         ParamCondition::IsNull
+    } else if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\''))
+    {
+        // Literal string condition: `$param is "foo"` or `$param is 'foo'`
+        let inner = &s[1..s.len() - 1];
+        ParamCondition::LiteralString(inner.to_string())
     } else {
         let cleaned = s.strip_prefix('\\').unwrap_or(s);
         ParamCondition::IsType(cleaned.to_string())

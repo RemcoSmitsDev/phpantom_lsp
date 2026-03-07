@@ -158,6 +158,30 @@ pub(crate) fn resolve_conditional_with_text_args(
                     // Can't statically determine; fall through to else.
                     resolve_conditional_with_text_args(else_type, params, text_args, var_resolver)
                 }
+                ParamCondition::LiteralString(expected) => {
+                    // Check if the argument is a quoted string literal
+                    // matching the expected value (e.g. `'foo'` or `"foo"`).
+                    if let Some(arg) = arg_text {
+                        let trimmed = arg.trim();
+                        let arg_value = if (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+                            || (trimmed.starts_with('"') && trimmed.ends_with('"'))
+                        {
+                            Some(&trimmed[1..trimmed.len() - 1])
+                        } else {
+                            None
+                        };
+                        if arg_value == Some(expected.as_str()) {
+                            return resolve_conditional_with_text_args(
+                                then_type,
+                                params,
+                                text_args,
+                                var_resolver,
+                            );
+                        }
+                    }
+                    // Argument doesn't match the literal → else branch.
+                    resolve_conditional_with_text_args(else_type, params, text_args, var_resolver)
+                }
             }
         }
     }
@@ -355,6 +379,43 @@ pub(crate) fn resolve_conditional_with_args<'b>(
                     // We can't statically determine the type of an
                     // arbitrary expression; fall through to else.
                     resolve_conditional_with_args(else_type, params, argument_list, var_resolver)
+                }
+                ParamCondition::LiteralString(expected) => {
+                    // Check if the argument is a string literal matching
+                    // the expected value.
+                    let matches = match arg_expr {
+                        Some(Expression::Literal(Literal::String(lit_str))) => {
+                            // `value` is the unquoted content; fall back
+                            // to stripping quotes from `raw`.
+                            let inner = lit_str.value.map(|v| v.to_string()).unwrap_or_else(|| {
+                                let raw = lit_str.raw;
+                                raw.strip_prefix('\'')
+                                    .and_then(|s| s.strip_suffix('\''))
+                                    .or_else(|| {
+                                        raw.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                                    })
+                                    .unwrap_or(raw)
+                                    .to_string()
+                            });
+                            inner == *expected
+                        }
+                        _ => false,
+                    };
+                    if matches {
+                        resolve_conditional_with_args(
+                            then_type,
+                            params,
+                            argument_list,
+                            var_resolver,
+                        )
+                    } else {
+                        resolve_conditional_with_args(
+                            else_type,
+                            params,
+                            argument_list,
+                            var_resolver,
+                        )
+                    }
                 }
             }
         }

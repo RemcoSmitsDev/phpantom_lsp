@@ -353,9 +353,6 @@ fn extract_arrow_subject(chars: &[char], arrow_pos: usize) -> String {
 ///   - `"ClassName"` for `new ClassName()` instantiation
 fn extract_call_subject(chars: &[char], paren_end: usize) -> Option<String> {
     let open = skip_balanced_parens_back(chars, paren_end)?;
-    if open == 0 {
-        return None;
-    }
 
     // Capture the argument text between the parentheses for later use
     // in conditional return-type resolution (e.g. `app(A::class)`).
@@ -513,6 +510,27 @@ fn extract_double_colon_subject(chars: &[char], colon_pos: usize) -> String {
     if i > 0 && chars[i - 1] == '$' {
         i -= 1;
     }
+
+    // ── Mixed accessor: `$obj->prop::` or `$obj?->prop::` ─────────
+    // When the identifier is preceded by `->` or `?->`, the subject is
+    // an arrow-chain expression, not a plain class name.  Delegate to
+    // `extract_arrow_subject` so the full chain is captured (e.g.
+    // `$foobar->me` for `$foobar->me::`).
+    if i >= 2 && chars[i - 2] == '-' && chars[i - 1] == '>' {
+        let prop: String = chars[i..end].iter().collect();
+        let inner = extract_arrow_subject(chars, i - 2);
+        if !inner.is_empty() {
+            return format!("{}->{}", inner, prop);
+        }
+    }
+    if i >= 3 && chars[i - 3] == '?' && chars[i - 2] == '-' && chars[i - 1] == '>' {
+        let prop: String = chars[i..end].iter().collect();
+        let inner = extract_arrow_subject(chars, i - 3);
+        if !inner.is_empty() {
+            return format!("{}?->{}", inner, prop);
+        }
+    }
+
     chars[i..end].iter().collect()
 }
 
