@@ -93,9 +93,6 @@ To make PHPantom the default PHP language server, add to your Zed `settings.json
 
 ### Neovim
 
-> [!NOTE]
-> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
-
 ```lua
 vim.lsp.config['phpantom'] = {
   cmd = { '/path/to/phpantom_lsp' },
