@@ -57,12 +57,15 @@ impl Backend {
     ///
     /// Sources (in priority order):
     ///   1. Functions discovered from parsed files (`global_functions`)
-    ///   2. Built-in PHP functions from embedded stubs (`stub_function_index`)
+    ///   2. Functions from the autoload index (`autoload_function_index`,
+    ///      non-Composer projects only — not yet parsed, name only)
+    ///   3. Built-in PHP functions from embedded stubs (`stub_function_index`)
     ///
     /// For user-defined functions (source 1), the full signature is shown in
-    /// the label because we already have a parsed `FunctionInfo`.  For stub
-    /// functions (source 2), only the function name is shown to avoid the
-    /// cost of parsing every matching stub at completion time.
+    /// the label because we already have a parsed `FunctionInfo`.  For
+    /// autoload index functions (source 2) and stub functions (source 3),
+    /// only the function name is shown to avoid the cost of parsing every
+    /// matching file at completion time.
     ///
     /// Returns `(items, is_incomplete)`.  When the total number of
     /// matching functions exceeds [`MAX_FUNCTION_COMPLETIONS`], the result
@@ -184,7 +187,71 @@ impl Backend {
             }
         }
 
-        // ── 2. Built-in PHP functions from stubs ────────────────────
+        // ── 2. Autoload function index (full-scan discovered functions) ──
+        // The lightweight `find_symbols` byte-level scan discovers
+        // function names at startup without a full AST parse, for both
+        // non-Composer projects (workspace scan) and Composer projects
+        // (autoload_files.php scan).  Show them in completion so the
+        // user sees cross-file functions even before they're lazily
+        // parsed.  Only the name is available; full signatures appear
+        // after the first use triggers a lazy `update_ast` call.
+        {
+            let idx = self.autoload_function_index.read();
+            for (fqn, _path) in idx.iter() {
+                if !fqn.to_lowercase().contains(&prefix_lower) {
+                    continue;
+                }
+                if !seen.insert(fqn.clone()) {
+                    continue;
+                }
+
+                let is_namespaced = fqn.contains('\\');
+                let sn = if is_namespaced {
+                    short_name(fqn)
+                } else {
+                    fqn.as_str()
+                };
+
+                if for_use_import {
+                    items.push(CompletionItem {
+                        label: fqn.clone(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some("function".to_string()),
+                        insert_text: Some(fqn.clone()),
+                        filter_text: Some(fqn.clone()),
+                        sort_text: Some(format!("4_{}", fqn.to_lowercase())),
+                        ..CompletionItem::default()
+                    });
+                } else {
+                    let detail = if is_namespaced {
+                        let ns = &fqn[..fqn.rfind('\\').unwrap()];
+                        format!("function ({})", ns)
+                    } else {
+                        "function".to_string()
+                    };
+                    let additional_text_edits = if is_namespaced {
+                        use_block
+                            .as_ref()
+                            .and_then(|ub| build_use_function_edit(fqn, ub))
+                    } else {
+                        None
+                    };
+                    items.push(CompletionItem {
+                        label: sn.to_string(),
+                        kind: Some(CompletionItemKind::FUNCTION),
+                        detail: Some(detail),
+                        insert_text: Some(format!("{sn}()$0")),
+                        insert_text_format: Some(InsertTextFormat::SNIPPET),
+                        filter_text: Some(sn.to_string()),
+                        sort_text: Some(format!("4_{}", sn.to_lowercase())),
+                        additional_text_edits,
+                        ..CompletionItem::default()
+                    });
+                }
+            }
+        }
+
+        // ── 3. Built-in PHP functions from stubs ────────────────────
         for &name in self.stub_function_index.keys() {
             if !name.to_lowercase().contains(&prefix_lower) {
                 continue;

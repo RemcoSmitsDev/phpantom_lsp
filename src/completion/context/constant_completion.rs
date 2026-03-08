@@ -16,7 +16,9 @@ impl Backend {
     ///
     /// Sources (in priority order):
     ///   1. Constants discovered from parsed files (`global_defines`)
-    ///   2. Built-in PHP constants from embedded stubs (`stub_constant_index`)
+    ///   2. Constants from the autoload index (`autoload_constant_index`,
+    ///      non-Composer projects only — not yet parsed, name only)
+    ///   3. Built-in PHP constants from embedded stubs (`stub_constant_index`)
     ///
     /// Each item uses the constant name as `label` and the source as `detail`.
     /// Items are deduplicated by name.
@@ -54,7 +56,35 @@ impl Backend {
             }
         }
 
-        // ── 2. Built-in PHP constants from stubs ────────────────────
+        // ── 2. Autoload constant index (full-scan discovered constants) ──
+        // The lightweight `find_symbols` byte-level scan discovers
+        // constant names at startup without a full AST parse, for both
+        // non-Composer projects (workspace scan) and Composer projects
+        // (autoload_files.php scan).  Show them in completion so the
+        // user sees cross-file constants even before they're lazily
+        // parsed via `update_ast`.
+        {
+            let idx = self.autoload_constant_index.read();
+            for (name, _path) in idx.iter() {
+                if !name.to_lowercase().contains(&prefix_lower) {
+                    continue;
+                }
+                if !seen.insert(name.clone()) {
+                    continue;
+                }
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CONSTANT),
+                    detail: Some("constant".to_string()),
+                    insert_text: Some(name.clone()),
+                    filter_text: Some(name.clone()),
+                    sort_text: Some(format!("5_{}", name.to_lowercase())),
+                    ..CompletionItem::default()
+                });
+            }
+        }
+
+        // ── 3. Built-in PHP constants from stubs ────────────────────
         for &name in self.stub_constant_index.keys() {
             if !name.to_lowercase().contains(&prefix_lower) {
                 continue;

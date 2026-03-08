@@ -487,11 +487,60 @@ impl Backend {
 
             SymbolKind::ConstantReference { name } => {
                 // Look up the constant value from global_defines or stubs.
+                // If not found, check the autoload constant index
+                // (populated by the `find_symbols` byte-level scan for
+                // both non-Composer and Composer projects) and lazily
+                // parse the defining file via `update_ast`.  As a last
+                // resort, try lazily parsing known autoload files for
+                // constants the byte-level scanner missed (e.g. inside
+                // `if (!defined(...))` guards).
                 let value_text = self
                     .global_defines
                     .read()
                     .get(name.as_str())
-                    .and_then(|info| info.value.clone());
+                    .and_then(|info| info.value.clone())
+                    .or_else(|| {
+                        let path = self
+                            .autoload_constant_index
+                            .read()
+                            .get(name.as_str())
+                            .cloned();
+                        if let Some(path) = path
+                            && let Ok(content) = std::fs::read_to_string(&path)
+                        {
+                            let file_uri = format!("file://{}", path.display());
+                            self.update_ast(&file_uri, &content);
+                            return self
+                                .global_defines
+                                .read()
+                                .get(name.as_str())
+                                .and_then(|info| info.value.clone());
+                        }
+                        None
+                    })
+                    .or_else(|| {
+                        // Last-resort: lazily parse known autoload files
+                        // for constants missed by the byte-level scanner.
+                        let paths = self.autoload_file_paths.read().clone();
+                        for path in &paths {
+                            let uri = format!("file://{}", path.display());
+                            if self.ast_map.read().contains_key(&uri) {
+                                continue;
+                            }
+                            if let Ok(content) = std::fs::read_to_string(path) {
+                                self.update_ast(&uri, &content);
+                                let val = self
+                                    .global_defines
+                                    .read()
+                                    .get(name.as_str())
+                                    .and_then(|info| info.value.clone());
+                                if val.is_some() {
+                                    return val;
+                                }
+                            }
+                        }
+                        None
+                    });
 
                 let code = if let Some(ref val) = value_text {
                     format!("```php\n<?php\nconst {} = {};\n```", name, val)

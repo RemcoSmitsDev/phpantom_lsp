@@ -179,16 +179,54 @@ pub struct Backend {
     /// `define()` calls or `const` statements.  Used for constant name
     /// completions, hover (showing the value), and go-to-definition.
     pub(crate) global_defines: Arc<RwLock<HashMap<String, DefineInfo>>>,
+    /// Autoload function index: function FQN → file path on disk.
+    ///
+    /// Populated by the lightweight `find_symbols` byte-level scan
+    /// during initialization.  For non-Composer projects the full-scan
+    /// walks all workspace files; for Composer projects it scans the
+    /// files listed in `autoload_files.php` (and their `require_once`
+    /// chains).  Maps standalone function names to the file that
+    /// defines them so that [`find_or_load_function`] can lazily call
+    /// `update_ast` on first access instead of eagerly parsing every
+    /// file at startup.
+    pub(crate) autoload_function_index: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// Autoload constant index: constant name → file path on disk.
+    ///
+    /// Populated alongside `autoload_function_index` by the
+    /// `find_symbols` byte-level scan during initialization.  Maps
+    /// `define()` constants and top-level `const` declarations to
+    /// the file that defines them for lazy resolution via
+    /// `update_ast` on first access.
+    pub(crate) autoload_constant_index: Arc<RwLock<HashMap<String, PathBuf>>>,
+    /// Paths of all files discovered through Composer's
+    /// `autoload_files.php` (and their `require_once` chains).
+    ///
+    /// The byte-level `find_symbols` scanner only discovers top-level
+    /// function and constant declarations.  Functions wrapped in
+    /// `if (! function_exists(...))` guards (common in Laravel
+    /// helpers) are at brace depth 1 and are missed by the scanner.
+    /// This list is the safety net: when `find_or_load_function` or
+    /// `resolve_constant_definition` cannot find a symbol in any
+    /// index or stubs, it lazily parses each of these files via
+    /// `update_ast` until the symbol is found.  Each file is parsed
+    /// at most once (subsequent lookups hit `global_functions` /
+    /// `global_defines`).
+    pub(crate) autoload_file_paths: Arc<RwLock<Vec<PathBuf>>>,
     /// Index of fully-qualified class names to file URIs.
     ///
     /// This allows reliable lookup of classes that don't follow PSR-4
-    /// conventions — e.g. classes defined in files listed by Composer's
+    /// conventions, e.g. classes defined in files listed by Composer's
     /// `autoload_files.php`.  The key is the FQN (e.g.
     /// `"Laravel\\Foundation\\Application"`) and the value is the file URI
     /// where the class is defined.
     ///
-    /// Populated during `update_ast` (using the file's namespace + class
-    /// short name) and during server initialization for autoload files.
+    /// Populated from three sources:
+    /// - `update_ast` (using the file's namespace + class short name)
+    ///   whenever a file is opened or changed.
+    /// - The `find_symbols` byte-level scan of Composer autoload files
+    ///   during server initialization (so classes in autoload files are
+    ///   discoverable by `find_or_load_class` without an eager AST parse).
+    /// - The workspace full-scan for non-Composer projects.
     pub(crate) class_index: Arc<RwLock<HashMap<String, String>>>,
     /// Secondary index mapping fully-qualified class names directly to
     /// their parsed `ClassInfo`.
@@ -249,25 +287,29 @@ pub struct Backend {
     /// Wrapped in a `Mutex` so that `set_php_version` can be called
     /// during `initialized` (which receives `&self`, not `&mut self`).
     pub(crate) php_version: Mutex<types::PhpVersion>,
-    // NOTE: php_version, vendor_uri_prefix, vendor_dir_name, config, and
-    // diag_pending_uri use parking_lot::Mutex (not RwLock) because they
-    // are rarely accessed or always written.
-    /// The `file://` URI prefix for the vendor directory, used to skip
-    /// diagnostics for vendor files.
+    // NOTE: php_version, vendor_uri_prefixes, vendor_dir_paths, config,
+    // and diag_pending_uri use parking_lot::Mutex (not RwLock) because
+    // they are rarely accessed or always written.
+    /// `file://` URI prefixes for all known vendor directories, used to
+    /// skip diagnostics, find references, and rename for vendor files.
     ///
     /// Built during `initialized` from the workspace root and
     /// `composer.json`'s `config.vendor-dir` (default `"vendor"`).
-    /// Example: `"file:///home/user/project/vendor/"`.
+    /// Example: `["file:///home/user/project/vendor/"]`.
     ///
-    /// When empty (no workspace root), vendor-skipping is disabled.
-    pub(crate) vendor_uri_prefix: Mutex<String>,
-    /// The vendor directory name (e.g. `"vendor"` or a custom path from
-    /// `composer.json`'s `config.vendor-dir`).
+    /// In monorepo mode, contains one prefix per discovered subproject
+    /// vendor directory.  When empty, vendor-skipping is disabled.
+    pub(crate) vendor_uri_prefixes: Mutex<Vec<String>>,
+    /// Absolute paths of all known vendor directories.
     ///
     /// Cached during `initialized` so that cross-file scans (find
-    /// references, go-to-implementation) can skip the vendor directory
+    /// references, go-to-implementation) can skip vendor directories
     /// without re-reading `composer.json` on every request.
-    pub(crate) vendor_dir_name: Mutex<String>,
+    ///
+    /// In monorepo mode, contains one path per discovered subproject
+    /// vendor directory.  For single-project workspaces, contains
+    /// exactly one entry.
+    pub(crate) vendor_dir_paths: Mutex<Vec<PathBuf>>,
     /// Monotonically increasing version counter for diagnostic debouncing.
     ///
     /// Bumped on every `did_change`.  A background diagnostic task
@@ -317,13 +359,16 @@ impl Backend {
             symbol_maps: Arc::new(RwLock::new(HashMap::new())),
             client: None,
             workspace_root: Arc::new(RwLock::new(None)),
-            vendor_uri_prefix: Mutex::new(String::new()),
-            vendor_dir_name: Mutex::new("vendor".to_string()),
+            vendor_uri_prefixes: Mutex::new(Vec::new()),
+            vendor_dir_paths: Mutex::new(Vec::new()),
             psr4_mappings: Arc::new(RwLock::new(Vec::new())),
             use_map: Arc::new(RwLock::new(HashMap::new())),
             namespace_map: Arc::new(RwLock::new(HashMap::new())),
             global_functions: Arc::new(RwLock::new(HashMap::new())),
             global_defines: Arc::new(RwLock::new(HashMap::new())),
+            autoload_function_index: Arc::new(RwLock::new(HashMap::new())),
+            autoload_constant_index: Arc::new(RwLock::new(HashMap::new())),
+            autoload_file_paths: Arc::new(RwLock::new(Vec::new())),
             class_index: Arc::new(RwLock::new(HashMap::new())),
             fqn_index: Arc::new(RwLock::new(HashMap::new())),
             classmap: Arc::new(RwLock::new(HashMap::new())),
@@ -432,6 +477,24 @@ impl Backend {
         &self.stub_constant_index
     }
 
+    /// Borrow the autoload function index (used by integration tests to
+    /// populate discovered function entries for non-Composer projects).
+    pub fn autoload_function_index(&self) -> &Arc<RwLock<HashMap<String, PathBuf>>> {
+        &self.autoload_function_index
+    }
+
+    /// Borrow the autoload constant index (used by integration tests to
+    /// populate discovered constant entries for non-Composer projects).
+    pub fn autoload_constant_index(&self) -> &Arc<RwLock<HashMap<String, PathBuf>>> {
+        &self.autoload_constant_index
+    }
+
+    /// Borrow the autoload file paths list (used by integration tests
+    /// to simulate Composer autoload file discovery).
+    pub fn autoload_file_paths(&self) -> &Arc<RwLock<Vec<PathBuf>>> {
+        &self.autoload_file_paths
+    }
+
     /// Return the configured PHP version.
     pub fn php_version(&self) -> types::PhpVersion {
         *self.php_version.lock()
@@ -440,8 +503,8 @@ impl Backend {
     /// Create a shallow clone of this `Backend` that shares every
     /// `Arc`-wrapped field with the original.
     ///
-    /// Non-`Arc` fields (`php_version`, `vendor_uri_prefix`,
-    /// `vendor_dir_name`) are snapshotted at call time.  The stub
+    /// Non-`Arc` fields (`php_version`, `vendor_uri_prefixes`,
+    /// `vendor_dir_paths`) are snapshotted at call time.  The stub
     /// indices (`stub_index`, `stub_function_index`,
     /// `stub_constant_index`) are cloned (they are static `&str`
     /// maps, so this is cheap).
@@ -466,6 +529,9 @@ impl Backend {
             namespace_map: Arc::clone(&self.namespace_map),
             global_functions: Arc::clone(&self.global_functions),
             global_defines: Arc::clone(&self.global_defines),
+            autoload_function_index: Arc::clone(&self.autoload_function_index),
+            autoload_constant_index: Arc::clone(&self.autoload_constant_index),
+            autoload_file_paths: Arc::clone(&self.autoload_file_paths),
             class_index: Arc::clone(&self.class_index),
             fqn_index: Arc::clone(&self.fqn_index),
             classmap: Arc::clone(&self.classmap),
@@ -474,8 +540,8 @@ impl Backend {
             stub_function_index: self.stub_function_index.clone(),
             stub_constant_index: self.stub_constant_index.clone(),
             php_version: Mutex::new(self.php_version()),
-            vendor_uri_prefix: Mutex::new(self.vendor_uri_prefix.lock().clone()),
-            vendor_dir_name: Mutex::new(self.vendor_dir_name.lock().clone()),
+            vendor_uri_prefixes: Mutex::new(self.vendor_uri_prefixes.lock().clone()),
+            vendor_dir_paths: Mutex::new(self.vendor_dir_paths.lock().clone()),
             diag_version: Arc::clone(&self.diag_version),
             diag_notify: Arc::clone(&self.diag_notify),
             diag_pending_uri: Arc::clone(&self.diag_pending_uri),

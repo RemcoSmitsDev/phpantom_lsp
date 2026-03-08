@@ -75,33 +75,55 @@ pub(crate) fn catch_panic_unwind_safe<T>(
     catch_panic(label, uri, position, AssertUnwindSafe(f))
 }
 
-/// Recursively collect all `.php` files under a directory, skipping the
-/// directory named `vendor_dir_name` and hidden directories (`.git`,
+/// Recursively collect all `.php` files under a directory, respecting
+/// `.gitignore` rules and skipping hidden directories (`.git`,
 /// `.idea`, etc.).
 ///
+/// Uses the `ignore` crate's `WalkBuilder` for gitignore-aware
+/// traversal.  This is consistent with the other workspace walkers
+/// (`scan_workspace_fallback_full`, `collect_php_files_gitignore`).
+///
 /// Used by Go-to-implementation (Phase 5) which walks PSR-4 source
-/// directories.  Does **not** consult `.gitignore` — PSR-4 roots are
-/// curated source directories where every `.php` file is relevant.
+/// directories.
+///
+/// `vendor_dir_paths` contains absolute paths of all known vendor
+/// directories (one per subproject in monorepo mode).  Any directory
+/// whose absolute path matches one of these is skipped regardless of
+/// `.gitignore` content.
 ///
 /// Silently skips directories and files that cannot be read (e.g.
 /// permission errors, broken symlinks).
-pub(crate) fn collect_php_files(dir: &Path, vendor_dir_name: &str) -> Vec<PathBuf> {
+pub(crate) fn collect_php_files(dir: &Path, vendor_dir_paths: &[PathBuf]) -> Vec<PathBuf> {
+    use ignore::WalkBuilder;
+
     let mut result = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                    && (name == vendor_dir_name || name.starts_with('.'))
-                {
-                    continue;
+    let vendor_paths: Vec<PathBuf> = vendor_dir_paths.to_vec();
+
+    let walker = WalkBuilder::new(dir)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .hidden(true)
+        .parents(true)
+        .ignore(true)
+        .filter_entry(move |entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                let path = entry.path();
+                if vendor_paths.iter().any(|vp| vp == path) {
+                    return false;
                 }
-                result.extend(collect_php_files(&path, vendor_dir_name));
-            } else if path.extension().is_some_and(|ext| ext == "php") {
-                result.push(path);
             }
+            true
+        })
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
+            result.push(path.to_path_buf());
         }
     }
+
     result
 }
 
@@ -115,16 +137,21 @@ pub(crate) fn collect_php_files(dir: &Path, vendor_dir_name: &str) -> Vec<PathBu
 /// `.gitignore` (e.g. `storage/framework/views/`, `var/cache/`,
 /// `node_modules/`) are automatically skipped.
 ///
-/// The vendor directory is always skipped regardless of `.gitignore`
-/// content, since some projects commit their vendor directory.
+/// All known vendor directories are always skipped regardless of
+/// `.gitignore` content, since some projects commit their vendor
+/// directory.  `vendor_dir_paths` contains absolute paths of all
+/// known vendor directories (one per subproject in monorepo mode).
 ///
 /// Hidden files and directories are skipped by default (handled by
 /// the `ignore` crate).
-pub(crate) fn collect_php_files_gitignore(root: &Path, vendor_dir_name: &str) -> Vec<PathBuf> {
+pub(crate) fn collect_php_files_gitignore(
+    root: &Path,
+    vendor_dir_paths: &[PathBuf],
+) -> Vec<PathBuf> {
     use ignore::WalkBuilder;
 
     let mut result = Vec::new();
-    let vendor_owned = vendor_dir_name.to_string();
+    let vendor_paths_owned: Vec<PathBuf> = vendor_dir_paths.to_vec();
 
     let walker = WalkBuilder::new(root)
         // Respect .gitignore, .git/info/exclude, global gitignore
@@ -137,15 +164,13 @@ pub(crate) fn collect_php_files_gitignore(root: &Path, vendor_dir_name: &str) ->
         .parents(true)
         // Also respect .ignore files (ripgrep convention)
         .ignore(true)
-        // Always skip the vendor directory, even if not gitignored
+        // Always skip vendor directories, even if not gitignored
         .filter_entry(move |entry| {
-            if entry.file_type().is_some_and(|ft| ft.is_dir())
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name == vendor_owned)
-            {
-                return false;
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                let path = entry.path();
+                if vendor_paths_owned.iter().any(|vp| vp == path) {
+                    return false;
+                }
             }
             true
         })

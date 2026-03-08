@@ -53,8 +53,6 @@ parallel file processing.
 | 78 | Inline Function/Method | High | Code Actions | [actions.md §9](todo/actions.md#9-inline-functionmethod) |
 | 87 | Reference-counted `ClassInfo` (`Arc<ClassInfo>`) | Medium | Performance | [performance.md §2](todo/performance.md#2-reference-counted-classinfo-arcclassinfo) |
 | 88 | Early-exit and `Cow` return in `apply_substitution` | Low | Performance | [performance.md §7](todo/performance.md#7-recursive-string-substitution-in-apply_substitution) |
-| 90 | Lazy autoload file indexing | Medium | Indexing | [indexing.md §2.5](todo/indexing.md#phase-25-lazy-autoload-file-indexing) |
-| 91 | Non-Composer function/constant discovery | Low | Indexing | [indexing.md §2.6](todo/indexing.md#phase-26-non-composer-function-and-constant-discovery) |
 
 ---
 

@@ -1,14 +1,42 @@
-//! Fast byte-level PHP class/interface/trait/enum scanner for classmap
-//! generation.
+//! Fast byte-level PHP symbol scanners for early-stage file discovery.
 //!
-//! This module provides a single-pass state machine that extracts
-//! fully-qualified class names (`namespace\ClassName`) from PHP source
-//! without a full AST parse.  It is used by the self-generated classmap
-//! fallback (Sprint 2) to build a `HashMap<String, PathBuf>` when
-//! Composer's `autoload_classmap.php` is missing or incomplete.
+//! This module provides two single-pass state machines that extract
+//! symbol names from PHP source without a full AST parse:
+//!
+//! - **PSR-4 scanner** ([`find_classes`]) — extracts fully-qualified
+//!   class, interface, trait, and enum names.  Used by the PSR-4
+//!   directory walker to build a classmap when Composer's
+//!   `autoload_classmap.php` is missing or incomplete.
+//!
+//! - **Full-scan** ([`find_symbols`]) — extracts classes *plus*
+//!   standalone function names, `define()` constants, and top-level
+//!   `const` declarations.  Used for non-Composer projects (no
+//!   `composer.json`) and for Composer autoload files
+//!   (`autoload_files.php` and their `require_once` chains) to
+//!   populate name-to-path indices without a full AST parse.
+//!
+//! These scanners serve three indexing scenarios:
+//!
+//! 1. **Optimized Composer** — the Composer classmap is parsed
+//!    directly (not by this module).  Functions and constants from
+//!    `autoload_files.php` are discovered by the full-scan during
+//!    initialization, populating `autoload_function_index`,
+//!    `autoload_constant_index`, and `class_index`.  Lazy
+//!    `update_ast` on first access provides complete details.
+//!
+//! 2. **Composer self-scan** — the PSR-4 scanner builds a classmap
+//!    from `composer.json`'s autoload directories.  Functions and
+//!    constants from `autoload_files.php` are discovered by the
+//!    full-scan, same as scenario 1.
+//!
+//! 3. **No Composer** — the full-scan walks all workspace files,
+//!    populating the classmap, `autoload_function_index`, and
+//!    `autoload_constant_index` in one pass.  Lazy `update_ast`
+//!    on first access provides complete `FunctionInfo`/`DefineInfo`.
 //!
 //! The implementation is modelled after Composer's `PhpFileParser` /
-//! `PhpFileCleaner` pipeline and Libretto's `FastScanner`.  It handles:
+//! `PhpFileCleaner` pipeline and Libretto's `FastScanner`.  Both
+//! scanners handle:
 //!
 //! - `class`, `interface`, `trait`, and `enum` declarations
 //! - `namespace` declarations (including braced and semicolon forms)
@@ -20,17 +48,53 @@
 //!   class declaration)
 //! - `SomeClass::class` constant access (not treated as a declaration)
 //!
+//! The full-scan additionally handles:
+//!
+//! - `function` declarations (top-level only, not methods or closures)
+//! - `define('NAME', ...)` calls (constant name from first string arg)
+//! - `const NAME = ...` at top level (not class constants)
+//!
 //! # Performance
 //!
-//! The scanner uses `memchr` for SIMD-accelerated keyword pre-screening.
-//! Files that contain none of the keywords `class`, `interface`, `trait`,
-//! or `enum` are rejected in a single fast pass without entering the
-//! state machine.
+//! Both scanners use `memchr` for SIMD-accelerated keyword
+//! pre-screening.  Files that contain none of the relevant keywords
+//! are rejected in a single fast pass without entering the state
+//! machine.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use memchr::memmem;
+
+// ─── Data structures ────────────────────────────────────────────────────────
+
+/// All symbols discovered in a single PHP file by [`find_symbols`].
+///
+/// Contains fully-qualified names for classes, standalone functions,
+/// and constants (`define()` and top-level `const`).
+#[derive(Debug, Clone, Default)]
+pub struct ScanResult {
+    /// Fully-qualified class, interface, trait, and enum names.
+    pub classes: Vec<String>,
+    /// Fully-qualified standalone function names.
+    pub functions: Vec<String>,
+    /// Constant names from `define('NAME', ...)` and top-level `const NAME`.
+    pub constants: Vec<String>,
+}
+
+/// Combined workspace scan results for classes, functions, and constants.
+///
+/// Returned by [`scan_workspace_fallback_full`] and consumed during
+/// server initialization to populate the classmap and autoload indices.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceScanResult {
+    /// FQN → file path for classes, interfaces, traits, and enums.
+    pub classmap: HashMap<String, PathBuf>,
+    /// FQN → file path for standalone functions.
+    pub function_index: HashMap<String, PathBuf>,
+    /// Constant name → file path for `define()` and top-level `const`.
+    pub constant_index: HashMap<String, PathBuf>,
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -49,25 +113,43 @@ pub fn scan_file(path: &Path) -> Vec<String> {
     find_classes(&content)
 }
 
+/// Scan a single PHP file and return all discovered symbols (classes,
+/// functions, and constants).
+///
+/// Returns an empty [`ScanResult`] when the file cannot be read or is
+/// empty.
+pub fn scan_file_full(path: &Path) -> ScanResult {
+    let Ok(content) = std::fs::read(path) else {
+        return ScanResult::default();
+    };
+    if content.is_empty() {
+        return ScanResult::default();
+    }
+    find_symbols(&content)
+}
+
 /// Build a classmap by scanning all `.php` files under the given
 /// directories.
 ///
-/// Each directory is walked recursively.  Hidden directories (starting
-/// with `.`) and common non-PHP directories (`node_modules`, `target`)
-/// are skipped.  The `vendor_dir_name` directory is also skipped at
-/// every level to avoid scanning vendor code when walking user source
-/// directories.
+/// Each directory is walked recursively using the `ignore` crate for
+/// gitignore-aware traversal.  Hidden directories (`.git`, `.idea`,
+/// etc.) are skipped automatically.  Directories in `.gitignore` are
+/// also skipped.  Any directory whose absolute path is in
+/// `vendor_dir_paths` is explicitly skipped regardless of `.gitignore`.
 ///
 /// Returns a `HashMap<String, PathBuf>` mapping fully-qualified class
 /// names to the absolute file path where they are defined.  When a
 /// class name appears in multiple files, the first occurrence wins.
-pub fn scan_directories(dirs: &[PathBuf], vendor_dir_name: &str) -> HashMap<String, PathBuf> {
+pub fn scan_directories(
+    dirs: &[PathBuf],
+    vendor_dir_paths: &[PathBuf],
+) -> HashMap<String, PathBuf> {
     let mut classmap = HashMap::new();
     for dir in dirs {
         if !dir.is_dir() {
             continue;
         }
-        scan_directory_recursive(dir, vendor_dir_name, &mut classmap);
+        scan_directory_gitignore(dir, vendor_dir_paths, &mut classmap);
     }
     classmap
 }
@@ -76,16 +158,21 @@ pub fn scan_directories(dirs: &[PathBuf], vendor_dir_name: &str) -> HashMap<Stri
 /// directories, applying PSR-4 compliance filtering.
 ///
 /// For each `(namespace_prefix, base_path)` pair the scanner walks
-/// `base_path` recursively and only includes classes whose FQN matches
-/// the PSR-4 mapping: the namespace prefix plus the relative file path
-/// must equal the class name.
+/// `base_path` recursively using the `ignore` crate for
+/// gitignore-aware traversal, and only includes classes whose FQN
+/// matches the PSR-4 mapping: the namespace prefix plus the relative
+/// file path must equal the class name.
 ///
 /// Entries from `classmap_dirs` are scanned without PSR-4 filtering
 /// (equivalent to Composer's `autoload.classmap` entries).
+///
+/// `vendor_dir_paths` contains absolute paths of all known vendor
+/// directories.  Any directory whose absolute path matches one of
+/// these is skipped.
 pub fn scan_psr4_directories(
     psr4: &[(String, PathBuf)],
     classmap_dirs: &[PathBuf],
-    vendor_dir_name: &str,
+    vendor_dir_paths: &[PathBuf],
 ) -> HashMap<String, PathBuf> {
     let mut classmap = HashMap::new();
 
@@ -94,7 +181,7 @@ pub fn scan_psr4_directories(
         if !base_path.is_dir() {
             continue;
         }
-        scan_psr4_directory_recursive(base_path, base_path, prefix, vendor_dir_name, &mut classmap);
+        scan_psr4_directory_gitignore(base_path, prefix, vendor_dir_paths, &mut classmap);
     }
 
     // Plain classmap directories (no namespace filtering)
@@ -102,7 +189,7 @@ pub fn scan_psr4_directories(
         if !dir.is_dir() {
             continue;
         }
-        scan_directory_recursive(dir, vendor_dir_name, &mut classmap);
+        scan_directory_gitignore(dir, vendor_dir_paths, &mut classmap);
     }
 
     classmap
@@ -137,10 +224,7 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
     };
 
     let mut classmap = HashMap::new();
-    let vendor_dir_name = vendor_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("vendor");
+    let vendor_dir_paths: Vec<PathBuf> = vec![vendor_path.clone()];
 
     // The directory containing installed.json — install-path values
     // are relative to this directory.
@@ -190,11 +274,10 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
                 for dir_str in value_to_strings(paths) {
                     let dir = pkg_path.join(&dir_str);
                     if dir.is_dir() {
-                        scan_psr4_directory_recursive(
-                            &dir,
+                        scan_psr4_directory_gitignore(
                             &dir,
                             &prefix,
-                            vendor_dir_name,
+                            &vendor_dir_paths,
                             &mut classmap,
                         );
                     }
@@ -208,7 +291,7 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
                 if let Some(dir_str) = entry.as_str() {
                     let dir = pkg_path.join(dir_str);
                     if dir.is_dir() {
-                        scan_directory_recursive(&dir, vendor_dir_name, &mut classmap);
+                        scan_directory_gitignore(&dir, &vendor_dir_paths, &mut classmap);
                     } else if dir.is_file() && dir.extension().is_some_and(|ext| ext == "php") {
                         for fqcn in scan_file(&dir) {
                             classmap.entry(fqcn).or_insert_with(|| dir.clone());
@@ -222,22 +305,494 @@ pub fn scan_vendor_packages(workspace_root: &Path, vendor_dir: &str) -> HashMap<
     classmap
 }
 
-/// Scan all `.php` files under the workspace root (excluding hidden
-/// directories and the vendor directory).
+/// Scan all `.php` files under the workspace root using the PSR-4
+/// scanner (`find_classes`), excluding hidden directories, gitignored
+/// directories, and vendor directories.
 ///
-/// This is the non-Composer fallback: when no `composer.json` exists,
-/// we walk everything to provide basic cross-file resolution.
+/// This is a classes-only fallback used when `composer.json` cannot be
+/// parsed.  Prefer [`scan_workspace_fallback_full`] for the no-Composer
+/// scenario so that functions and constants are also discovered.
+///
+/// `vendor_dir_paths` contains absolute paths of all known vendor
+/// directories.  Pass a single-element slice with the vendor directory
+/// for single-project workspaces.
 pub fn scan_workspace_fallback(
     workspace_root: &Path,
-    vendor_dir_name: &str,
+    vendor_dir_paths: &[PathBuf],
 ) -> HashMap<String, PathBuf> {
-    scan_directories(&[workspace_root.to_path_buf()], vendor_dir_name)
+    scan_directories(&[workspace_root.to_path_buf()], vendor_dir_paths)
+}
+
+/// Scan all `.php` files under the workspace root using the full-scan
+/// (`find_symbols`) and return classes, functions, and constants in a
+/// single pass.
+///
+/// This is the primary scanner for the "no `composer.json`" scenario.
+/// It populates all three indices (classmap, function index, constant
+/// index) so that non-Composer projects get cross-file resolution for
+/// every symbol type.  Lazy `update_ast` on first access provides the
+/// complete `FunctionInfo` / `DefineInfo` needed by hover, completion,
+/// and go-to-definition.
+///
+/// Uses the `ignore` crate for gitignore-aware walking.  Hidden
+/// directories (starting with `.`) are skipped automatically.
+/// Directories whose absolute path is in `skip_dirs` are also skipped
+/// (used by monorepo support to avoid double-scanning subproject
+/// directories that were already processed by the Composer pipeline).
+pub fn scan_workspace_fallback_full(
+    workspace_root: &Path,
+    skip_dirs: &HashSet<PathBuf>,
+) -> WorkspaceScanResult {
+    use ignore::WalkBuilder;
+
+    let mut result = WorkspaceScanResult::default();
+    let skip_dirs_owned = skip_dirs.clone();
+
+    let walker = WalkBuilder::new(workspace_root)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .hidden(true)
+        .parents(true)
+        .ignore(true)
+        .filter_entry(move |entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                let path = entry.path();
+                // Skip directories in the skip set (monorepo subproject roots)
+                if skip_dirs_owned.contains(path) {
+                    return false;
+                }
+            }
+            true
+        })
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
+            let scan = scan_file_full(path);
+            let path_buf = path.to_path_buf();
+            for fqcn in scan.classes {
+                result
+                    .classmap
+                    .entry(fqcn)
+                    .or_insert_with(|| path_buf.clone());
+            }
+            for fqn in scan.functions {
+                result
+                    .function_index
+                    .entry(fqn)
+                    .or_insert_with(|| path_buf.clone());
+            }
+            for name in scan.constants {
+                result
+                    .constant_index
+                    .entry(name)
+                    .or_insert_with(|| path_buf.clone());
+            }
+        }
+    }
+
+    result
 }
 
 // ─── Core scanner ───────────────────────────────────────────────────────────
 
-/// Single-pass byte-level scanner that extracts fully-qualified class
-/// names from PHP source bytes.
+/// The **full-scan**: a single-pass byte-level scanner that extracts
+/// fully-qualified class, function, and constant names from PHP source
+/// bytes.
+///
+/// This is the extended version of [`find_classes`] (the PSR-4 scanner)
+/// that also recognises `function` declarations, `define()` calls, and
+/// top-level `const` statements.  It is used for both non-Composer
+/// projects (full workspace scan) and Composer autoload files
+/// (`autoload_files.php` and their `require_once` chains).
+pub fn find_symbols(content: &[u8]) -> ScanResult {
+    // Quick rejection — if the file has none of the relevant keywords
+    // we can bail immediately.
+    if !has_any_keyword(content) {
+        return ScanResult::default();
+    }
+
+    let mut result = ScanResult::default();
+    let mut namespace = String::new();
+    let len = content.len();
+    let mut i = 0;
+
+    // Brace depth tracking for top-level `const` detection.
+    // Depth 0 = top-level, depth 1 = inside a class/namespace block.
+    let mut brace_depth: u32 = 0;
+    // Whether we are inside a braced namespace block.
+    let mut in_braced_namespace = false;
+    // The brace depth at which the current namespace was opened.
+    // `const` declarations at this depth (or depth 0 outside braced
+    // namespaces) are top-level.
+    let mut namespace_brace_depth: u32 = 0;
+
+    // State flags
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_single_string = false;
+    let mut in_double_string = false;
+    let mut in_heredoc = false;
+    let mut heredoc_id: &[u8] = &[];
+
+    while i < len {
+        // ── Skip: line comment ──────────────────────────────────────
+        if in_line_comment {
+            if content[i] == b'\n' {
+                in_line_comment = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // ── Skip: block comment ─────────────────────────────────────
+        if in_block_comment {
+            if content[i] == b'*' && i + 1 < len && content[i + 1] == b'/' {
+                in_block_comment = false;
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── Skip: single-quoted string ──────────────────────────────
+        if in_single_string {
+            if content[i] == b'\\' && i + 1 < len {
+                i += 2;
+            } else if content[i] == b'\'' {
+                in_single_string = false;
+                i += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── Skip: double-quoted string ──────────────────────────────
+        if in_double_string {
+            if content[i] == b'\\' && i + 1 < len {
+                i += 2;
+            } else if content[i] == b'"' {
+                in_double_string = false;
+                i += 1;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── Skip: heredoc / nowdoc ──────────────────────────────────
+        if in_heredoc {
+            let line_start = i;
+            while i < len && (content[i] == b' ' || content[i] == b'\t') {
+                i += 1;
+            }
+            if i + heredoc_id.len() <= len && &content[i..i + heredoc_id.len()] == heredoc_id {
+                let after = i + heredoc_id.len();
+                if after >= len
+                    || content[after] == b';'
+                    || content[after] == b'\n'
+                    || content[after] == b'\r'
+                    || content[after] == b','
+                    || content[after] == b')'
+                {
+                    in_heredoc = false;
+                    i = after;
+                    continue;
+                }
+            }
+            i = line_start;
+            while i < len && content[i] != b'\n' {
+                i += 1;
+            }
+            if i < len {
+                i += 1;
+            }
+            continue;
+        }
+
+        // ── Main code parsing ───────────────────────────────────────
+        let b = content[i];
+
+        // Braces for depth tracking
+        if b == b'{' {
+            brace_depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            brace_depth = brace_depth.saturating_sub(1);
+            // Exiting a braced namespace block resets the namespace.
+            if in_braced_namespace && brace_depth == namespace_brace_depth {
+                in_braced_namespace = false;
+                namespace.clear();
+            }
+            i += 1;
+            continue;
+        }
+
+        // Comments
+        if b == b'/' && i + 1 < len {
+            if content[i + 1] == b'/' {
+                in_line_comment = true;
+                i += 2;
+                continue;
+            }
+            if content[i + 1] == b'*' {
+                in_block_comment = true;
+                i += 2;
+                continue;
+            }
+        }
+
+        if b == b'#' {
+            if i + 1 < len && content[i + 1] == b'[' {
+                i += 1;
+                continue;
+            }
+            in_line_comment = true;
+            i += 1;
+            continue;
+        }
+
+        // Strings
+        if b == b'\'' {
+            in_single_string = true;
+            i += 1;
+            continue;
+        }
+        if b == b'"' {
+            in_double_string = true;
+            i += 1;
+            continue;
+        }
+
+        // Heredoc / nowdoc
+        if b == b'<' && i + 2 < len && content[i + 1] == b'<' && content[i + 2] == b'<' {
+            i += 3;
+            while i < len && content[i] == b' ' {
+                i += 1;
+            }
+            if i < len && (content[i] == b'\'' || content[i] == b'"') {
+                i += 1;
+            }
+            let id_start = i;
+            while i < len && (content[i].is_ascii_alphanumeric() || content[i] == b'_') {
+                i += 1;
+            }
+            if i > id_start {
+                heredoc_id = &content[id_start..i];
+                in_heredoc = true;
+                if i < len && (content[i] == b'\'' || content[i] == b'"') {
+                    i += 1;
+                }
+                while i < len && content[i] != b'\n' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+
+        // ── Keyword detection ───────────────────────────────────────
+        if is_keyword_boundary(content, i) {
+            // namespace
+            if b == b'n'
+                && i + 9 <= len
+                && &content[i..i + 9] == b"namespace"
+                && (i + 9 >= len
+                    || content[i + 9].is_ascii_whitespace()
+                    || content[i + 9] == b';'
+                    || content[i + 9] == b'{')
+            {
+                i += 9;
+                while i < len && content[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+
+                let ns_start = i;
+                while i < len {
+                    let c = content[i];
+                    if c.is_ascii_alphanumeric()
+                        || c == b'_'
+                        || c == b'\\'
+                        || c.is_ascii_whitespace()
+                    {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                namespace = content[ns_start..i]
+                    .iter()
+                    .filter(|&&c| !c.is_ascii_whitespace())
+                    .map(|&c| c as char)
+                    .collect();
+                if !namespace.is_empty() && !namespace.ends_with('\\') {
+                    namespace.push('\\');
+                }
+
+                // Check for braced namespace: `namespace Foo { ... }`
+                while i < len && content[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i < len && content[i] == b'{' {
+                    in_braced_namespace = true;
+                    namespace_brace_depth = brace_depth;
+                    brace_depth += 1;
+                    i += 1;
+                }
+                continue;
+            }
+
+            // class
+            if b == b'c'
+                && i + 5 <= len
+                && &content[i..i + 5] == b"class"
+                && (i + 5 >= len || content[i + 5].is_ascii_whitespace())
+            {
+                i += 5;
+                if let Some(name) = read_name(content, &mut i) {
+                    result.classes.push(format!("{namespace}{name}"));
+                }
+                continue;
+            }
+
+            // interface
+            if b == b'i'
+                && i + 9 <= len
+                && &content[i..i + 9] == b"interface"
+                && (i + 9 >= len || content[i + 9].is_ascii_whitespace())
+            {
+                i += 9;
+                if let Some(name) = read_name(content, &mut i) {
+                    result.classes.push(format!("{namespace}{name}"));
+                }
+                continue;
+            }
+
+            // trait
+            if b == b't'
+                && i + 5 <= len
+                && &content[i..i + 5] == b"trait"
+                && (i + 5 >= len || content[i + 5].is_ascii_whitespace())
+            {
+                i += 5;
+                if let Some(name) = read_name(content, &mut i) {
+                    result.classes.push(format!("{namespace}{name}"));
+                }
+                continue;
+            }
+
+            // enum
+            if b == b'e'
+                && i + 4 <= len
+                && &content[i..i + 4] == b"enum"
+                && (i + 4 >= len || content[i + 4].is_ascii_whitespace())
+            {
+                i += 4;
+                if let Some(name) = read_name(content, &mut i) {
+                    result.classes.push(format!("{namespace}{name}"));
+                }
+                continue;
+            }
+
+            // function (standalone — not inside a class/trait/enum body)
+            if b == b'f'
+                && i + 8 <= len
+                && &content[i..i + 8] == b"function"
+                && (i + 8 >= len || content[i + 8].is_ascii_whitespace() || content[i + 8] == b'(')
+            {
+                // Only top-level functions: depth 0 (no braced ns) or
+                // the namespace brace depth + 1 doesn't apply — we
+                // want depth == 0 outside braced ns, or depth ==
+                // namespace_brace_depth + 1 inside braced ns.
+                let is_top_level = if in_braced_namespace {
+                    brace_depth == namespace_brace_depth + 1
+                } else {
+                    brace_depth == 0
+                };
+
+                if is_top_level {
+                    i += 8;
+                    // Skip `function (` — that's a closure, not a named function.
+                    let mut j = i;
+                    while j < len && content[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < len && content[j] == b'(' {
+                        // Anonymous function / closure — skip.
+                        i = j;
+                    } else if let Some(name) = read_name(content, &mut i) {
+                        result.functions.push(format!("{namespace}{name}"));
+                    }
+                } else {
+                    i += 8;
+                }
+                continue;
+            }
+
+            // define('NAME', ...)
+            if b == b'd'
+                && i + 6 <= len
+                && &content[i..i + 6] == b"define"
+                && (i + 6 < len && content[i + 6] == b'(')
+            {
+                i += 7; // skip `define(`
+                // Skip whitespace
+                while i < len && content[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                // Read the constant name from the string argument.
+                if let Some(name) = read_define_name(content, &mut i) {
+                    result.constants.push(name.to_string());
+                }
+                continue;
+            }
+
+            // const NAME = ... (top-level only)
+            if b == b'c'
+                && i + 5 <= len
+                && &content[i..i + 5] == b"const"
+                && (i + 5 >= len || content[i + 5].is_ascii_whitespace())
+            {
+                let is_top_level = if in_braced_namespace {
+                    brace_depth == namespace_brace_depth + 1
+                } else {
+                    brace_depth == 0
+                };
+
+                if is_top_level {
+                    i += 5;
+                    if let Some(name) = read_name(content, &mut i) {
+                        // Top-level const names are FQN with namespace.
+                        result.constants.push(format!("{namespace}{name}"));
+                    }
+                } else {
+                    i += 5;
+                }
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    result
+}
+
+/// The **PSR-4 scanner**: a single-pass byte-level scanner that
+/// extracts fully-qualified class, interface, trait, and enum names
+/// from PHP source bytes.
+///
+/// This is the classes-only scanner used by the PSR-4 directory walker
+/// and vendor package scanner.  For a scanner that also extracts
+/// functions and constants, see [`find_symbols`] (the full-scan).
 ///
 /// Skips comments, strings, heredocs, and nowdocs inline without
 /// allocating a separate "cleaned" buffer.
@@ -528,6 +1083,20 @@ fn has_class_keyword(content: &[u8]) -> bool {
         || memmem::find(content, b"enum").is_some()
 }
 
+/// SIMD-accelerated pre-screening: check whether the content contains
+/// any keyword relevant to symbol extraction (classes, functions,
+/// constants).
+#[inline]
+fn has_any_keyword(content: &[u8]) -> bool {
+    memmem::find(content, b"class").is_some()
+        || memmem::find(content, b"interface").is_some()
+        || memmem::find(content, b"trait").is_some()
+        || memmem::find(content, b"enum").is_some()
+        || memmem::find(content, b"function").is_some()
+        || memmem::find(content, b"define").is_some()
+        || memmem::find(content, b"const").is_some()
+}
+
 /// Check if a character is a valid boundary (not part of an identifier).
 #[inline]
 fn is_boundary_char(c: u8) -> bool {
@@ -558,6 +1127,47 @@ fn is_keyword_boundary(content: &[u8], i: usize) -> bool {
     }
 
     true
+}
+
+/// Read the constant name from the first argument of a `define()` call.
+///
+/// Expects `i` to point at the first character after `define(` (with
+/// optional whitespace already skipped).  Handles both single-quoted
+/// and double-quoted string literals.  Returns the raw name string
+/// (without quotes).
+#[inline]
+fn read_define_name<'a>(content: &'a [u8], i: &mut usize) -> Option<&'a str> {
+    let len = content.len();
+    if *i >= len {
+        return None;
+    }
+    let quote = content[*i];
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    *i += 1; // skip opening quote
+    let start = *i;
+    while *i < len && content[*i] != quote {
+        if content[*i] == b'\\' && *i + 1 < len {
+            let next = content[*i + 1];
+            if next == quote || next == b'\\' {
+                // Escaped quote or escaped backslash — the name
+                // contains a real escape sequence, which is unusual
+                // for constant names.  Bail out.
+                return None;
+            }
+            // A bare backslash (e.g. namespace separator in
+            // 'App\Config\DB_HOST') is literal in single-quoted
+            // strings and safe to include.
+        }
+        *i += 1;
+    }
+    if *i >= len {
+        return None;
+    }
+    let name = &content[start..*i];
+    *i += 1; // skip closing quote
+    std::str::from_utf8(name).ok()
 }
 
 /// Read a class/interface/trait/enum name after the keyword.
@@ -624,66 +1234,88 @@ fn value_to_strings(value: &serde_json::Value) -> Vec<String> {
     }
 }
 
-/// Whether a directory name should be skipped during recursive walks.
-fn should_skip_dir(name: &str, vendor_dir_name: &str) -> bool {
-    name.starts_with('.') || name == vendor_dir_name || name == "node_modules" || name == "target"
-}
-
-/// Recursively scan a directory for `.php` files and add discovered
-/// class names to the classmap.
-fn scan_directory_recursive(
+/// Scan a directory for `.php` files using gitignore-aware walking and
+/// add discovered class names to the classmap.
+///
+/// Uses the `ignore` crate's `WalkBuilder` to respect `.gitignore`
+/// rules at every level.  Hidden directories are skipped automatically.
+/// Directories whose absolute path is in `vendor_dir_paths` are also
+/// skipped.
+fn scan_directory_gitignore(
     dir: &Path,
-    vendor_dir_name: &str,
+    vendor_dir_paths: &[PathBuf],
     classmap: &mut HashMap<String, PathBuf>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && should_skip_dir(name, vendor_dir_name)
-            {
-                continue;
+    use ignore::WalkBuilder;
+
+    let vendor_paths: Vec<PathBuf> = vendor_dir_paths.to_vec();
+
+    let walker = WalkBuilder::new(dir)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .hidden(true)
+        .parents(true)
+        .ignore(true)
+        .filter_entry(move |entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                let path = entry.path();
+                if vendor_paths.iter().any(|vp| vp == path) {
+                    return false;
+                }
             }
-            scan_directory_recursive(&path, vendor_dir_name, classmap);
-        } else if path.extension().is_some_and(|ext| ext == "php") {
-            for fqcn in scan_file(&path) {
-                classmap.entry(fqcn).or_insert_with(|| path.clone());
+            true
+        })
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
+            for fqcn in scan_file(path) {
+                classmap.entry(fqcn).or_insert_with(|| path.to_path_buf());
             }
         }
     }
 }
 
-/// Recursively scan a PSR-4 directory, only including classes whose
-/// FQN matches the PSR-4 mapping.
-fn scan_psr4_directory_recursive(
-    dir: &Path,
+/// Scan a PSR-4 directory using gitignore-aware walking, only including
+/// classes whose FQN matches the PSR-4 mapping.
+///
+/// Uses the `ignore` crate's `WalkBuilder` to respect `.gitignore`
+/// rules at every level.  Hidden directories are skipped automatically.
+/// Directories whose absolute path is in `vendor_dir_paths` are also
+/// skipped.
+fn scan_psr4_directory_gitignore(
     base_path: &Path,
     namespace_prefix: &str,
-    vendor_dir_name: &str,
+    vendor_dir_paths: &[PathBuf],
     classmap: &mut HashMap<String, PathBuf>,
 ) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str())
-                && should_skip_dir(name, vendor_dir_name)
-            {
-                continue;
+    use ignore::WalkBuilder;
+
+    let vendor_paths: Vec<PathBuf> = vendor_dir_paths.to_vec();
+
+    let walker = WalkBuilder::new(base_path)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .hidden(true)
+        .parents(true)
+        .ignore(true)
+        .filter_entry(move |entry| {
+            if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                let path = entry.path();
+                if vendor_paths.iter().any(|vp| vp == path) {
+                    return false;
+                }
             }
-            scan_psr4_directory_recursive(
-                &path,
-                base_path,
-                namespace_prefix,
-                vendor_dir_name,
-                classmap,
-            );
-        } else if path.extension().is_some_and(|ext| ext == "php") {
+            true
+        })
+        .build();
+
+    for entry in walker.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "php") {
             // Compute expected FQN from the file path relative to the
             // PSR-4 base directory.
             let relative = match path.strip_prefix(base_path) {
@@ -699,10 +1331,10 @@ fn scan_psr4_directory_recursive(
             // Convert path separators to namespace separators
             let expected_fqn = format!("{}{}", namespace_prefix, stem.replace('/', "\\"));
 
-            let classes = scan_file(&path);
+            let classes = scan_file(path);
             for fqcn in classes {
                 if fqcn == expected_fqn {
-                    classmap.entry(fqcn).or_insert_with(|| path.clone());
+                    classmap.entry(fqcn).or_insert_with(|| path.to_path_buf());
                 }
             }
         }
@@ -967,7 +1599,8 @@ class Real {}
         )
         .unwrap();
 
-        let classmap = scan_directories(&[src], "vendor");
+        let vendor_dir_paths = vec![dir.path().join("vendor")];
+        let classmap = scan_directories(&[src], &vendor_dir_paths);
         assert_eq!(classmap.len(), 2);
         assert!(classmap.contains_key("App\\Models\\User"));
         assert!(classmap.contains_key("App\\Models\\Order"));
@@ -980,7 +1613,7 @@ class Real {}
         std::fs::create_dir_all(&hidden).unwrap();
         std::fs::write(hidden.join("Secret.php"), "<?php\nclass Secret {}").unwrap();
 
-        let classmap = scan_directories(&[dir.path().to_path_buf()], "vendor");
+        let classmap = scan_directories(&[dir.path().to_path_buf()], &[]);
         assert!(!classmap.contains_key("Secret"));
     }
 
@@ -991,7 +1624,8 @@ class Real {}
         std::fs::create_dir_all(&vendor).unwrap();
         std::fs::write(vendor.join("Lib.php"), "<?php\nclass Lib {}").unwrap();
 
-        let classmap = scan_directories(&[dir.path().to_path_buf()], "vendor");
+        let vendor_dir_paths = vec![vendor];
+        let classmap = scan_directories(&[dir.path().to_path_buf()], &vendor_dir_paths);
         assert!(!classmap.contains_key("Lib"));
     }
 
@@ -1016,7 +1650,7 @@ class Real {}
         )
         .unwrap();
 
-        let classmap = scan_psr4_directories(&[("App\\".to_string(), src)], &[], "vendor");
+        let classmap = scan_psr4_directories(&[("App\\".to_string(), src)], &[], &[]);
         assert!(classmap.contains_key("App\\Models\\User"));
         assert!(!classmap.contains_key("App\\Wrong\\Misplaced"));
     }
@@ -1195,8 +1829,298 @@ class Real {}
         std::fs::write(sub.join("Foo.php"), "<?php\nclass Foo {}").unwrap();
         std::fs::write(dir.path().join("Bar.php"), "<?php\nclass Bar {}").unwrap();
 
-        let classmap = scan_workspace_fallback(dir.path(), "vendor");
+        let vendor_dir_paths = vec![dir.path().join("vendor")];
+        let classmap = scan_workspace_fallback(dir.path(), &vendor_dir_paths);
         assert!(classmap.contains_key("Foo"));
         assert!(classmap.contains_key("Bar"));
+    }
+
+    // ── find_symbols unit tests ─────────────────────────────────────
+
+    #[test]
+    fn symbols_simple_function() {
+        let content = b"<?php\nfunction helper(): void {}";
+        let result = find_symbols(content);
+        assert_eq!(result.functions, vec!["helper"]);
+        assert!(result.classes.is_empty());
+        assert!(result.constants.is_empty());
+    }
+
+    #[test]
+    fn symbols_namespaced_function() {
+        let content = b"<?php\nnamespace App\\Helpers;\nfunction helper(): void {}";
+        let result = find_symbols(content);
+        assert_eq!(result.functions, vec!["App\\Helpers\\helper"]);
+    }
+
+    #[test]
+    fn symbols_closure_not_captured() {
+        let content = b"<?php\n$fn = function () { return 1; };";
+        let result = find_symbols(content);
+        assert!(result.functions.is_empty());
+    }
+
+    #[test]
+    fn symbols_method_not_captured() {
+        let content = br"<?php
+class Foo {
+    public function bar(): void {}
+}
+";
+        let result = find_symbols(content);
+        assert_eq!(result.classes, vec!["Foo"]);
+        assert!(
+            result.functions.is_empty(),
+            "methods should not appear as functions: {:?}",
+            result.functions
+        );
+    }
+
+    #[test]
+    fn symbols_define_single_quote() {
+        let content = b"<?php\ndefine('MY_CONST', 42);";
+        let result = find_symbols(content);
+        assert_eq!(result.constants, vec!["MY_CONST"]);
+    }
+
+    #[test]
+    fn symbols_define_double_quote() {
+        let content = b"<?php\ndefine(\"APP_VERSION\", '1.0');";
+        let result = find_symbols(content);
+        assert_eq!(result.constants, vec!["APP_VERSION"]);
+    }
+
+    #[test]
+    fn symbols_top_level_const() {
+        let content = b"<?php\nconst FOO = 'bar';";
+        let result = find_symbols(content);
+        assert_eq!(result.constants, vec!["FOO"]);
+    }
+
+    #[test]
+    fn symbols_namespaced_const() {
+        let content = b"<?php\nnamespace App;\nconst VERSION = '1.0';";
+        let result = find_symbols(content);
+        assert_eq!(result.constants, vec!["App\\VERSION"]);
+    }
+
+    #[test]
+    fn symbols_class_const_not_captured() {
+        let content = br"<?php
+class Config {
+    const MAX = 100;
+    public function foo(): void {}
+}
+";
+        let result = find_symbols(content);
+        assert_eq!(result.classes, vec!["Config"]);
+        assert!(
+            result.constants.is_empty(),
+            "class constants should not be captured: {:?}",
+            result.constants
+        );
+        assert!(
+            result.functions.is_empty(),
+            "methods should not be captured: {:?}",
+            result.functions
+        );
+    }
+
+    #[test]
+    fn symbols_mixed_file() {
+        let content = br#"<?php
+namespace App\Utils;
+
+class Helper {}
+interface Renderable {}
+
+function formatDate(): string { return ''; }
+function parseJson(): array { return []; }
+
+define('APP_NAME', 'MyApp');
+const DEBUG = true;
+"#;
+        let result = find_symbols(content);
+        assert_eq!(
+            result.classes,
+            vec!["App\\Utils\\Helper", "App\\Utils\\Renderable"]
+        );
+        assert_eq!(
+            result.functions,
+            vec!["App\\Utils\\formatDate", "App\\Utils\\parseJson"]
+        );
+        assert!(
+            result.constants.contains(&"APP_NAME".to_string()),
+            "should find define(): {:?}",
+            result.constants
+        );
+        assert!(
+            result.constants.contains(&"App\\Utils\\DEBUG".to_string()),
+            "should find namespaced const: {:?}",
+            result.constants
+        );
+    }
+
+    #[test]
+    fn symbols_function_in_comment_ignored() {
+        let content = b"<?php\n// function notReal(): void {}\nfunction real(): void {}";
+        let result = find_symbols(content);
+        assert_eq!(result.functions, vec!["real"]);
+    }
+
+    #[test]
+    fn symbols_define_in_string_ignored() {
+        let content = b"<?php\n$s = \"define('NOT_REAL', 1);\";";
+        let result = find_symbols(content);
+        assert!(result.constants.is_empty());
+    }
+
+    #[test]
+    fn symbols_braced_namespace() {
+        let content = br"<?php
+namespace Foo {
+    class A {}
+    function helper(): void {}
+    const BAR = 1;
+}
+namespace Baz {
+    class B {}
+    function other(): void {}
+}
+";
+        let result = find_symbols(content);
+        assert_eq!(result.classes, vec!["Foo\\A", "Baz\\B"]);
+        assert_eq!(result.functions, vec!["Foo\\helper", "Baz\\other"]);
+        assert_eq!(result.constants, vec!["Foo\\BAR"]);
+    }
+
+    #[test]
+    fn symbols_function_with_parenthesized_return() {
+        // Ensure `function` keyword followed by `(` is treated as closure.
+        let content = b"<?php\n$f = function(int $x): int { return $x; };";
+        let result = find_symbols(content);
+        assert!(result.functions.is_empty());
+    }
+
+    #[test]
+    fn symbols_define_in_block_comment_ignored() {
+        let content = b"<?php\n/* define('NOPE', 1); */\ndefine('YES', 2);";
+        let result = find_symbols(content);
+        assert_eq!(result.constants, vec!["YES"]);
+    }
+
+    #[test]
+    fn symbols_empty_content() {
+        let result = find_symbols(b"");
+        assert!(result.classes.is_empty());
+        assert!(result.functions.is_empty());
+        assert!(result.constants.is_empty());
+    }
+
+    #[test]
+    fn symbols_no_php_symbols() {
+        let result = find_symbols(b"<?php\n$x = 1 + 2;\necho $x;");
+        assert!(result.classes.is_empty());
+        assert!(result.functions.is_empty());
+        assert!(result.constants.is_empty());
+    }
+
+    #[test]
+    fn symbols_heredoc_skipped() {
+        let content = br#"<?php
+$s = <<<EOT
+function fakeFunc(): void {}
+define('FAKE', 1);
+class FakeClass {}
+EOT;
+function realFunc(): void {}
+"#;
+        let result = find_symbols(content);
+        assert_eq!(result.functions, vec!["realFunc"]);
+        assert!(result.classes.is_empty());
+        assert!(result.constants.is_empty());
+    }
+
+    // ── scan_workspace_fallback_full tests ───────────────────────────
+
+    #[test]
+    fn scan_workspace_fallback_full_finds_all_symbol_types() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("helpers.php"),
+            "<?php\nfunction myHelper(): void {}\ndefine('MY_CONST', 1);\nconst DEBUG = true;",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("Model.php"), "<?php\nclass User {}").unwrap();
+
+        let skip = std::collections::HashSet::new();
+        let result = scan_workspace_fallback_full(dir.path(), &skip);
+        assert!(result.classmap.contains_key("User"));
+        assert!(
+            result.function_index.contains_key("myHelper"),
+            "should find function: {:?}",
+            result.function_index
+        );
+        assert!(
+            result.constant_index.contains_key("MY_CONST"),
+            "should find define constant: {:?}",
+            result.constant_index
+        );
+        assert!(
+            result.constant_index.contains_key("DEBUG"),
+            "should find top-level const: {:?}",
+            result.constant_index
+        );
+    }
+
+    #[test]
+    fn scan_workspace_fallback_full_skips_vendor() {
+        let dir = tempfile::tempdir().unwrap();
+        let vendor = dir.path().join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(
+            vendor.join("lib.php"),
+            "<?php\nfunction vendorFunc(): void {}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("app.php"),
+            "<?php\nfunction appFunc(): void {}",
+        )
+        .unwrap();
+
+        let mut skip = std::collections::HashSet::new();
+        skip.insert(vendor.clone());
+        let result = scan_workspace_fallback_full(dir.path(), &skip);
+        assert!(result.function_index.contains_key("appFunc"));
+        assert!(
+            !result.function_index.contains_key("vendorFunc"),
+            "vendor functions should be excluded"
+        );
+    }
+
+    #[test]
+    fn scan_workspace_fallback_full_skips_hidden_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let hidden = dir.path().join(".hidden");
+        std::fs::create_dir_all(&hidden).unwrap();
+        std::fs::write(
+            hidden.join("secret.php"),
+            "<?php\nfunction secretFunc(): void {}",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("public.php"),
+            "<?php\nfunction publicFunc(): void {}",
+        )
+        .unwrap();
+
+        let skip = std::collections::HashSet::new();
+        let result = scan_workspace_fallback_full(dir.path(), &skip);
+        assert!(result.function_index.contains_key("publicFunc"));
+        assert!(
+            !result.function_index.contains_key("secretFunc"),
+            "hidden dir functions should be excluded"
+        );
     }
 }

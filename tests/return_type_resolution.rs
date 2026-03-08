@@ -1309,21 +1309,34 @@ async fn test_goto_definition_function_inside_function_exists_guard() {
     let workspace_root = dir.path().to_path_buf();
     let backend = Backend::new_test_with_workspace(workspace_root.clone(), vec![]);
 
-    // Simulate initialized — this triggers autoload file parsing
+    // Simulate initialized — this triggers the byte-level autoload
+    // file scan.  Functions inside `function_exists()` guards are NOT
+    // discovered by the lightweight scanner (they're at brace depth 1),
+    // but the autoload file paths are remembered so that
+    // `find_or_load_function` can lazily parse them as a last resort.
     backend.initialized(InitializedParams {}).await;
 
-    // Verify both functions were discovered
+    // The guarded functions should NOT be in global_functions yet —
+    // the byte-level scanner intentionally skips them.  They will be
+    // lazily parsed on first access (e.g. goto-definition).
     {
         let fmap = backend.global_functions().read();
         assert!(
-            fmap.contains_key("session"),
-            "session() should be in global_functions after parsing autoload files. Keys: {:?}",
-            fmap.keys().collect::<Vec<_>>()
+            !fmap.contains_key("session"),
+            "session() should NOT be eagerly parsed into global_functions (guarded function)"
         );
         assert!(
-            fmap.contains_key("app"),
-            "app() should be in global_functions after parsing autoload files. Keys: {:?}",
-            fmap.keys().collect::<Vec<_>>()
+            !fmap.contains_key("app"),
+            "app() should NOT be eagerly parsed into global_functions (guarded function)"
+        );
+    }
+
+    // The autoload file paths should be stored for last-resort lazy parsing.
+    {
+        let paths = backend.autoload_file_paths().read();
+        assert!(
+            !paths.is_empty(),
+            "autoload_file_paths should contain the helpers.php path"
         );
     }
 

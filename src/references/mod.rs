@@ -357,14 +357,14 @@ impl Backend {
     fn user_file_symbol_maps(&self) -> Vec<(String, Arc<SymbolMap>)> {
         self.ensure_workspace_indexed();
 
-        let vendor_prefix = self.vendor_uri_prefix.lock().clone();
+        let vendor_prefixes = self.vendor_uri_prefixes.lock().clone();
 
         let maps = self.symbol_maps.read();
         maps.iter()
             .filter(|(uri, _)| {
                 !uri.starts_with("phpantom-stub://")
                     && !uri.starts_with("phpantom-stub-fn://")
-                    && (vendor_prefix.is_empty() || !uri.starts_with(vendor_prefix.as_str()))
+                    && !vendor_prefixes.iter().any(|p| uri.starts_with(p.as_str()))
             })
             .map(|(uri, map)| (uri.clone(), Arc::clone(map)))
             .collect()
@@ -745,10 +745,10 @@ impl Backend {
         // Collect URIs that already have symbol maps.
         let existing_uris: HashSet<String> = self.symbol_maps.read().keys().cloned().collect();
 
-        // Build the vendor URI prefix so we can skip vendor files in
+        // Build the vendor URI prefixes so we can skip vendor files in
         // Phase 1 (class_index may contain vendor URIs from prior
         // resolution, but we only need symbol maps for user files).
-        let vendor_prefix = self.vendor_uri_prefix.lock().clone();
+        let vendor_prefixes = self.vendor_uri_prefixes.lock().clone();
 
         // ── Phase 1: class_index files (user only) ─────────────────────
         // These are files we already know about from update_ast calls,
@@ -766,7 +766,7 @@ impl Backend {
             .iter()
             .filter(|uri| {
                 !existing_uris.contains(*uri)
-                    && (vendor_prefix.is_empty() || !uri.starts_with(vendor_prefix.as_str()))
+                    && !vendor_prefixes.iter().any(|p| uri.starts_with(p.as_str()))
                     && !uri.starts_with("phpantom-stub://")
                     && !uri.starts_with("phpantom-stub-fn://")
             })
@@ -790,12 +790,12 @@ impl Backend {
         let workspace_root = self.workspace_root.read().clone();
 
         if let Some(root) = workspace_root {
-            let vendor_dir_name = self.vendor_dir_name.lock().clone();
+            let vendor_dir_paths = self.vendor_dir_paths.lock().clone();
 
             // Re-read existing URIs after phase 1 may have added more.
             let existing_uris: HashSet<String> = self.symbol_maps.read().keys().cloned().collect();
 
-            let php_files = collect_php_files_gitignore(&root, &vendor_dir_name);
+            let php_files = collect_php_files_gitignore(&root, &vendor_dir_paths);
 
             let phase2_work: Vec<(String, PathBuf)> = php_files
                 .into_iter()

@@ -397,10 +397,13 @@ impl Backend {
     ///
     /// Checks `global_defines` (user-defined constants discovered from parsed
     /// files) for a matching constant name, reads the source file, and returns
-    /// a `Location` pointing at the `define(` call.  Built-in constants from
-    /// `stub_constant_index` are not navigable (they have no real file).
+    /// a `Location` pointing at the `define(` call.  When not found, checks
+    /// the `autoload_constant_index` (populated by the full-scan for
+    /// non-Composer projects) and lazily parses the defining file via
+    /// `update_ast`.  Built-in constants from `stub_constant_index` are not
+    /// navigable (they have no real file).
     fn resolve_constant_definition(&self, candidates: &[String]) -> Option<Location> {
-        // Look up the constant in global_defines.
+        // ── Phase 1: Look up the constant in global_defines. ──
         let found = {
             let dmap = self.global_defines.read();
             let mut result = None;
@@ -411,6 +414,76 @@ impl Backend {
                 }
             }
             result
+        };
+
+        // ── Phase 1.5: Check autoload_constant_index (byte-level scan). ──
+        // The lightweight `find_symbols` byte-level scan discovers
+        // constant names at startup without a full AST parse, for both
+        // non-Composer projects (workspace scan) and Composer projects
+        // (autoload_files.php scan).  When a candidate matches, we
+        // lazily call `update_ast` to get the complete `DefineInfo`
+        // and re-check global_defines.
+        let found = if found.is_some() {
+            found
+        } else {
+            let idx = self.autoload_constant_index.read();
+            let mut lazy_result = None;
+            for candidate in candidates {
+                if let Some(path) = idx.get(candidate.as_str()) {
+                    let path = path.clone();
+                    drop(idx);
+
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let uri = format!("file://{}", path.display());
+                        self.update_ast(&uri, &content);
+
+                        let dmap = self.global_defines.read();
+                        for retry in candidates {
+                            if let Some(info) = dmap.get(retry.as_str()) {
+                                lazy_result = Some((info.file_uri.clone(), info.name_offset));
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+            lazy_result
+        };
+
+        // ── Phase 1.75: Last-resort lazy parse of known autoload files ──
+        // The byte-level scanner misses constants inside conditional
+        // blocks (e.g. `if (!defined(...))` guards).  As a safety net,
+        // lazily parse each known autoload file via `update_ast` until
+        // the constant is found.  Each file is parsed at most once:
+        // subsequent lookups hit Phase 1 (`global_defines`).
+        let found = if found.is_some() {
+            found
+        } else {
+            let paths = self.autoload_file_paths.read().clone();
+            let mut lazy_result = None;
+            for path in &paths {
+                let uri = format!("file://{}", path.display());
+                if self.ast_map.read().contains_key(&uri) {
+                    continue;
+                }
+
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    self.update_ast(&uri, &content);
+
+                    let dmap = self.global_defines.read();
+                    for candidate in candidates {
+                        if let Some(info) = dmap.get(candidate.as_str()) {
+                            lazy_result = Some((info.file_uri.clone(), info.name_offset));
+                            break;
+                        }
+                    }
+                    if lazy_result.is_some() {
+                        break;
+                    }
+                }
+            }
+            lazy_result
         };
 
         let (file_uri, name_offset) = found?;

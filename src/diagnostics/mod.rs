@@ -71,11 +71,11 @@ impl Backend {
 
         // Skip diagnostics for vendor files — they are third-party code
         // and should not produce warnings in the user's editor.  The
-        // vendor URI prefix is built during `initialized` from the
-        // workspace root and `composer.json`'s `config.vendor-dir`.
+        // vendor URI prefixes are built during `initialized` from the
+        // workspace root and each subproject's `config.vendor-dir`.
         {
-            let prefix = self.vendor_uri_prefix.lock();
-            if !prefix.is_empty() && uri_str.starts_with(prefix.as_str()) {
+            let prefixes = self.vendor_uri_prefixes.lock();
+            if prefixes.iter().any(|p| uri_str.starts_with(p.as_str())) {
                 return;
             }
         }

@@ -74,8 +74,7 @@ fn scan_psr4_directories_respects_namespace_filtering() {
     )
     .unwrap();
 
-    let classmap =
-        classmap_scanner::scan_psr4_directories(&[("App\\".to_string(), src)], &[], "vendor");
+    let classmap = classmap_scanner::scan_psr4_directories(&[("App\\".to_string(), src)], &[], &[]);
     assert!(classmap.contains_key("App\\Models\\User"));
     assert!(
         !classmap.contains_key("Wrong\\Namespace\\WrongNs"),
@@ -92,7 +91,7 @@ fn scan_psr4_directories_handles_classmap_entries() {
     // classmap entries don't filter by namespace
     std::fs::write(lib.join("Legacy.php"), "<?php\nclass LegacyHelper {}").unwrap();
 
-    let classmap = classmap_scanner::scan_psr4_directories(&[], &[lib], "vendor");
+    let classmap = classmap_scanner::scan_psr4_directories(&[], &[lib], &[]);
     assert!(classmap.contains_key("LegacyHelper"));
 }
 
@@ -250,12 +249,17 @@ fn scan_workspace_fallback_skips_hidden_and_vendor() {
     std::fs::create_dir_all(&vendor).unwrap();
     std::fs::write(vendor.join("Vendored.php"), "<?php\nclass Vendored {}").unwrap();
 
-    // node_modules
+    // node_modules (listed in .ignore so the ignore-crate walker skips it)
     let nm = dir.path().join("node_modules");
     std::fs::create_dir_all(&nm).unwrap();
     std::fs::write(nm.join("Fake.php"), "<?php\nclass Fake {}").unwrap();
 
-    let classmap = classmap_scanner::scan_workspace_fallback(dir.path(), "vendor");
+    // .ignore file — the `ignore` crate always respects these without
+    // requiring a git repository to be initialised.
+    std::fs::write(dir.path().join(".ignore"), "node_modules/\n").unwrap();
+
+    let vendor_dir_paths = vec![dir.path().join("vendor")];
+    let classmap = classmap_scanner::scan_workspace_fallback(dir.path(), &vendor_dir_paths);
     assert!(classmap.contains_key("Visible"));
     assert!(!classmap.contains_key("Secret"));
     assert!(!classmap.contains_key("Vendored"));
@@ -273,7 +277,8 @@ fn scan_workspace_fallback_recurses_into_subdirectories() {
     )
     .unwrap();
 
-    let classmap = classmap_scanner::scan_workspace_fallback(dir.path(), "vendor");
+    let vendor_dir_paths = vec![dir.path().join("vendor")];
+    let classmap = classmap_scanner::scan_workspace_fallback(dir.path(), &vendor_dir_paths);
     assert!(classmap.contains_key("A\\B\\C\\Deep"));
 }
 
@@ -390,7 +395,7 @@ async fn self_scan_classmap_populates_backend_classmap() {
     let classmap = classmap_scanner::scan_psr4_directories(
         &[("App\\".to_string(), dir.path().join("src"))],
         &[],
-        "vendor",
+        &[],
     );
 
     assert!(classmap.contains_key("App\\Models\\User"));
@@ -607,7 +612,7 @@ fn first_class_wins_in_classmap() {
     std::fs::write(src.join("A.php"), "<?php\nclass Dup {}").unwrap();
     std::fs::write(src.join("B.php"), "<?php\nclass Dup {}").unwrap();
 
-    let classmap = classmap_scanner::scan_directories(&[src], "vendor");
+    let classmap = classmap_scanner::scan_directories(&[src], &[]);
     // Should have exactly one entry
     assert_eq!(classmap.len(), 1);
     assert!(classmap.contains_key("Dup"));
@@ -623,7 +628,7 @@ fn scan_directories_ignores_non_php_files() {
     std::fs::write(src.join("style.css"), ".class { }").unwrap();
     std::fs::write(src.join("data.json"), r#"{"class": "Fake"}"#).unwrap();
 
-    let classmap = classmap_scanner::scan_directories(&[src], "vendor");
+    let classmap = classmap_scanner::scan_directories(&[src], &[]);
     assert_eq!(classmap.len(), 1);
     assert!(classmap.contains_key("Real"));
 }
@@ -782,7 +787,8 @@ fn scan_workspace_fallback_respects_custom_vendor_dir() {
     )
     .unwrap();
 
-    let classmap = classmap_scanner::scan_workspace_fallback(dir.path(), "libs");
+    let vendor_dir_paths = vec![dir.path().join("libs")];
+    let classmap = classmap_scanner::scan_workspace_fallback(dir.path(), &vendor_dir_paths);
     assert!(classmap.contains_key("App"));
     assert!(
         !classmap.contains_key("Vendored"),
@@ -835,7 +841,7 @@ fn scan_realistic_laravel_like_structure() {
     let classmap = classmap_scanner::scan_psr4_directories(
         &[("App\\".to_string(), root.join("app"))],
         &[root.join("database")],
-        "vendor",
+        &[],
     );
 
     assert_eq!(classmap.len(), 5);

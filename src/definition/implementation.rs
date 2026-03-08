@@ -704,12 +704,12 @@ impl Backend {
         // require a filesystem walk.
         let workspace_root = self.workspace_root.read().clone();
         if let Some(workspace_root) = workspace_root {
-            // The vendor dir name is needed by collect_php_files even
+            // The vendor dir paths are needed by collect_php_files even
             // though we only walk user PSR-4 roots.  A fallback mapping
             // like `"" => "."` resolves to the workspace root, so the
-            // walk must still skip the vendor directory (and hidden
+            // walk must still skip vendor directories (and hidden
             // directories like .git).
-            let vendor_dir_name = self.vendor_dir_name.lock().clone();
+            let vendor_dir_paths = self.vendor_dir_paths.lock().clone();
 
             let psr4_dirs: Vec<PathBuf> = {
                 let mappings = self.psr4_mappings.read();
@@ -724,7 +724,7 @@ impl Backend {
             let loaded_uris_p5: HashSet<String> = self.ast_map.read().keys().cloned().collect();
 
             for dir in &psr4_dirs {
-                for php_file in collect_php_files(dir, &vendor_dir_name) {
+                for php_file in collect_php_files(dir, &vendor_dir_paths) {
                     // Skip files already covered by the classmap (Phase 3).
                     if classmap_paths.contains(&php_file) {
                         continue;

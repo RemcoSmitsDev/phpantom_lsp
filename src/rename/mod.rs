@@ -221,17 +221,21 @@ impl Backend {
     /// definition URI starts with the vendor prefix, the rename is
     /// rejected.
     fn is_vendor_symbol(&self, uri: &str, content: &str, position: Position) -> bool {
-        let vendor_prefix = self.vendor_uri_prefix.lock().clone();
+        let vendor_prefixes = self.vendor_uri_prefixes.lock().clone();
 
-        if vendor_prefix.is_empty() {
+        if vendor_prefixes.is_empty() {
             return false;
         }
 
         // Try to resolve the definition location.
-        if let Some(loc) = self.resolve_definition(uri, content, position)
-            && loc.uri.to_string().starts_with(&vendor_prefix)
-        {
-            return true;
+        if let Some(loc) = self.resolve_definition(uri, content, position) {
+            let def_uri = loc.uri.to_string();
+            if vendor_prefixes
+                .iter()
+                .any(|p| def_uri.starts_with(p.as_str()))
+            {
+                return true;
+            }
         }
 
         false

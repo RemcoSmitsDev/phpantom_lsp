@@ -262,6 +262,74 @@ impl Backend {
             }
         }
 
+        // ── Phase 1.5: Check autoload_function_index (byte-level scan) ──
+        // The lightweight `find_symbols` byte-level scan discovers
+        // function names at startup without a full AST parse, for both
+        // non-Composer projects (workspace scan) and Composer projects
+        // (autoload_files.php scan).  When a candidate matches here, we
+        // lazily call `update_ast` on the file to get a complete
+        // `FunctionInfo` and cache it in global_functions so subsequent
+        // lookups hit Phase 1.
+        //
+        // Note: the lazy parse is a full AST parse (`update_ast`), which
+        // is the same cost as opening the file.  This is acceptable
+        // because it only happens once per function, on first access.
+        {
+            let idx = self.autoload_function_index.read();
+            for &name in candidates {
+                let lookup = name.strip_prefix('\\').unwrap_or(name);
+                if let Some(path) = idx.get(lookup) {
+                    let path = path.clone();
+                    drop(idx); // release read lock before parsing
+
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let uri = format!("file://{}", path.display());
+                        self.update_ast(&uri, &content);
+
+                        // Re-check global_functions after parsing.
+                        let fmap = self.global_functions.read();
+                        for &retry_name in candidates {
+                            if let Some((_, info)) = fmap.get(retry_name) {
+                                return Some(info.clone());
+                            }
+                        }
+                    }
+                    break; // Only try one file per lookup
+                }
+            }
+        }
+
+        // ── Phase 1.75: Last-resort lazy parse of known autoload files ──
+        // The byte-level scanner misses functions wrapped in
+        // `if (! function_exists(...))` guards (brace depth > 0).
+        // These are common in Laravel helpers and similar packages.
+        // As a safety net, lazily parse each known autoload file via
+        // `update_ast` until the function is found.  Each file is
+        // parsed at most once: subsequent lookups hit Phase 1
+        // (`global_functions`).
+        {
+            let paths = self.autoload_file_paths.read().clone();
+            for path in &paths {
+                // Skip files that have already been fully parsed (their
+                // functions are already in global_functions via Phase 1).
+                let uri = format!("file://{}", path.display());
+                if self.ast_map.read().contains_key(&uri) {
+                    continue;
+                }
+
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    self.update_ast(&uri, &content);
+
+                    let fmap = self.global_functions.read();
+                    for &name in candidates {
+                        if let Some((_, info)) = fmap.get(name) {
+                            return Some(info.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         // ── Phase 2: Try embedded PHP stubs ──
         // The stub_function_index maps function names (including namespaced
         // ones like "Brotli\\compress") to the raw PHP source of the file

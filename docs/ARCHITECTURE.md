@@ -356,6 +356,29 @@ find_or_load_function(["str_contains", "App\\str_contains"])
 │   No short-name fallback entries are stored.
 │   ↓ miss
 │
+├── Phase 1.5: autoload_function_index (byte-level scan)
+│   Checks candidate names against autoload_function_index
+│   (function FQN → file path on disk).  Populated by the
+│   find_symbols byte-level scan for both Composer projects
+│   (autoload_files.php) and non-Composer projects (workspace
+│   full-scan).
+│   When found:
+│     1. Reads the file from disk.
+│     2. Calls update_ast to get full FunctionInfo + ClassInfo.
+│     3. Results are cached in global_functions (so future
+│        lookups hit Phase 1).
+│     4. Returns the matching FunctionInfo.
+│   ↓ miss
+│
+├── Phase 1.75: Last-resort autoload file parse
+│   The byte-level scanner misses functions inside conditional
+│   blocks (e.g. `if (! function_exists(...))` guards).  As a
+│   safety net, lazily parses each known autoload file path
+│   (stored in autoload_file_paths) via update_ast until the
+│   function is found.  Skips files already in ast_map.  Each
+│   file is parsed at most once; subsequent lookups hit Phase 1.
+│   ↓ miss
+│
 ├── Phase 2: Embedded PHP stubs
 │   Looks up each candidate name in stub_function_index.
 │   When found:
@@ -532,24 +555,46 @@ The indexing strategy is configurable via `[indexing] strategy` in `.phpantom.to
 - **`"full"`** — same as `"self"` for now; reserved for future background indexing.
 - **`"none"`** — no proactive scanning; uses Composer's classmap if present but never falls back to self-scan.
 
-When self-scanning with a `composer.json` present, the scanner reads `autoload.psr-4`, `autoload-dev.psr-4`, `autoload.classmap`, and `autoload-dev.classmap` to determine which directories to walk. PSR-4 directories are filtered: only classes whose FQN matches the namespace prefix plus the relative file path are included. Vendor packages are discovered from `vendor/composer/installed.json` (both Composer 1 and 2 formats). When no `composer.json` exists at all, the scanner falls back to walking all `.php` files under the workspace root (excluding hidden directories, `node_modules`, `vendor`, and `target`).
+When self-scanning with a `composer.json` present, the scanner reads `autoload.psr-4`, `autoload-dev.psr-4`, `autoload.classmap`, and `autoload-dev.classmap` to determine which directories to walk. PSR-4 directories are filtered: only classes whose FQN matches the namespace prefix plus the relative file path are included. Vendor packages are discovered from `vendor/composer/installed.json` (both Composer 1 and 2 formats). All directory walkers (full-scan, PSR-4 scanner, vendor package scanner, and go-to-implementation file collector) use the `ignore` crate for gitignore-aware traversal. Hidden directories are skipped automatically, and `.gitignore` rules are respected at every level. When no `composer.json` exists at all, the scanner falls back to walking all `.php` files under the workspace root.
 
 The result is a `HashMap<String, PathBuf>` in the same format as the existing `Backend.classmap`. Everything downstream (resolution, diagnostics, go-to-definition) works unchanged.
 
-**Vendor dir detection:** the `config.vendor-dir` setting is read from `composer.json` once during `initialized` (via `parse_composer_json`, which returns both the PSR-4 mappings and the vendor dir name). The vendor dir name is cached on `Backend.vendor_dir_name` and a `file://` URI prefix is stored in `Backend.vendor_uri_prefix` for fast vendor-file detection at runtime.
+**Vendor dir detection:** the `config.vendor-dir` setting is read from `composer.json` once during `initialized` (via `parse_composer_json`, which returns both the PSR-4 mappings and the vendor dir name). The absolute vendor directory path is cached on `Backend.vendor_dir_paths` and a `file://` URI prefix is stored in `Backend.vendor_uri_prefixes` for fast vendor-file detection at runtime. Both fields are `Vec`s to support monorepo workspaces with multiple subprojects (see below). For single-project workspaces, each collection has exactly one entry.
 
 ### Autoload Files
 
-`vendor/composer/autoload_files.php` lists files containing global function definitions. These are parsed eagerly during `initialized()` and their functions are stored in `global_functions` for return-type resolution.
+`vendor/composer/autoload_files.php` lists files containing global function definitions and `define()` constants. During `initialized()`, these files are scanned with the lightweight `find_symbols` byte-level pass (not a full AST parse). This populates `autoload_function_index` (function FQN → file path), `autoload_constant_index` (constant name → file path), and `class_index` (class FQN → file URI). Full parsing is deferred to the moment a symbol is first accessed via `find_or_load_function` (Phase 1.5), `resolve_constant_definition` (Phase 1.5), or `find_or_load_class` (through `class_index`).
+
+The byte-level scanner only discovers top-level declarations. Functions wrapped in `if (! function_exists(...))` guards (common in Laravel helpers) are at brace depth > 0 and are missed. As a safety net, all visited autoload file paths are stored in `autoload_file_paths`. When a function or constant is not found in any index or stubs, `find_or_load_function` and `resolve_constant_definition` lazily parse each known autoload file via `update_ast` as a last resort (Phase 1.75). Each file is parsed at most once.
+
+### Non-Composer Function and Constant Discovery
+
+In projects without `composer.json`, there is no `autoload_files.php` to consult. Instead, the full-scan (`find_symbols`) runs on all workspace files during initialization, populating three indices in a single pass: `classmap` (classes), `autoload_function_index` (functions), and `autoload_constant_index` (constants). When a function or constant is first accessed, `find_or_load_function` or `resolve_constant_definition` lazily calls `update_ast` on the file, caching the result for subsequent lookups.
+
+### Monorepo / Multi-Composer-Root Support
+
+When the workspace root has no `composer.json` but contains subdirectories that are independent Composer projects, PHPantom discovers and processes each subproject automatically. This is a best-effort mitigation for workspaces where the editor opens a monorepo root as a single folder. The monorepo path only activates when there is no root `composer.json`.
+
+**Discovery.** `discover_subproject_roots` in `composer.rs` walks the workspace using the `ignore` crate (`WalkBuilder`), respecting `.gitignore` at every level. Any directory containing a `composer.json` is recorded as a subproject root. Nested subprojects (a `composer.json` inside an already-accepted root) are filtered out. Each discovered `composer.json` is read to extract the `config.vendor-dir` setting.
+
+**Per-subproject processing.** For each discovered `(subproject_root, vendor_dir)`, the same Composer pipeline runs: PSR-4 mappings (with base paths resolved to absolute paths so `resolve_class_path` works regardless of workspace root), classmap parsing, vendor package scanning from `installed.json`, and autoload file indexing. Results are merged into the shared backend state with first-subproject-wins semantics for duplicate FQNs.
+
+**Loose file discovery.** After all subprojects are processed, the gitignore-aware full-scan walker (`scan_workspace_fallback_full`) runs on the workspace root with a skip set containing all subproject root paths. This picks up PHP files outside any subproject tree (e.g. top-level scripts, shared utilities) without double-scanning subproject content.
+
+**Vendor tracking.** Each subproject's vendor directory is registered in both `vendor_uri_prefixes` (for URI-level vendor detection in diagnostics, find references, and rename) and `vendor_dir_paths` (for filesystem-level skip logic in go-to-implementation and workspace indexing).
+
+**Trade-offs.** Conflicting class versions across subprojects result in first-wins resolution. A single PHP version is used for the entire workspace. Per-subproject `.phpantom.toml` is not supported. Multi-root LSP workspaces (separate `workspaceFolders`) are a separate feature.
 
 ### Function Resolution Priority
 
 When resolving a standalone function call (e.g. `app()`, `date_create()`), the lookup order is:
 
-1. **User code** (`global_functions` from Composer autoload files and opened/changed files)
-2. **Embedded stubs** (`stub_function_index` from phpstorm-stubs, parsed lazily)
+1. **User code** (`global_functions` from opened/changed files and lazily parsed autoload index hits)
+2. **Autoload function index** (`autoload_function_index`, populated by `find_symbols` for both Composer and non-Composer projects, triggers lazy `update_ast` on first access)
+3. **Known autoload files** (`autoload_file_paths`, last-resort lazy parse for functions missed by the byte-level scanner, e.g. those inside `function_exists()` guards)
+4. **Embedded stubs** (`stub_function_index` from phpstorm-stubs, parsed lazily)
 
-This ensures that user-defined overrides or polyfills always win over built-in stubs.
+This ensures that user-defined overrides or polyfills always win over stubs.
 
 ## Go-to-Implementation: `find_implementors`
 

@@ -22,7 +22,7 @@ use tower_lsp::lsp_types::request::{GotoImplementationParams, GotoImplementation
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
-use crate::classmap_scanner;
+use crate::classmap_scanner::{self, WorkspaceScanResult};
 use crate::composer;
 use crate::config::IndexingStrategy;
 
@@ -136,153 +136,22 @@ impl LanguageServer for Backend {
                 .unwrap_or_else(|| composer::detect_php_version(&root).unwrap_or_default());
             self.set_php_version(php_version);
 
-            let (mappings, vendor_dir) = composer::parse_composer_json(&root);
-            let mapping_count = mappings.len();
-
-            // Cache the vendor dir name so cross-file scans can skip it
-            // without re-reading composer.json on every request.
-            *self.vendor_dir_name.lock() = vendor_dir.clone();
-
-            // Store the vendor URI prefix so diagnostics can skip vendor files.
-            let vendor_path = root.join(&vendor_dir);
-            if let Ok(canonical) = vendor_path.canonicalize() {
-                let prefix = format!("file://{}/", canonical.display());
-                *self.vendor_uri_prefix.lock() = prefix;
-            } else {
-                // Vendor dir doesn't exist yet — store the non-canonical path
-                // so files opened from that location are still skipped.
-                let prefix = format!("file://{}/", vendor_path.display());
-                *self.vendor_uri_prefix.lock() = prefix;
-            }
-
-            *self.psr4_mappings.write() = mappings;
-
-            // ── Build the classmap ──────────────────────────────────────
-            //
-            // The classmap is a HashMap<String, PathBuf> mapping FQNs to
-            // file paths.  Depending on the indexing strategy, we either
-            // use Composer's generated classmap, build one ourselves, or
-            // both (Composer classmap + self-scan fallback).
-            let strategy = self.config().indexing.strategy;
             let has_composer_json = root.join("composer.json").is_file();
 
-            let (classmap, classmap_source) = match strategy {
-                IndexingStrategy::None => {
-                    // Use only Composer's classmap, no self-scan fallback.
-                    let cm = composer::parse_autoload_classmap(&root, &vendor_dir);
-                    let source = if cm.is_empty() {
-                        "none"
-                    } else {
-                        "composer classmap"
-                    };
-                    (cm, source)
-                }
-                IndexingStrategy::SelfScan | IndexingStrategy::Full => {
-                    // Always self-scan, ignore Composer's classmap.
-                    let cm = self.build_self_classmap(&root, &vendor_dir, has_composer_json);
-                    (cm, "self-scan")
-                }
-                IndexingStrategy::Composer => {
-                    // Default: try Composer's classmap first, fall back to
-                    // self-scan when it is missing or incomplete.
-                    let composer_cm = composer::parse_autoload_classmap(&root, &vendor_dir);
-                    if !composer_cm.is_empty() {
-                        // Composer classmap exists and has entries — check
-                        // if it covers the project's own PSR-4 namespaces.
-                        let incomplete = self.is_classmap_incomplete(&root, &composer_cm);
-                        if incomplete {
-                            // Merge: keep Composer's entries (they cover
-                            // vendor code) and self-scan user source dirs
-                            // to fill in the gaps.
-                            let mut cm = composer_cm;
-                            let self_cm =
-                                self.build_self_classmap(&root, &vendor_dir, has_composer_json);
-                            for (fqcn, path) in self_cm {
-                                cm.entry(fqcn).or_insert(path);
-                            }
-                            (cm, "composer classmap + self-scan")
-                        } else {
-                            (composer_cm, "composer classmap")
-                        }
-                    } else if has_composer_json {
-                        // Classmap file is missing — self-scan.
-                        self.log(
-                            MessageType::INFO,
-                            "PHPantom: No Composer classmap found. Building class index. Run `composer dump-autoload -o` for faster startup.".to_string(),
-                        ).await;
-                        let cm = self.build_self_classmap(&root, &vendor_dir, has_composer_json);
-                        (cm, "self-scan")
-                    } else {
-                        // No composer.json at all — workspace fallback.
-                        self.log(
-                            MessageType::INFO,
-                            "PHPantom: No composer.json found. Scanning workspace for PHP classes."
-                                .to_string(),
-                        )
-                        .await;
-                        let cm = self.build_self_classmap(&root, &vendor_dir, has_composer_json);
-                        (cm, "self-scan (workspace)")
-                    }
-                }
-            };
+            if has_composer_json {
+                // ── Single-project path (root composer.json exists) ──────
+                self.init_single_project(&root, php_version).await;
+            } else {
+                // ── Monorepo / non-Composer path ────────────────────────
+                let subprojects = composer::discover_subproject_roots(&root);
 
-            let classmap_count = classmap.len();
-            *self.classmap.write() = classmap;
-
-            // Parse autoload_files.php to discover global symbols.
-            // These files can contain any kind of PHP symbol (classes,
-            // functions, define() constants, etc.).  Classes, traits,
-            // interfaces, and enums can also be loaded via PSR-4 / classmap,
-            // but functions and define() constants can *only* be discovered
-            // through these files.
-            //
-            // We also follow `require_once` statements in those files to
-            // discover additional files (used by packages like Trustly
-            // that don't follow Composer conventions).
-            let autoload_files = composer::parse_autoload_files(&root, &vendor_dir);
-            let autoload_count = autoload_files.len();
-
-            // Work queue + visited set for following require_once chains.
-            let mut file_queue: Vec<PathBuf> = autoload_files;
-            let mut visited: HashSet<PathBuf> = HashSet::new();
-
-            while let Some(file_path) = file_queue.pop() {
-                // Canonicalise to avoid revisiting the same file via
-                // different relative paths.
-                let canonical = file_path.canonicalize().unwrap_or(file_path);
-                if !visited.insert(canonical.clone()) {
-                    continue;
-                }
-
-                if let Ok(content) = std::fs::read_to_string(&canonical) {
-                    let uri = format!("file://{}", canonical.display());
-
-                    // Full AST parse: extracts classes, use statements,
-                    // namespaces, standalone functions, and define()
-                    // constants — all in a single pass.
-                    self.update_ast(&uri, &content);
-
-                    // Follow require_once statements to discover more files.
-                    let require_paths = composer::extract_require_once_paths(&content);
-                    if let Some(file_dir) = canonical.parent() {
-                        for rel_path in require_paths {
-                            let resolved = file_dir.join(&rel_path);
-                            if resolved.is_file() {
-                                file_queue.push(resolved);
-                            }
-                        }
-                    }
+                if !subprojects.is_empty() {
+                    self.init_monorepo(&root, &subprojects, php_version).await;
+                } else {
+                    // No subprojects found — pure non-Composer workspace.
+                    self.init_no_composer(&root, php_version).await;
                 }
             }
-
-            self.log(
-                MessageType::INFO,
-                format!(
-                    "PHPantom initialized! PHP {}, {} PSR-4 mapping(s), {} classmap entries ({}), {} autoload file(s)",
-                    php_version, mapping_count, classmap_count, classmap_source, autoload_count
-                ),
-            )
-            .await;
         } else {
             self.log(MessageType::INFO, "PHPantom initialized!".to_string())
                 .await;
@@ -292,7 +161,7 @@ impl LanguageServer for Backend {
         // clone of `self` that shares every `Arc`-wrapped field (maps,
         // caches, the diagnostic notify/pending slot) so the worker
         // sees all mutations the real Backend makes.  Non-Arc fields
-        // (php_version, vendor_uri_prefix, vendor_dir_name) are
+        // (php_version, vendor_uri_prefixes, vendor_dir_paths) are
         // snapshotted — they are only written during init (above) and
         // never change afterwards.
         let worker_backend = self.clone_for_diagnostic_worker();
@@ -597,34 +466,404 @@ impl LanguageServer for Backend {
 // ─── Self-scan helpers ──────────────────────────────────────────────────────
 
 impl Backend {
-    /// Build a classmap by self-scanning the project.
+    // ── Initialization helpers ───────────────────────────────────────────
+
+    /// Initialize a single-project workspace (root `composer.json` exists).
     ///
-    /// When `composer.json` exists, scans the directories declared in
-    /// `autoload.psr-4`, `autoload-dev.psr-4`, `autoload.classmap`, and
-    /// `autoload-dev.classmap`, plus vendor packages from `installed.json`.
-    ///
-    /// When no `composer.json` exists, falls back to scanning the entire
-    /// workspace root (excluding hidden directories and vendor).
-    fn build_self_classmap(
+    /// This is the standard fast path: read PSR-4 mappings, build the
+    /// classmap, scan autoload files.  Unchanged from the pre-monorepo
+    /// behaviour except that vendor fields are now collections.
+    async fn init_single_project(
         &self,
-        workspace_root: &std::path::Path,
-        vendor_dir: &str,
-        has_composer_json: bool,
-    ) -> HashMap<String, PathBuf> {
-        if !has_composer_json {
-            // No composer.json — walk everything under workspace root.
-            return classmap_scanner::scan_workspace_fallback(workspace_root, vendor_dir);
+        root: &std::path::Path,
+        php_version: crate::types::PhpVersion,
+    ) {
+        let (mappings, vendor_dir) = composer::parse_composer_json(root);
+        let mapping_count = mappings.len();
+
+        // Cache the vendor dir path so cross-file scans can skip it
+        // without re-reading composer.json on every request.
+        let vendor_path = root.join(&vendor_dir);
+        self.add_vendor_dir(&vendor_path);
+
+        *self.psr4_mappings.write() = mappings;
+
+        // ── Build the classmap ──────────────────────────────────────
+        let strategy = self.config().indexing.strategy;
+
+        let (classmap, classmap_source) = match strategy {
+            IndexingStrategy::None => {
+                let cm = composer::parse_autoload_classmap(root, &vendor_dir);
+                let source = if cm.is_empty() {
+                    "none"
+                } else {
+                    "composer classmap"
+                };
+                (cm, source)
+            }
+            IndexingStrategy::SelfScan | IndexingStrategy::Full => {
+                let scan = self.build_self_scan_composer(root, &vendor_dir);
+                self.populate_autoload_indices(&scan);
+                (scan.classmap, "self-scan")
+            }
+            IndexingStrategy::Composer => {
+                let composer_cm = composer::parse_autoload_classmap(root, &vendor_dir);
+                if !composer_cm.is_empty() {
+                    let incomplete = self.is_classmap_incomplete(root, &composer_cm);
+                    if incomplete {
+                        let mut cm = composer_cm;
+                        let scan = self.build_self_scan_composer(root, &vendor_dir);
+                        self.populate_autoload_indices(&scan);
+                        for (fqcn, path) in scan.classmap {
+                            cm.entry(fqcn).or_insert(path);
+                        }
+                        (cm, "composer classmap + self-scan")
+                    } else {
+                        (composer_cm, "composer classmap")
+                    }
+                } else {
+                    self.log(
+                        MessageType::INFO,
+                        "PHPantom: No Composer classmap found. Building class index. Run `composer dump-autoload -o` for faster startup.".to_string(),
+                    ).await;
+                    let scan = self.build_self_scan_composer(root, &vendor_dir);
+                    self.populate_autoload_indices(&scan);
+                    (scan.classmap, "self-scan")
+                }
+            }
+        };
+
+        let classmap_count = classmap.len();
+        *self.classmap.write() = classmap;
+
+        // ── Autoload files ──────────────────────────────────────────
+        let autoload_count = self.scan_autoload_files(root, &vendor_dir);
+
+        let func_index_count = self.autoload_function_index.read().len();
+        let const_index_count = self.autoload_constant_index.read().len();
+
+        let index_suffix = if func_index_count > 0 || const_index_count > 0 {
+            format!(
+                ", {} indexed function(s), {} indexed constant(s)",
+                func_index_count, const_index_count
+            )
+        } else {
+            String::new()
+        };
+
+        self.log(
+            MessageType::INFO,
+            format!(
+                "PHPantom initialized! PHP {}, {} PSR-4 mapping(s), {} classmap entries ({}), {} autoload file(s){}",
+                php_version, mapping_count, classmap_count, classmap_source, autoload_count, index_suffix
+            ),
+        )
+        .await;
+    }
+
+    /// Initialize a monorepo workspace (no root `composer.json`, but
+    /// subprojects with their own `composer.json` were discovered).
+    ///
+    /// Each subproject is processed through the Composer pipeline (PSR-4,
+    /// classmap, autoload files, vendor packages).  After all subprojects
+    /// are processed, a gitignore-aware full-scan picks up loose PHP files
+    /// outside any subproject directory.
+    async fn init_monorepo(
+        &self,
+        root: &std::path::Path,
+        subprojects: &[(PathBuf, String)],
+        php_version: crate::types::PhpVersion,
+    ) {
+        // Log the discovered subprojects.
+        let sub_list: Vec<String> = subprojects
+            .iter()
+            .filter_map(|(p, _)| {
+                p.strip_prefix(root)
+                    .ok()
+                    .map(|r| format!("  {}", r.display()))
+            })
+            .collect();
+        self.log(
+            MessageType::INFO,
+            format!(
+                "PHPantom: No root composer.json. Found {} Composer project(s):\n{}",
+                subprojects.len(),
+                sub_list.join("\n")
+            ),
+        )
+        .await;
+
+        // Collect subproject root paths for the skip set.
+        let mut skip_dirs: HashSet<PathBuf> = HashSet::new();
+        let mut total_mapping_count = 0usize;
+        let mut total_autoload_count = 0usize;
+
+        for (sub_root, vendor_dir) in subprojects {
+            skip_dirs.insert(sub_root.clone());
+
+            // ── PSR-4 mappings ──────────────────────────────────────
+            let (mappings, _) = composer::parse_composer_json(sub_root);
+            total_mapping_count += mappings.len();
+
+            // Resolve base_path values to absolute paths so that
+            // resolve_class_path works regardless of workspace_root.
+            let abs_mappings: Vec<composer::Psr4Mapping> = mappings
+                .into_iter()
+                .map(|m| {
+                    let abs_base = sub_root.join(&m.base_path).to_string_lossy().to_string();
+                    composer::Psr4Mapping {
+                        prefix: m.prefix,
+                        base_path: composer::normalise_path(&abs_base),
+                    }
+                })
+                .collect();
+            {
+                let mut psr4 = self.psr4_mappings.write();
+                psr4.extend(abs_mappings);
+            }
+
+            // ── Classmap ────────────────────────────────────────────
+            let cm = composer::parse_autoload_classmap(sub_root, vendor_dir);
+            if !cm.is_empty() {
+                let mut classmap = self.classmap.write();
+                for (fqcn, path) in cm {
+                    classmap.entry(fqcn).or_insert(path);
+                }
+            }
+
+            // ── Vendor packages ─────────────────────────────────────
+            let vendor_cm = classmap_scanner::scan_vendor_packages(sub_root, vendor_dir);
+            if !vendor_cm.is_empty() {
+                let mut classmap = self.classmap.write();
+                for (fqcn, path) in vendor_cm {
+                    classmap.entry(fqcn).or_insert(path);
+                }
+            }
+
+            // ── Vendor dir tracking ─────────────────────────────────
+            let vendor_path = sub_root.join(vendor_dir);
+            self.add_vendor_dir(&vendor_path);
+
+            // ── Autoload files ──────────────────────────────────────
+            total_autoload_count += self.scan_autoload_files(sub_root, vendor_dir);
+
+            // ── Self-scan subproject source dirs ────────────────────
+            // When the Composer classmap is empty/missing for this
+            // subproject, self-scan its PSR-4 directories.
+            let sub_cm_empty = composer::parse_autoload_classmap(sub_root, vendor_dir).is_empty();
+            if sub_cm_empty {
+                let scan = self.build_self_scan_composer(sub_root, vendor_dir);
+                self.populate_autoload_indices(&scan);
+                let mut classmap = self.classmap.write();
+                for (fqcn, path) in scan.classmap {
+                    classmap.entry(fqcn).or_insert(path);
+                }
+            }
         }
 
+        // Re-sort PSR-4 mappings by prefix length descending so
+        // longest-prefix-first matching works.
+        {
+            let mut psr4 = self.psr4_mappings.write();
+            psr4.sort_by(|a, b| b.prefix.len().cmp(&a.prefix.len()));
+        }
+
+        // ── Full-scan loose files ───────────────────────────────────
+        // Walk the workspace for PHP files outside any subproject
+        // directory, using gitignore-aware walking.
+        let scan = classmap_scanner::scan_workspace_fallback_full(root, &skip_dirs);
+        self.populate_autoload_indices(&scan);
+        {
+            let mut classmap = self.classmap.write();
+            for (fqcn, path) in scan.classmap {
+                classmap.entry(fqcn).or_insert(path);
+            }
+        }
+
+        let classmap_count = self.classmap.read().len();
+        let func_index_count = self.autoload_function_index.read().len();
+        let const_index_count = self.autoload_constant_index.read().len();
+
+        let index_suffix = if func_index_count > 0 || const_index_count > 0 {
+            format!(
+                ", {} indexed function(s), {} indexed constant(s)",
+                func_index_count, const_index_count
+            )
+        } else {
+            String::new()
+        };
+
+        self.log(
+            MessageType::INFO,
+            format!(
+                "PHPantom initialized! PHP {}, {} subproject(s), {} PSR-4 mapping(s), {} classmap entries, {} autoload file(s){}",
+                php_version, subprojects.len(), total_mapping_count, classmap_count, total_autoload_count, index_suffix
+            ),
+        )
+        .await;
+    }
+
+    /// Initialize a pure non-Composer workspace (no `composer.json`
+    /// anywhere).  Full-scans all PHP files in the workspace.
+    async fn init_no_composer(
+        &self,
+        root: &std::path::Path,
+        php_version: crate::types::PhpVersion,
+    ) {
+        self.log(
+            MessageType::INFO,
+            "PHPantom: No composer.json found. Scanning workspace for PHP classes.".to_string(),
+        )
+        .await;
+
+        let skip_dirs = HashSet::new();
+        let scan = classmap_scanner::scan_workspace_fallback_full(root, &skip_dirs);
+        self.populate_autoload_indices(&scan);
+
+        let classmap_count = scan.classmap.len();
+        *self.classmap.write() = scan.classmap;
+
+        let func_index_count = self.autoload_function_index.read().len();
+        let const_index_count = self.autoload_constant_index.read().len();
+
+        let index_suffix = if func_index_count > 0 || const_index_count > 0 {
+            format!(
+                ", {} indexed function(s), {} indexed constant(s)",
+                func_index_count, const_index_count
+            )
+        } else {
+            String::new()
+        };
+
+        self.log(
+            MessageType::INFO,
+            format!(
+                "PHPantom initialized! PHP {}, {} classmap entries (workspace scan){}",
+                php_version, classmap_count, index_suffix
+            ),
+        )
+        .await;
+    }
+
+    /// Register a vendor directory path and its URI prefix for
+    /// vendor-file detection.
+    fn add_vendor_dir(&self, vendor_path: &std::path::Path) {
+        // Store the absolute path for filesystem-level skip logic.
+        {
+            let mut paths = self.vendor_dir_paths.lock();
+            paths.push(vendor_path.to_path_buf());
+        }
+        // Store the URI prefix for URI-level skip logic (diagnostics,
+        // find references, rename).
+        let prefix = if let Ok(canonical) = vendor_path.canonicalize() {
+            format!("file://{}/", canonical.display())
+        } else {
+            format!("file://{}/", vendor_path.display())
+        };
+        {
+            let mut prefixes = self.vendor_uri_prefixes.lock();
+            prefixes.push(prefix);
+        }
+    }
+
+    /// Scan autoload files for a single project root and populate the
+    /// autoload indices.  Returns the number of autoload file entries
+    /// found.
+    fn scan_autoload_files(&self, project_root: &std::path::Path, vendor_dir: &str) -> usize {
+        let autoload_files = composer::parse_autoload_files(project_root, vendor_dir);
+        let autoload_count = autoload_files.len();
+
+        // Work queue + visited set for following require_once chains.
+        let mut file_queue: Vec<PathBuf> = autoload_files;
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+
+        while let Some(file_path) = file_queue.pop() {
+            // Canonicalise to avoid revisiting the same file via
+            // different relative paths.
+            let canonical = file_path.canonicalize().unwrap_or(file_path);
+            if !visited.insert(canonical.clone()) {
+                continue;
+            }
+
+            if let Ok(content) = std::fs::read(&canonical) {
+                let uri = format!("file://{}", canonical.display());
+
+                // Lightweight byte-level scan: extract symbol names
+                // without building a full AST.
+                let scan = classmap_scanner::find_symbols(&content);
+
+                // Populate function index.
+                {
+                    let mut idx = self.autoload_function_index.write();
+                    for fqn in &scan.functions {
+                        idx.entry(fqn.clone()).or_insert_with(|| canonical.clone());
+                    }
+                }
+
+                // Populate constant index.
+                {
+                    let mut idx = self.autoload_constant_index.write();
+                    for name in &scan.constants {
+                        idx.entry(name.clone()).or_insert_with(|| canonical.clone());
+                    }
+                }
+
+                // Populate class_index so find_or_load_class can
+                // lazily parse these classes later.
+                {
+                    let mut idx = self.class_index.write();
+                    for fqn in &scan.classes {
+                        idx.entry(fqn.clone()).or_insert_with(|| uri.clone());
+                    }
+                }
+
+                // Follow require_once statements to discover more files.
+                let content_str = String::from_utf8_lossy(&content);
+                let require_paths = composer::extract_require_once_paths(&content_str);
+                if let Some(file_dir) = canonical.parent() {
+                    for rel_path in require_paths {
+                        let resolved = file_dir.join(&rel_path);
+                        if resolved.is_file() {
+                            file_queue.push(resolved);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Store the visited autoload file paths for last-resort lazy
+        // parsing of guarded functions.
+        {
+            let mut paths = self.autoload_file_paths.write();
+            paths.extend(visited);
+        }
+
+        autoload_count
+    }
+
+    /// Build a workspace scan by self-scanning a Composer project's
+    /// autoload directories (PSR-4 + classmap + vendor packages).
+    ///
+    /// Used when the Composer classmap is missing/incomplete or the
+    /// indexing strategy is `"self"` / `"full"`.  The `project_root`
+    /// is the directory containing `composer.json` (either the
+    /// workspace root for single-project, or a subproject root for
+    /// monorepo).
+    fn build_self_scan_composer(
+        &self,
+        project_root: &std::path::Path,
+        vendor_dir: &str,
+    ) -> WorkspaceScanResult {
         // Read composer.json to extract autoload directories.
-        let composer_path = workspace_root.join("composer.json");
+        let composer_path = project_root.join("composer.json");
         let json = match std::fs::read_to_string(&composer_path)
             .ok()
             .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         {
             Some(j) => j,
             None => {
-                return classmap_scanner::scan_workspace_fallback(workspace_root, vendor_dir);
+                let skip_dirs = HashSet::new();
+                return classmap_scanner::scan_workspace_fallback_full(project_root, &skip_dirs);
             }
         };
 
@@ -645,7 +884,7 @@ impl Backend {
                             format!("{prefix}\\")
                         };
                         for dir_str in json_value_to_strings(paths) {
-                            let dir = workspace_root.join(&dir_str);
+                            let dir = project_root.join(&dir_str);
                             psr4_dirs.push((normalised.clone(), dir));
                         }
                     }
@@ -655,24 +894,55 @@ impl Backend {
                 if let Some(cm) = section.get("classmap").and_then(|c| c.as_array()) {
                     for entry in cm {
                         if let Some(dir_str) = entry.as_str() {
-                            classmap_dirs.push(workspace_root.join(dir_str));
+                            classmap_dirs.push(project_root.join(dir_str));
                         }
                     }
                 }
             }
         }
 
-        // Scan user source directories.
-        let mut classmap =
-            classmap_scanner::scan_psr4_directories(&psr4_dirs, &classmap_dirs, vendor_dir);
+        // Scan user source directories (classes only for PSR-4).
+        let vendor_dir_paths = vec![project_root.join(vendor_dir)];
+        let classmap =
+            classmap_scanner::scan_psr4_directories(&psr4_dirs, &classmap_dirs, &vendor_dir_paths);
 
         // Scan vendor packages from installed.json.
-        let vendor_cm = classmap_scanner::scan_vendor_packages(workspace_root, vendor_dir);
+        let vendor_cm = classmap_scanner::scan_vendor_packages(project_root, vendor_dir);
+
+        let mut result = WorkspaceScanResult {
+            classmap,
+            ..Default::default()
+        };
+
         for (fqcn, path) in vendor_cm {
-            classmap.entry(fqcn).or_insert(path);
+            result.classmap.entry(fqcn).or_insert(path);
         }
 
-        classmap
+        result
+    }
+
+    /// Store the function and constant indices from a workspace scan
+    /// into the backend's shared maps.
+    ///
+    /// Only has an effect for non-Composer projects (the "no
+    /// `composer.json`" scenario) where the full-scan populates
+    /// function and constant entries.  For Composer projects the scan
+    /// result's function and constant indices are empty because those
+    /// symbols are discovered via the `autoload_files.php` scan loop
+    /// in `initialized()` instead.
+    fn populate_autoload_indices(&self, scan: &WorkspaceScanResult) {
+        if !scan.function_index.is_empty() {
+            let mut idx = self.autoload_function_index.write();
+            for (fqn, path) in &scan.function_index {
+                idx.entry(fqn.clone()).or_insert_with(|| path.clone());
+            }
+        }
+        if !scan.constant_index.is_empty() {
+            let mut idx = self.autoload_constant_index.write();
+            for (name, path) in &scan.constant_index {
+                idx.entry(name.clone()).or_insert_with(|| path.clone());
+            }
+        }
     }
 
     /// Check whether the Composer classmap is incomplete.
@@ -763,14 +1033,12 @@ impl Backend {
     }
 }
 
-/// Extract string values from a JSON value that is either a single
-/// string or an array of strings.
 fn json_value_to_strings(value: &serde_json::Value) -> Vec<String> {
     match value {
         serde_json::Value::String(s) => vec![s.clone()],
         serde_json::Value::Array(arr) => arr
             .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .filter_map(|v| v.as_str().map(String::from))
             .collect(),
         _ => Vec::new(),
     }
