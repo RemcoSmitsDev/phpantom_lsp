@@ -50,9 +50,11 @@ const DIAGNOSTIC_DEBOUNCE_MS: u64 = 500;
 impl Backend {
     /// Collect all diagnostics for a single file and publish them.
     ///
-    /// Called from `did_open` (synchronously, since the user expects to
-    /// see issues on first open) and from the diagnostic worker task
-    /// spawned by [`schedule_diagnostics`](Self::schedule_diagnostics).
+    /// Called from the diagnostic worker task spawned by
+    /// [`schedule_diagnostics`](Self::schedule_diagnostics).  Both
+    /// `did_open` and `did_change` schedule diagnostics asynchronously
+    /// so that lazy stub parsing (which can trigger hundreds of
+    /// cache-miss parses on first open) never blocks the LSP response.
     ///
     /// `uri_str` is the file URI string (e.g. `"file:///path/to/file.php"`).
     /// `content` is the full text of the file.

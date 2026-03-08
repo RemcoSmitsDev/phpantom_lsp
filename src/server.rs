@@ -265,8 +265,11 @@ impl LanguageServer for Backend {
         // Parse and update AST map, use map, and namespace map
         self.update_ast(&uri, &text);
 
-        // Publish diagnostics (deprecated usage, unused imports, etc.)
-        self.publish_diagnostics_for_file(&uri, &text).await;
+        // Schedule diagnostics asynchronously so that the first-open
+        // response is not blocked by lazy stub parsing (which can take
+        // tens of seconds when many class references trigger cache-miss
+        // parses).  This matches the did_change path.
+        self.schedule_diagnostics(uri.clone());
 
         self.log(MessageType::INFO, format!("Opened file: {}", uri))
             .await;
