@@ -1015,7 +1015,36 @@ pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> Class
     for property in &mut result.properties {
         apply_substitution_to_property(property, &subs);
     }
+
+    // Substitute template params in generic annotations so that
+    // downstream consumers (e.g. foreach element-type extraction)
+    // see concrete types instead of raw template param names.
+    // For example, `@implements IteratorAggregate<TKey, TValue>`
+    // becomes `@implements IteratorAggregate<int, Customer>` when
+    // TKey=int, TValue=Customer.
+    apply_substitution_to_generics(&mut result.implements_generics, &subs);
+    apply_substitution_to_generics(&mut result.extends_generics, &subs);
+    apply_substitution_to_generics(&mut result.use_generics, &subs);
+
     result
+}
+
+/// Apply a substitution map to a list of generic annotations.
+///
+/// Each entry is `(ClassName, [TypeArg1, TypeArg2, …])`.  Only the type
+/// arguments are substituted; the class name is left unchanged.
+fn apply_substitution_to_generics(
+    generics: &mut [(String, Vec<String>)],
+    subs: &HashMap<String, String>,
+) {
+    for (_class_name, type_args) in generics.iter_mut() {
+        for arg in type_args.iter_mut() {
+            let substituted = apply_substitution(arg, subs);
+            if substituted != *arg {
+                *arg = substituted;
+            }
+        }
+    }
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────

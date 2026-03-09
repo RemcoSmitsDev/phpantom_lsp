@@ -90,21 +90,48 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     // Try to extract the raw iterable type from the foreach expression.
     // `extract_rhs_iterable_raw_type` handles method calls, static
     // calls, property access, function calls, and simple variables.
-    let raw_type = extract_rhs_iterable_raw_type(foreach.expression, ctx).or_else(|| {
-        // Fallback: for simple `$variable` expressions, search backward
-        // from the foreach for @var or @param annotations.
-        let expr_span = foreach.expression.span();
-        let expr_start = expr_span.start.offset as usize;
-        let expr_end = expr_span.end.offset as usize;
-        let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
+    let raw_type = extract_rhs_iterable_raw_type(foreach.expression, ctx)
+        .or_else(|| {
+            // Fallback 1: for simple `$variable` expressions, search backward
+            // from the foreach for @var or @param annotations.
+            let expr_span = foreach.expression.span();
+            let expr_start = expr_span.start.offset as usize;
+            let expr_end = expr_span.end.offset as usize;
+            let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
 
-        if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
-            return None;
-        }
+            if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
+                return None;
+            }
 
-        let foreach_offset = foreach.foreach.span().start.offset as usize;
-        docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
-    });
+            let foreach_offset = foreach.foreach.span().start.offset as usize;
+            docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
+        })
+        .or_else(|| {
+            // Fallback 2: for simple `$variable` expressions, resolve the
+            // variable's type from its assignment (e.g.
+            // `$items = Country::cases();` → `Country[]`).
+            // This covers cases where the iterable type comes from a method
+            // return type or other expression rather than a docblock.
+            let expr_span = foreach.expression.span();
+            let expr_start = expr_span.start.offset as usize;
+            let expr_end = expr_span.end.offset as usize;
+            let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
+
+            if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
+                return None;
+            }
+
+            let foreach_offset = foreach.foreach.span().start.offset;
+            super::raw_type_inference::resolve_variable_assignment_raw_type(
+                expr_text,
+                ctx.content,
+                foreach_offset,
+                Some(ctx.current_class),
+                ctx.all_classes,
+                ctx.class_loader,
+                ctx.function_loader,
+            )
+        });
 
     // ── Expand type aliases before extracting generic element type ──
     // When the raw type is a type alias (e.g. `UserList` defined via
@@ -205,21 +232,48 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     // Try to extract the raw iterable type from the foreach expression.
     // `extract_rhs_iterable_raw_type` handles method calls, static
     // calls, property access, function calls, and simple variables.
-    let raw_type = extract_rhs_iterable_raw_type(foreach.expression, ctx).or_else(|| {
-        // Fallback: for simple `$variable` expressions, search backward
-        // from the foreach for @var or @param annotations.
-        let expr_span = foreach.expression.span();
-        let expr_start = expr_span.start.offset as usize;
-        let expr_end = expr_span.end.offset as usize;
-        let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
+    let raw_type = extract_rhs_iterable_raw_type(foreach.expression, ctx)
+        .or_else(|| {
+            // Fallback 1: for simple `$variable` expressions, search backward
+            // from the foreach for @var or @param annotations.
+            let expr_span = foreach.expression.span();
+            let expr_start = expr_span.start.offset as usize;
+            let expr_end = expr_span.end.offset as usize;
+            let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
 
-        if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
-            return None;
-        }
+            if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
+                return None;
+            }
 
-        let foreach_offset = foreach.foreach.span().start.offset as usize;
-        docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
-    });
+            let foreach_offset = foreach.foreach.span().start.offset as usize;
+            docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
+        })
+        .or_else(|| {
+            // Fallback 2: for simple `$variable` expressions, resolve the
+            // variable's type from its assignment (e.g.
+            // `$items = Country::cases();` → `Country[]`).
+            // This covers cases where the iterable type comes from a method
+            // return type or other expression rather than a docblock.
+            let expr_span = foreach.expression.span();
+            let expr_start = expr_span.start.offset as usize;
+            let expr_end = expr_span.end.offset as usize;
+            let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
+
+            if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
+                return None;
+            }
+
+            let foreach_offset = foreach.foreach.span().start.offset;
+            super::raw_type_inference::resolve_variable_assignment_raw_type(
+                expr_text,
+                ctx.content,
+                foreach_offset,
+                Some(ctx.current_class),
+                ctx.all_classes,
+                ctx.class_loader,
+                ctx.function_loader,
+            )
+        });
 
     // ── Expand type aliases before extracting generic key type ──
     // Same as the value-type path: when the raw type is a type alias
@@ -825,6 +879,10 @@ pub(in crate::completion) fn extract_rhs_iterable_raw_type<'b>(
             if let Some(rt) =
                 crate::inheritance::resolve_method_return_type(cls, &method_name, class_loader)
             {
+                // Replace `static`/`self`/`$this` with the owner class
+                // name so that return types like `static[]` resolve to
+                // `OwnerClass[]` rather than the *enclosing* class.
+                let rt = docblock::type_strings::replace_self_in_type(&rt, &cls.name);
                 return Some(rt);
             }
         }
@@ -854,6 +912,10 @@ pub(in crate::completion) fn extract_rhs_iterable_raw_type<'b>(
                     class_loader,
                 )
             {
+                // Replace `static`/`self`/`$this` with the owner class
+                // name so that return types like `static[]` resolve to
+                // `OwnerClass[]` rather than the *enclosing* class.
+                let rt = docblock::type_strings::replace_self_in_type(&rt, &owner.name);
                 return Some(rt);
             }
         }

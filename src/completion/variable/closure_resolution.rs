@@ -564,6 +564,31 @@ fn resolve_closure_params_with_inferred(
             // 1. Try the explicit type hint first.
             if let Some(hint) = &param.hint {
                 let type_str = extract_hint_string(hint);
+
+                // When the explicit hint is a bare class name (no
+                // generic args) and the inferred type from the callable
+                // signature is the same class WITH generic args, prefer
+                // the inferred type.  For example, the user writes
+                // `function (Collection $customers)` but the callable
+                // signature says `callable(Collection<int, Customer>, int): mixed`.
+                // Using the inferred `Collection<int, Customer>` preserves
+                // template substitution so that foreach iteration resolves
+                // the element type.
+                if let Some(inferred) = inferred_types.get(idx)
+                    && inferred_type_is_more_specific(&type_str, inferred)
+                {
+                    let resolved = crate::completion::type_resolution::type_hint_to_classes(
+                        inferred,
+                        &ctx.current_class.name,
+                        ctx.all_classes,
+                        ctx.class_loader,
+                    );
+                    if !resolved.is_empty() {
+                        *results = resolved;
+                        break;
+                    }
+                }
+
                 let resolved = crate::completion::type_resolution::type_hint_to_classes(
                     &type_str,
                     &ctx.current_class.name,
@@ -591,6 +616,34 @@ fn resolve_closure_params_with_inferred(
             break;
         }
     }
+}
+
+/// Check whether the inferred callable-signature type is a more specific
+/// version of the explicit type hint.
+///
+/// Returns `true` when the explicit hint is a bare class name (e.g.
+/// `Collection`) and the inferred type is the same class with generic
+/// arguments (e.g. `Collection<int, Customer>`).  Namespace-qualified
+/// names are compared by their last segment so that `Collection` matches
+/// `Illuminate\Support\Collection<int, Customer>`.
+fn inferred_type_is_more_specific(explicit_hint: &str, inferred: &str) -> bool {
+    // The explicit hint must not already carry generic args.
+    if explicit_hint.contains('<') {
+        return false;
+    }
+    // The inferred type must carry generic args.
+    let angle = match inferred.find('<') {
+        Some(pos) => pos,
+        None => return false,
+    };
+    let inferred_base = &inferred[..angle];
+
+    // Compare by short name so that `Collection` matches
+    // `Illuminate\Support\Collection<…>`.
+    let explicit_short = crate::util::short_name(explicit_hint);
+    let inferred_short = crate::util::short_name(inferred_base);
+
+    explicit_short.eq_ignore_ascii_case(inferred_short)
 }
 
 // ── Callable parameter inference helpers ────────────────────────────

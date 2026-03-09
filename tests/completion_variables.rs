@@ -1,8 +1,10 @@
 mod common;
 
 use common::{
-    create_psr4_workspace, create_test_backend, create_test_backend_with_exception_stubs,
+    create_psr4_workspace, create_psr4_workspace_with_exception_stubs, create_test_backend,
+    create_test_backend_with_exception_stubs,
 };
+
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 
@@ -10398,6 +10400,96 @@ async fn test_completion_catch_variable_cross_file() {
             assert!(
                 labels.iter().any(|l| l.starts_with("getErrorCode")),
                 "Should include getErrorCode from DatabaseException, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Cross-file catch variable where the exception class lives in a different
+/// namespace, extends the global `Exception` via a `use Exception;` import,
+/// and has NO own methods.  Inherited methods like `getMessage()` must still
+/// resolve through the parent chain even though the `class_loader` closure
+/// carries the *consumer* file's use_map (which does not import `Exception`).
+#[tokio::test]
+async fn test_completion_catch_variable_cross_file_global_parent_via_use() {
+    let (backend, _dir) = create_psr4_workspace_with_exception_stubs(
+        r#"{ "autoload": { "psr-4": { "Vendor\\Exceptions\\": "src/Exceptions/", "App\\Console\\": "src/Console/" } } }"#,
+        &[(
+            "src/Exceptions/AppException.php",
+            concat!(
+                "<?php\n",
+                "namespace Vendor\\Exceptions;\n",
+                "\n",
+                "use Exception;\n",
+                "\n",
+                "abstract class AppException extends Exception\n",
+                "{\n",
+                "}\n",
+            ),
+        )],
+    );
+
+    let uri = Url::parse("file:///catch_cross_global.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "namespace App\\Console;\n",
+        "\n",
+        "use Vendor\\Exceptions\\AppException;\n",
+        "\n",
+        "class SyncCommand\n",
+        "{\n",
+        "    public function handle(): void\n",
+        "    {\n",
+        "        try {\n",
+        "        } catch (AppException $e) {\n",
+        "            $e->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 11,
+                character: 16,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for cross-file catch variable with global parent"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("getMessage")),
+                "Should include getMessage inherited from Exception, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("getCode")),
+                "Should include getCode inherited from Exception, got: {:?}",
                 labels
             );
         }

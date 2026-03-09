@@ -465,6 +465,12 @@ impl Backend {
         &self.class_index
     }
 
+    /// Borrow the PSR-4 mappings mutex (used by integration tests to
+    /// configure autoload mappings).
+    pub fn psr4_mappings(&self) -> &Arc<RwLock<Vec<composer::Psr4Mapping>>> {
+        &self.psr4_mappings
+    }
+
     /// Borrow the classmap mutex (used by integration tests to populate
     /// Composer classmap entries).
     pub fn classmap(&self) -> &Arc<RwLock<HashMap<String, PathBuf>>> {

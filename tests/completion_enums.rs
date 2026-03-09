@@ -2905,3 +2905,345 @@ async fn test_goto_definition_backed_enum_value_property_not_function() {
         other => panic!("Expected Scalar location, got: {:?}", other),
     }
 }
+
+/// Iterating over `Enum::cases()` in a foreach should resolve the value
+/// variable to the enum type, not to the enclosing class.
+///
+/// The `UnitEnum::cases()` stub has `@return static[]`, so the return
+/// type string is `static[]`.  When the foreach expression is a static
+/// call like `Country::cases()`, the `static` must be replaced with the
+/// owner class name (`Country`) so that the element type resolves to
+/// `Country` rather than the class containing the foreach.
+#[tokio::test]
+async fn test_completion_foreach_enum_cases_resolves_to_enum_type() {
+    let backend = create_test_backend_with_stubs();
+
+    let uri = Url::parse("file:///foreach_enum_cases.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "enum Country: string\n",
+        "{\n",
+        "    case BE = 'be';\n",
+        "    case NL = 'nl';\n",
+        "}\n",
+        "\n",
+        "class Handler {\n",
+        "    public function run(): void {\n",
+        "        foreach (Country::cases() as $country) {\n",
+        "            $country->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 10,
+                    character: 23,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Completion should return results for $country-> inside foreach over Enum::cases()"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // BackedEnum instances have `name` and `value` properties.
+            assert!(
+                labels.iter().any(|l| l.contains("value")),
+                "$country-> should include 'value' (from BackedEnum), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.contains("name")),
+                "$country-> should include 'name' (from UnitEnum), got: {:?}",
+                labels
+            );
+            // Must NOT resolve to the enclosing class Handler.
+            assert!(
+                !labels.iter().any(|l| l.contains("run")),
+                "$country-> should NOT include 'run' from enclosing Handler class, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Same as above but for a unit enum (no backing type).
+#[tokio::test]
+async fn test_completion_foreach_unit_enum_cases_resolves_to_enum_type() {
+    let backend = create_test_backend_with_stubs();
+
+    let uri = Url::parse("file:///foreach_unit_enum_cases.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "enum Suit\n",
+        "{\n",
+        "    case Hearts;\n",
+        "    case Diamonds;\n",
+        "}\n",
+        "\n",
+        "class Dealer {\n",
+        "    public function deal(): void {\n",
+        "        foreach (Suit::cases() as $suit) {\n",
+        "            $suit->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 10,
+                    character: 19,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Completion should return results for $suit-> inside foreach over UnitEnum::cases()"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // UnitEnum instances have a `name` property.
+            assert!(
+                labels.iter().any(|l| l.contains("name")),
+                "$suit-> should include 'name' (from UnitEnum), got: {:?}",
+                labels
+            );
+            // Must NOT resolve to the enclosing class Dealer.
+            assert!(
+                !labels.iter().any(|l| l.contains("deal")),
+                "$suit-> should NOT include 'deal' from enclosing Dealer class, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When `Enum::cases()` is assigned to an intermediate variable and then
+/// iterated, the foreach value variable should still resolve to the enum type.
+///
+/// The assignment `$countries = Country::cases()` resolves to `Country[]`
+/// via the raw type inference path.  The foreach resolution must consult
+/// that assignment-derived type (not just docblock annotations) to extract
+/// the element type `Country`.
+#[tokio::test]
+async fn test_completion_foreach_variable_assigned_from_enum_cases() {
+    let backend = create_test_backend_with_stubs();
+
+    let uri = Url::parse("file:///foreach_var_enum_cases.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "enum Country: string\n",
+        "{\n",
+        "    case BE = 'be';\n",
+        "    case NL = 'nl';\n",
+        "}\n",
+        "\n",
+        "class Handler {\n",
+        "    public function run(): void {\n",
+        "        $countries = Country::cases();\n",
+        "        foreach ($countries as $country) {\n",
+        "            $country->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position {
+                    line: 11,
+                    character: 23,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Completion should return results for $country-> inside foreach over variable assigned from Enum::cases()"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.contains("value")),
+                "$country-> should include 'value' (from BackedEnum), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.contains("name")),
+                "$country-> should include 'name' (from UnitEnum), got: {:?}",
+                labels
+            );
+            assert!(
+                !labels.iter().any(|l| l.contains("run")),
+                "$country-> should NOT include 'run' from enclosing Handler class, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Cross-file PSR-4 variant: the enum is defined in a separate file and
+/// iterated via `cases()` in another class.
+#[tokio::test]
+async fn test_completion_foreach_enum_cases_cross_file() {
+    let composer_json = r#"{
+        "autoload": {
+            "psr-4": {
+                "App\\Enums\\": "src/Enums/"
+            }
+        }
+    }"#;
+
+    let enum_content = concat!(
+        "<?php\n",
+        "namespace App\\Enums;\n",
+        "\n",
+        "enum Country: string\n",
+        "{\n",
+        "    case BE = 'be';\n",
+        "    case NL = 'nl';\n",
+        "}\n",
+    );
+
+    let (backend, dir) =
+        create_psr4_workspace(composer_json, &[("src/Enums/Country.php", enum_content)]);
+
+    let handler_uri = Url::from_file_path(dir.path().join("handler.php")).unwrap();
+    let handler_text = concat!(
+        "<?php\n",
+        "namespace App\\Handlers;\n",
+        "\n",
+        "use App\\Enums\\Country;\n",
+        "\n",
+        "class Handler {\n",
+        "    public function handle(): void {\n",
+        "        foreach (Country::cases() as $country) {\n",
+        "            $country->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: handler_uri.clone(),
+                language_id: "php".to_string(),
+                version: 1,
+                text: handler_text.to_string(),
+            },
+        })
+        .await;
+
+    let result = backend
+        .completion(CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier {
+                    uri: handler_uri.clone(),
+                },
+                position: Position {
+                    line: 8,
+                    character: 23,
+                },
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            context: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        result.is_some(),
+        "Completion should return results for $country-> in cross-file foreach over Enum::cases()"
+    );
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.contains("value")),
+                "$country-> should include 'value' (from BackedEnum) cross-file, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.contains("name")),
+                "$country-> should include 'name' (from UnitEnum) cross-file, got: {:?}",
+                labels
+            );
+            assert!(
+                !labels.iter().any(|l| l.contains("handle")),
+                "$country-> should NOT include 'handle' from enclosing Handler class, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

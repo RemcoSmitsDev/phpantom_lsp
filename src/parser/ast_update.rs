@@ -800,11 +800,30 @@ impl Backend {
             let first = &name[..pos];
             let rest = &name[pos..]; // includes leading '\'
             if let Some(fqn) = use_map.get(first) {
+                // Global-scope prefix: when the mapped FQN has no `\`
+                // (e.g. `use Exception;` mapping `Exception` → `"Exception"`),
+                // prefix with `\` so that the combined result is recognised
+                // as a root-namespace name downstream.
+                if !fqn.contains('\\') {
+                    return format!("\\{}{}", fqn, rest);
+                }
                 return format!("{}{}", fqn, rest);
             }
         } else {
             // Unqualified name — check directly
             if let Some(fqn) = use_map.get(name) {
+                // When the FQN has no namespace separator it refers to a
+                // global-scope class (e.g. `use Exception;` → FQN
+                // `"Exception"`).  Prefix it with `\` so that downstream
+                // `resolve_class_name` recognises it as a root-namespace
+                // name and does NOT prepend the caller's file namespace.
+                // Without this, a cross-file class whose parent is
+                // `Exception` (resolved here to the bare string
+                // `"Exception"`) would later be looked up as e.g.
+                // `"App\Console\Commands\Exception"` — which doesn't exist.
+                if !fqn.contains('\\') {
+                    return format!("\\{}", fqn);
+                }
                 return fqn.clone();
             }
         }

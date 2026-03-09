@@ -1459,6 +1459,13 @@ class ClosureParamInferenceDemo
             $orders->count();             // resolves to Eloquent Collection
         });
 
+        // Explicit bare type hint inherits inferred generic args for foreach
+        BlogAuthor::where('active', true)->chunk(100, function (Collection $authors) {
+            foreach ($authors as $author) {
+                $author->posts();           // resolves to BlogAuthor via Collection<int, BlogAuthor>
+            }
+        });
+
         // Eloquent whereHas — $query inferred as Builder
         BlogAuthor::whereHas('posts', function ($query) {
             $query->where('published', true); // resolves to Builder

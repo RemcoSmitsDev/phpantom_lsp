@@ -861,3 +861,71 @@ async fn test_this_in_callable_param_arrow_fn() {
         names,
     );
 }
+
+/// When a closure parameter has an explicit bare type hint (e.g.
+/// `Collection $customers`) and the callable signature infers a more
+/// specific generic form (e.g. `Collection<int, Customer>`), the inferred
+/// type should be used so that foreach iteration resolves the element type.
+///
+/// Reproduces: `Customer::chunk(10, function (Collection $customers) { foreach ($customers as $customer) { $customer->… } })`
+#[tokio::test]
+async fn test_explicit_bare_hint_uses_inferred_generics_for_foreach() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_explicit_generic_foreach.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class Customer {\n",
+        "    public function isActiveMember(): bool { return true; }\n",
+        "    public function getEmail(): string { return ''; }\n",
+        "}\n",
+        "/**\n",
+        " * @template TKey of array-key\n",
+        " * @template TValue\n",
+        " * @implements IteratorAggregate<TKey, TValue>\n",
+        " */\n",
+        "class Collection {\n",
+        "    /** @return TValue|null */\n",
+        "    public function first(): mixed { return null; }\n",
+        "    /** @return int */\n",
+        "    public function count(): int { return 0; }\n",
+        "}\n",
+        "/**\n",
+        " * @template TModel\n",
+        " */\n",
+        "class Builder {\n",
+        "    /**\n",
+        "     * @param callable(Collection<int, TModel>, int): mixed $callback\n",
+        "     * @return bool\n",
+        "     */\n",
+        "    public function chunk(int $count, callable $callback): bool { return true; }\n",
+        "    /** @return static */\n",
+        "    public function where(string $col, mixed $val = null): static { return $this; }\n",
+        "}\n",
+        "class Service {\n",
+        "    /** @return Builder<Customer> */\n",
+        "    public function query(): Builder { return new Builder(); }\n",
+        "    public function run(): void {\n",
+        "        $this->query()->chunk(10, function (Collection $customers): void {\n",
+        "            foreach ($customers as $customer) {\n",
+        "                $customer->\n",
+        "            }\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Line 34: `                $customer->` inside the foreach body.
+    let items = complete_at(&backend, &uri, src, 34, 28).await;
+    let names = method_names(&items);
+    assert!(
+        names.contains(&"isActiveMember"),
+        "Expected isActiveMember from Customer via foreach over Collection<int, Customer>, got: {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"getEmail"),
+        "Expected getEmail from Customer via foreach over Collection<int, Customer>, got: {:?}",
+        names,
+    );
+}
