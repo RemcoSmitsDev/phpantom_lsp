@@ -262,7 +262,7 @@ pub(in crate::completion) fn apply_instanceof_inclusion(
 ///
 /// Both short names and fully-qualified names are compared so that
 /// cross-file relationships (where `parent_class` stores FQNs) work.
-fn is_subtype_of(
+pub(crate) fn is_subtype_of(
     class: &ClassInfo,
     ancestor_name: &str,
     class_loader: &dyn Fn(&str) -> Option<ClassInfo>,

@@ -7139,3 +7139,99 @@ class Indexer {
         text
     );
 }
+
+// ─── Closure parameter: inferred subclass wins over explicit parent ─────────
+
+/// When a closure parameter has an explicit parent type hint (e.g. `Model`)
+/// but the callable signature infers a more specific subclass (e.g.
+/// `BrandTranslation extends Model`), hover should show the subclass type.
+#[test]
+fn hover_closure_param_inferred_subclass_wins_over_explicit_parent() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Model {
+    public function save(): bool { return true; }
+}
+class BrandTranslation extends Model {
+    public function getLangCode(): string { return ''; }
+}
+/**
+ * @template TKey
+ * @template TValue
+ */
+class Collection {
+    /**
+     * @param callable(TValue): mixed $callback
+     * @return static
+     */
+    public function each(callable $callback): static {}
+}
+class BrandService {
+    /** @return Collection<int, BrandTranslation> */
+    public function getTranslations(): Collection {}
+    public function run(): void {
+        $translations = $this->getTranslations();
+        $translations->each(function (Model $brandTranslation) {
+            $brandTranslation->getLangCode();
+        });
+    }
+}
+"#;
+
+    // Hover on `$brandTranslation` inside the closure body (line 24)
+    let hover =
+        hover_at(&backend, uri, content, 24, 13).expect("expected hover on $brandTranslation");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("BrandTranslation"),
+        "Hover should show inferred subclass BrandTranslation, not explicit Model, got: {}",
+        text
+    );
+}
+
+/// Inverse: when the explicit type hint is already a subclass of the inferred
+/// type, the explicit type should still win for hover.
+#[test]
+fn hover_closure_param_explicit_subclass_wins_over_inferred_parent() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Animal {
+    public function speak(): string { return ''; }
+}
+class Cat extends Animal {
+    public function purr(): void {}
+}
+/**
+ * @template TKey
+ * @template TValue
+ */
+class Collection {
+    /**
+     * @param callable(TValue): mixed $callback
+     * @return static
+     */
+    public function each(callable $callback): static {}
+}
+class Shelter {
+    /** @return Collection<int, Animal> */
+    public function getAnimals(): Collection {}
+    public function run(): void {
+        $animals = $this->getAnimals();
+        $animals->each(function (Cat $c) {
+            $c->purr();
+        });
+    }
+}
+"#;
+
+    // Hover on `$c` inside the closure body (line 24)
+    let hover = hover_at(&backend, uri, content, 24, 13).expect("expected hover on $c");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Cat"),
+        "Hover should keep the explicit Cat type, got: {}",
+        text
+    );
+}

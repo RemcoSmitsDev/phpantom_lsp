@@ -13,13 +13,27 @@
 use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
+use crate::completion::types::narrowing::is_subtype_of;
 use crate::docblock;
 use crate::parser::{extract_hint_string, with_parsed_program};
-use crate::types::ClassInfo;
+use crate::types::{AccessKind, ClassInfo};
 use crate::util::short_name;
 
 use crate::completion::resolver::FunctionLoaderFn;
 use crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type;
+
+/// Context for closure parameter type resolution in hover.
+///
+/// Carries the class resolution infrastructure needed to infer callable
+/// parameter types from enclosing call expressions, so that a closure
+/// parameter typed as a parent class (e.g. `Model`) can be narrowed to
+/// the inferred subclass (e.g. `BrandTranslation`).
+struct HoverClosureCtx<'a> {
+    current_class: Option<&'a ClassInfo>,
+    all_classes: &'a [ClassInfo],
+    class_loader: &'a dyn Fn(&str) -> Option<ClassInfo>,
+    content: &'a str,
+}
 
 /// Resolve the type string for a variable at `cursor_offset` for hover.
 ///
@@ -48,6 +62,12 @@ pub(crate) fn resolve_variable_type_string(
     }
 
     // 2–4. AST-based: parameter, foreach, catch
+    let closure_ctx = HoverClosureCtx {
+        current_class,
+        all_classes,
+        class_loader,
+        content,
+    };
     let ast_result: Option<String> =
         with_parsed_program(content, "resolve_variable_type_string", |program, _| {
             find_variable_type_in_statements(
@@ -55,6 +75,7 @@ pub(crate) fn resolve_variable_type_string(
                 var_name,
                 content,
                 cursor_offset,
+                &closure_ctx,
             )
         });
 
@@ -119,6 +140,7 @@ fn find_variable_type_in_statements<'a, I>(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
 ) -> Option<String>
 where
     I: Iterator<Item = &'a Statement<'a>>,
@@ -136,6 +158,7 @@ where
                         var_name,
                         content,
                         cursor_offset,
+                        closure_ctx,
                     );
                 }
             }
@@ -148,6 +171,7 @@ where
                         var_name,
                         content,
                         cursor_offset,
+                        closure_ctx,
                     );
                 }
             }
@@ -160,6 +184,7 @@ where
                         var_name,
                         content,
                         cursor_offset,
+                        closure_ctx,
                     );
                 }
             }
@@ -172,6 +197,7 @@ where
                         var_name,
                         content,
                         cursor_offset,
+                        closure_ctx,
                     );
                 }
             }
@@ -181,6 +207,7 @@ where
                     var_name,
                     content,
                     cursor_offset,
+                    closure_ctx,
                 ) {
                     return Some(t);
                 }
@@ -207,6 +234,7 @@ where
                         var_name,
                         content,
                         cursor_offset,
+                        closure_ctx,
                     ) {
                         return Some(t);
                     }
@@ -233,7 +261,8 @@ where
                 let stmt_span = stmt.span();
                 if cursor_offset >= stmt_span.start.offset
                     && cursor_offset <= stmt_span.end.offset
-                    && let Some(t) = find_type_in_foreach(foreach, var_name, content, cursor_offset)
+                    && let Some(t) =
+                        find_type_in_foreach(foreach, var_name, content, cursor_offset, closure_ctx)
                 {
                     return Some(t);
                 }
@@ -251,6 +280,7 @@ fn find_type_in_class_members<'a, I>(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
 ) -> Option<String>
 where
     I: Iterator<Item = &'a ClassLikeMember<'a>>,
@@ -279,6 +309,7 @@ where
                         var_name,
                         content,
                         cursor_offset,
+                        closure_ctx,
                     ) {
                         return Some(t);
                     }
@@ -346,6 +377,7 @@ fn find_type_in_body_stmts(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
 ) -> Option<String> {
     for &stmt in stmts {
         let stmt_span = stmt.span();
@@ -360,13 +392,16 @@ fn find_type_in_body_stmts(
 
         // Foreach bindings
         if let Statement::Foreach(foreach) = stmt
-            && let Some(t) = find_type_in_foreach(foreach, var_name, content, cursor_offset)
+            && let Some(t) =
+                find_type_in_foreach(foreach, var_name, content, cursor_offset, closure_ctx)
         {
             return Some(t);
         }
 
         // Closure/arrow function parameters
-        if let Some(t) = find_type_in_closure_stmt(stmt, var_name, content, cursor_offset) {
+        if let Some(t) =
+            find_type_in_closure_stmt(stmt, var_name, content, cursor_offset, closure_ctx)
+        {
             return Some(t);
         }
     }
@@ -490,6 +525,7 @@ fn find_type_in_foreach(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
 ) -> Option<String> {
     // Check if the cursor is on the foreach value or key variable, or inside the body
     let foreach_start = foreach.foreach.span().start.offset;
@@ -531,11 +567,23 @@ fn find_type_in_foreach(
         // Recurse into body for nested foreach/catch
         match &foreach.body {
             ForeachBody::Statement(inner) => {
-                return find_type_in_body_stmts(&[inner], var_name, content, cursor_offset);
+                return find_type_in_body_stmts(
+                    &[inner],
+                    var_name,
+                    content,
+                    cursor_offset,
+                    closure_ctx,
+                );
             }
             ForeachBody::ColonDelimited(body) => {
                 let stmts: Vec<&Statement> = body.statements.iter().collect();
-                return find_type_in_body_stmts(&stmts, var_name, content, cursor_offset);
+                return find_type_in_body_stmts(
+                    &stmts,
+                    var_name,
+                    content,
+                    cursor_offset,
+                    closure_ctx,
+                );
             }
         }
     }
@@ -994,17 +1042,23 @@ fn find_type_in_closure_stmt(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
 ) -> Option<String> {
     match stmt {
-        Statement::Expression(expr_stmt) => {
-            find_type_in_closure_expr(expr_stmt.expression, var_name, content, cursor_offset)
-        }
-        Statement::Return(ret) => ret
-            .value
-            .and_then(|expr| find_type_in_closure_expr(expr, var_name, content, cursor_offset)),
+        Statement::Expression(expr_stmt) => find_type_in_closure_expr(
+            expr_stmt.expression,
+            var_name,
+            content,
+            cursor_offset,
+            closure_ctx,
+        ),
+        Statement::Return(ret) => ret.value.and_then(|expr| {
+            find_type_in_closure_expr(expr, var_name, content, cursor_offset, closure_ctx)
+        }),
         Statement::If(if_stmt) => {
             for inner in if_stmt.body.statements() {
-                if let Some(t) = find_type_in_closure_stmt(inner, var_name, content, cursor_offset)
+                if let Some(t) =
+                    find_type_in_closure_stmt(inner, var_name, content, cursor_offset, closure_ctx)
                 {
                     return Some(t);
                 }
@@ -1013,7 +1067,8 @@ fn find_type_in_closure_stmt(
         }
         Statement::Foreach(foreach) => {
             for inner in foreach.body.statements() {
-                if let Some(t) = find_type_in_closure_stmt(inner, var_name, content, cursor_offset)
+                if let Some(t) =
+                    find_type_in_closure_stmt(inner, var_name, content, cursor_offset, closure_ctx)
                 {
                     return Some(t);
                 }
@@ -1022,7 +1077,8 @@ fn find_type_in_closure_stmt(
         }
         Statement::Block(block) => {
             for inner in block.statements.iter() {
-                if let Some(t) = find_type_in_closure_stmt(inner, var_name, content, cursor_offset)
+                if let Some(t) =
+                    find_type_in_closure_stmt(inner, var_name, content, cursor_offset, closure_ctx)
                 {
                     return Some(t);
                 }
@@ -1031,25 +1087,34 @@ fn find_type_in_closure_stmt(
         }
         Statement::Try(try_stmt) => {
             for inner in try_stmt.block.statements.iter() {
-                if let Some(t) = find_type_in_closure_stmt(inner, var_name, content, cursor_offset)
+                if let Some(t) =
+                    find_type_in_closure_stmt(inner, var_name, content, cursor_offset, closure_ctx)
                 {
                     return Some(t);
                 }
             }
             for catch in try_stmt.catch_clauses.iter() {
                 for inner in catch.block.statements.iter() {
-                    if let Some(t) =
-                        find_type_in_closure_stmt(inner, var_name, content, cursor_offset)
-                    {
+                    if let Some(t) = find_type_in_closure_stmt(
+                        inner,
+                        var_name,
+                        content,
+                        cursor_offset,
+                        closure_ctx,
+                    ) {
                         return Some(t);
                     }
                 }
             }
             if let Some(ref finally) = try_stmt.finally_clause {
                 for inner in finally.block.statements.iter() {
-                    if let Some(t) =
-                        find_type_in_closure_stmt(inner, var_name, content, cursor_offset)
-                    {
+                    if let Some(t) = find_type_in_closure_stmt(
+                        inner,
+                        var_name,
+                        content,
+                        cursor_offset,
+                        closure_ctx,
+                    ) {
                         return Some(t);
                     }
                 }
@@ -1067,6 +1132,7 @@ fn find_type_in_closure_expr(
     var_name: &str,
     content: &str,
     cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
 ) -> Option<String> {
     match expr {
         Expression::Closure(closure) => {
@@ -1087,7 +1153,13 @@ fn find_type_in_closure_expr(
                 }
                 // Recurse into body
                 let stmts: Vec<&Statement> = closure.body.statements.iter().collect();
-                return find_type_in_body_stmts(&stmts, var_name, content, cursor_offset);
+                return find_type_in_body_stmts(
+                    &stmts,
+                    var_name,
+                    content,
+                    cursor_offset,
+                    closure_ctx,
+                );
             }
             None
         }
@@ -1105,25 +1177,349 @@ fn find_type_in_closure_expr(
             None
         }
         Expression::Call(call) => {
-            let arg_list = call.get_argument_list();
-            for arg in arg_list.arguments.iter() {
-                let arg_expr: &Expression<'_> = arg.value();
-                if let Some(t) =
-                    find_type_in_closure_expr(arg_expr, var_name, content, cursor_offset)
-                {
-                    return Some(t);
-                }
-            }
-            None
+            find_type_in_closure_call(call, var_name, content, cursor_offset, closure_ctx)
         }
-        Expression::Parenthesized(paren) => {
-            find_type_in_closure_expr(paren.expression, var_name, content, cursor_offset)
-        }
+        Expression::Parenthesized(paren) => find_type_in_closure_expr(
+            paren.expression,
+            var_name,
+            content,
+            cursor_offset,
+            closure_ctx,
+        ),
         Expression::Assignment(assign) => {
-            find_type_in_closure_expr(assign.rhs, var_name, content, cursor_offset)
+            find_type_in_closure_expr(assign.rhs, var_name, content, cursor_offset, closure_ctx)
         }
         _ => None,
     }
+}
+
+/// Resolve a closure parameter type inside a call expression, applying
+/// callable parameter inference when the inferred type is a subclass of
+/// the explicit type hint.
+///
+/// For example, `$collection->each(function (Model $item) { $item-> })`
+/// where the collection is `Collection<int, BrandTranslation>` and
+/// `BrandTranslation extends Model` — the inferred `BrandTranslation`
+/// type is preferred over the explicit `Model` hint.
+fn find_type_in_closure_call(
+    call: &Call<'_>,
+    var_name: &str,
+    content: &str,
+    cursor_offset: u32,
+    closure_ctx: &HoverClosureCtx<'_>,
+) -> Option<String> {
+    let arg_list = call.get_argument_list();
+
+    for (arg_idx, arg) in arg_list.arguments.iter().enumerate() {
+        let arg_expr: &Expression<'_> = arg.value();
+        let arg_span = arg_expr.span();
+        if cursor_offset < arg_span.start.offset || cursor_offset > arg_span.end.offset {
+            continue;
+        }
+
+        // Check if this argument is a closure/arrow-function whose
+        // parameter list contains our target variable.
+        let (param_list, body_start, body_end) = match arg_expr {
+            Expression::Closure(closure) => {
+                let bs = closure.body.left_brace.start.offset;
+                let be = closure.body.right_brace.end.offset;
+                (Some(&closure.parameter_list), bs, be)
+            }
+            Expression::ArrowFunction(arrow) => {
+                let arrow_body_span = arrow.expression.span();
+                (
+                    Some(&arrow.parameter_list),
+                    arrow.arrow.start.offset,
+                    arrow_body_span.end.offset,
+                )
+            }
+            _ => (None, 0, 0),
+        };
+
+        if let Some(params) = param_list
+            && cursor_offset >= body_start
+            && cursor_offset <= body_end
+        {
+            // Find which parameter index matches var_name.
+            let param_hit = params
+                .parameters
+                .iter()
+                .enumerate()
+                .find(|(_, p)| *p.variable.name == *var_name);
+
+            if let Some((param_idx, param)) = param_hit {
+                // Get the explicit type hint.
+                let explicit_type = param.hint.as_ref().map(|h| extract_hint_string(h));
+
+                // If there's an explicit type, check whether the
+                // inferred callable parameter type is more specific.
+                if let Some(ref et) = explicit_type
+                    && let Some(inferred) = try_infer_more_specific_type_from_call(
+                        call,
+                        arg_idx,
+                        param_idx,
+                        et,
+                        closure_ctx,
+                    )
+                {
+                    // For closures, recurse into the body for
+                    // nested constructs before returning.
+                    if let Expression::Closure(closure) = arg_expr {
+                        let stmts: Vec<&Statement> = closure.body.statements.iter().collect();
+                        if let Some(inner) = find_type_in_body_stmts(
+                            &stmts,
+                            var_name,
+                            content,
+                            cursor_offset,
+                            closure_ctx,
+                        ) {
+                            return Some(inner);
+                        }
+                    }
+                    return Some(inferred);
+                }
+            }
+        }
+
+        // Fall back to the regular closure/arrow-function parameter
+        // resolution (handles no-hint params, body recursion, etc.).
+        if let Some(t) =
+            find_type_in_closure_expr(arg_expr, var_name, content, cursor_offset, closure_ctx)
+        {
+            return Some(t);
+        }
+    }
+
+    None
+}
+
+/// Try to infer callable parameter types from the enclosing call
+/// expression and check whether the inferred type is a subclass of
+/// `explicit_type`.  Returns the inferred type string when it is more
+/// specific, or `None` otherwise.
+fn try_infer_more_specific_type_from_call(
+    call: &Call<'_>,
+    arg_idx: usize,
+    param_idx: usize,
+    explicit_type: &str,
+    closure_ctx: &HoverClosureCtx<'_>,
+) -> Option<String> {
+    let inferred_types = infer_callable_param_types_for_call(call, arg_idx, closure_ctx)?;
+    let inferred = inferred_types.get(param_idx)?;
+    if inferred.is_empty() {
+        return None;
+    }
+
+    // Resolve both the explicit and inferred types to ClassInfo to
+    // check the inheritance relationship.
+    let dummy = ClassInfo::default();
+    let current_name = closure_ctx
+        .current_class
+        .map(|c| c.name.as_str())
+        .unwrap_or(&dummy.name);
+
+    let explicit_classes = crate::completion::type_resolution::type_hint_to_classes(
+        explicit_type,
+        current_name,
+        closure_ctx.all_classes,
+        closure_ctx.class_loader,
+    );
+    if explicit_classes.is_empty() {
+        return None;
+    }
+
+    let inferred_classes = crate::completion::type_resolution::type_hint_to_classes(
+        inferred,
+        current_name,
+        closure_ctx.all_classes,
+        closure_ctx.class_loader,
+    );
+    if inferred_classes.is_empty() {
+        return None;
+    }
+
+    // The inferred type is more specific when every inferred class is a
+    // subtype of at least one explicit class.
+    let all_subtypes = inferred_classes.iter().all(|inferred_cls| {
+        explicit_classes.iter().any(|explicit_cls| {
+            is_subtype_of(inferred_cls, &explicit_cls.name, closure_ctx.class_loader)
+        })
+    });
+
+    // Also ensure the inferred type is actually different (not the same
+    // class), otherwise there's no benefit.
+    let is_same = inferred_classes.len() == explicit_classes.len()
+        && inferred_classes
+            .iter()
+            .zip(explicit_classes.iter())
+            .all(|(a, b)| a.name == b.name);
+
+    if all_subtypes && !is_same {
+        Some(inferred.clone())
+    } else {
+        None
+    }
+}
+
+/// Extract callable parameter types from the method/function being called
+/// at the given argument index.
+fn infer_callable_param_types_for_call(
+    call: &Call<'_>,
+    arg_idx: usize,
+    closure_ctx: &HoverClosureCtx<'_>,
+) -> Option<Vec<String>> {
+    match call {
+        Call::Method(mc) => {
+            if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
+                let method_name = ident.value.to_string();
+                let obj_span = mc.object.span();
+                let start = obj_span.start.offset as usize;
+                let end = obj_span.end.offset as usize;
+                if end > closure_ctx.content.len() {
+                    return None;
+                }
+                let obj_text = closure_ctx.content[start..end].trim();
+
+                let rctx = crate::completion::resolver::ResolutionCtx {
+                    current_class: closure_ctx.current_class,
+                    all_classes: closure_ctx.all_classes,
+                    content: closure_ctx.content,
+                    // Use the receiver's end offset so variable
+                    // assignments preceding the call are visible.
+                    cursor_offset: obj_span.end.offset,
+                    class_loader: closure_ctx.class_loader,
+                    function_loader: None,
+                    resolved_class_cache: None,
+                };
+                let receiver_classes = crate::completion::resolver::resolve_target_classes(
+                    obj_text,
+                    AccessKind::Arrow,
+                    &rctx,
+                );
+                find_callable_params_on_receiver_classes(
+                    &receiver_classes,
+                    &method_name,
+                    arg_idx,
+                    closure_ctx,
+                )
+            } else {
+                None
+            }
+        }
+        Call::NullSafeMethod(mc) => {
+            if let ClassLikeMemberSelector::Identifier(ident) = &mc.method {
+                let method_name = ident.value.to_string();
+                let obj_span = mc.object.span();
+                let start = obj_span.start.offset as usize;
+                let end = obj_span.end.offset as usize;
+                if end > closure_ctx.content.len() {
+                    return None;
+                }
+                let obj_text = closure_ctx.content[start..end].trim();
+
+                let rctx = crate::completion::resolver::ResolutionCtx {
+                    current_class: closure_ctx.current_class,
+                    all_classes: closure_ctx.all_classes,
+                    content: closure_ctx.content,
+                    cursor_offset: obj_span.end.offset,
+                    class_loader: closure_ctx.class_loader,
+                    function_loader: None,
+                    resolved_class_cache: None,
+                };
+                let receiver_classes = crate::completion::resolver::resolve_target_classes(
+                    obj_text,
+                    AccessKind::Arrow,
+                    &rctx,
+                );
+                find_callable_params_on_receiver_classes(
+                    &receiver_classes,
+                    &method_name,
+                    arg_idx,
+                    closure_ctx,
+                )
+            } else {
+                None
+            }
+        }
+        Call::StaticMethod(sc) => {
+            if let ClassLikeMemberSelector::Identifier(ident) = &sc.method {
+                let method_name = ident.value.to_string();
+                let class_name = match sc.class {
+                    Expression::Self_(_) | Expression::Static(_) => {
+                        closure_ctx.current_class.map(|c| c.name.clone())
+                    }
+                    Expression::Identifier(id) => Some(id.value().to_string()),
+                    Expression::Parent(_) => closure_ctx
+                        .current_class
+                        .and_then(|c| c.parent_class.clone()),
+                    _ => None,
+                };
+                let cls = class_name.and_then(|name| {
+                    closure_ctx
+                        .all_classes
+                        .iter()
+                        .find(|c| c.name == name)
+                        .cloned()
+                        .or_else(|| (closure_ctx.class_loader)(&name))
+                });
+                if let Some(ref c) = cls {
+                    let resolved =
+                        crate::virtual_members::resolve_class_fully(c, closure_ctx.class_loader);
+                    find_callable_params_on_method(&resolved, &method_name, arg_idx)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Call::Function(fc) => {
+            let func_name = match fc.function {
+                Expression::Identifier(ident) => Some(ident.value().to_string()),
+                _ => None,
+            };
+            if let Some(name) = func_name {
+                // No function_loader available in this context; skip.
+                let _ = name;
+            }
+            None
+        }
+    }
+}
+
+/// Look up the method on receiver classes and extract callable param types.
+fn find_callable_params_on_receiver_classes(
+    classes: &[ClassInfo],
+    method_name: &str,
+    arg_idx: usize,
+    closure_ctx: &HoverClosureCtx<'_>,
+) -> Option<Vec<String>> {
+    for cls in classes {
+        let resolved = crate::virtual_members::resolve_class_fully(cls, closure_ctx.class_loader);
+        if let Some(params) = find_callable_params_on_method(&resolved, method_name, arg_idx) {
+            // Replace `$this`/`static`/`self` with the receiver FQN.
+            let receiver_fqn = cls.fqn();
+            let result = params
+                .into_iter()
+                .map(|ty| crate::docblock::replace_self_in_type(&ty, &receiver_fqn))
+                .collect();
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Extract callable parameter types from a method's parameter at `arg_idx`.
+fn find_callable_params_on_method(
+    class: &ClassInfo,
+    method_name: &str,
+    arg_idx: usize,
+) -> Option<Vec<String>> {
+    let method = class.methods.iter().find(|m| m.name == method_name)?;
+    let param = method.parameters.get(arg_idx)?;
+    let hint = param.type_hint.as_ref()?;
+    let types = crate::docblock::extract_callable_param_types(hint)?;
+    if types.is_empty() { None } else { Some(types) }
 }
 
 /// Extract the raw docblock text for a method/function at the given

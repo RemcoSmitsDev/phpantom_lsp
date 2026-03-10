@@ -632,6 +632,36 @@ fn resolve_closure_params_with_inferred(
                     ctx.class_loader,
                 );
                 if !resolved.is_empty() {
+                    // When the inferred type from the callable signature
+                    // is a subclass of the explicit type hint, prefer
+                    // the inferred type.  For example, the user writes
+                    // `function (Model $item)` but the callable signature
+                    // says `callable(BrandTranslation): void` where
+                    // `BrandTranslation extends Model`.  The narrower
+                    // inferred type gives better completion results.
+                    if let Some(inferred) = inferred_types.get(idx) {
+                        let inferred_resolved =
+                            crate::completion::type_resolution::type_hint_to_classes(
+                                inferred,
+                                &ctx.current_class.name,
+                                ctx.all_classes,
+                                ctx.class_loader,
+                            );
+                        if !inferred_resolved.is_empty()
+                            && inferred_resolved.iter().all(|inferred_cls| {
+                                resolved.iter().any(|explicit_cls| {
+                                    crate::completion::types::narrowing::is_subtype_of(
+                                        inferred_cls,
+                                        &explicit_cls.name,
+                                        ctx.class_loader,
+                                    )
+                                })
+                            })
+                        {
+                            *results = inferred_resolved;
+                            break;
+                        }
+                    }
                     *results = resolved;
                     break;
                 }

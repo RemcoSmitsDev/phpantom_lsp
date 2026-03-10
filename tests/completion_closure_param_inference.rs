@@ -2413,3 +2413,127 @@ async fn test_cross_file_laravel_eloquent_builder_closure_param_inference() {
         names,
     );
 }
+
+// ─── Inferred subclass type wins over explicit parent type hint ─────────────
+
+/// When a closure parameter has an explicit type hint that is a parent class
+/// (e.g. `Model`) but the inferred type from the callable signature is a
+/// subclass (e.g. `BrandTranslation extends Model`), the inferred subclass
+/// type should win because it is more specific.
+///
+/// Real-world example:
+/// ```php
+/// $this->getQuery(markets: $markets)
+///     ->each(function (Model $brandTranslation) {
+///         $brandTranslation->  // should resolve as BrandTranslation, not Model
+///     });
+/// ```
+#[tokio::test]
+async fn test_inferred_subclass_wins_over_explicit_parent_type_hint() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_inferred_subclass.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class Model {\n",
+        "    public function save(): bool { return true; }\n",
+        "}\n",
+        "class BrandTranslation extends Model {\n",
+        "    public function getLangCode(): string { return ''; }\n",
+        "    public function getBrandName(): string { return ''; }\n",
+        "}\n",
+        "/**\n",
+        " * @template TKey\n",
+        " * @template TValue\n",
+        " */\n",
+        "class Collection {\n",
+        "    /**\n",
+        "     * @param callable(TValue): mixed $callback\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function each(callable $callback): static {}\n",
+        "}\n",
+        "class BrandService {\n",
+        "    /** @return Collection<int, BrandTranslation> */\n",
+        "    public function getTranslations(): Collection {}\n",
+        "    public function run(): void {\n",
+        "        $translations = $this->getTranslations();\n",
+        "        $translations->each(function (Model $brandTranslation) {\n",
+        "            $brandTranslation->\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Line 25: `            $brandTranslation->`  cursor after `->`
+    let items = complete_at(&backend, &uri, src, 25, 31).await;
+    let names = method_names(&items);
+    // BrandTranslation-specific methods should be present
+    assert!(
+        names.contains(&"getLangCode"),
+        "Inferred BrandTranslation should win over explicit Model; expected getLangCode in {:?}",
+        names,
+    );
+    assert!(
+        names.contains(&"getBrandName"),
+        "Inferred BrandTranslation should win over explicit Model; expected getBrandName in {:?}",
+        names,
+    );
+    // Parent Model methods should also be present (inherited)
+    assert!(
+        names.contains(&"save"),
+        "Inherited Model methods should still be present; expected save in {:?}",
+        names,
+    );
+}
+
+/// When the explicit type hint is already the most specific type (i.e. the
+/// inferred type is a parent, not a subclass), the explicit type should
+/// still win.  This is the inverse of the above test and ensures we don't
+/// regress `test_explicit_type_hint_takes_precedence`.
+#[tokio::test]
+async fn test_explicit_subclass_still_wins_over_inferred_parent() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///test/closure_explicit_subclass.php").unwrap();
+
+    let src = concat!(
+        "<?php\n",
+        "class Animal {\n",
+        "    public function speak(): string { return ''; }\n",
+        "}\n",
+        "class Cat extends Animal {\n",
+        "    public function purr(): void {}\n",
+        "}\n",
+        "/**\n",
+        " * @template TKey\n",
+        " * @template TValue\n",
+        " */\n",
+        "class Collection {\n",
+        "    /**\n",
+        "     * @param callable(TValue): mixed $callback\n",
+        "     * @return static\n",
+        "     */\n",
+        "    public function each(callable $callback): static {}\n",
+        "}\n",
+        "class Shelter {\n",
+        "    /** @return Collection<int, Animal> */\n",
+        "    public function getAnimals(): Collection {}\n",
+        "    public function run(): void {\n",
+        "        $animals = $this->getAnimals();\n",
+        "        $animals->each(function (Cat $c) {\n",
+        "            $c->\n",
+        "        });\n",
+        "    }\n",
+        "}\n",
+    );
+
+    // Line 24: `            $c->`  cursor after `->`
+    let items = complete_at(&backend, &uri, src, 24, 17).await;
+    let names = method_names(&items);
+    // Cat-specific method should be present (explicit hint is more specific)
+    assert!(
+        names.contains(&"purr"),
+        "Explicit Cat type should win over inferred Animal; expected purr in {:?}",
+        names,
+    );
+}
