@@ -234,24 +234,25 @@ fn fetch_stubs(manifest_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
         GITHUB_REPO
     );
 
-    let response = ureq::get(&api_url)
-        .set("User-Agent", "phpantom-lsp-build")
-        .set("Accept", "application/vnd.github.v3+json")
+    let mut response = ureq::get(&api_url)
+        .header("User-Agent", "phpantom-lsp-build")
+        .header("Accept", "application/vnd.github.v3+json")
         .call()?;
 
-    let release: GitHubRelease = response.into_json()?;
+    let release: GitHubRelease = response.body_mut().read_json()?;
     eprintln!(
         "cargo:warning=Downloading phpstorm-stubs {}",
         release.tag_name
     );
 
-    let tarball_response = ureq::get(&release.tarball_url)
-        .set("User-Agent", "phpantom-lsp-build")
+    let mut tarball_response = ureq::get(&release.tarball_url)
+        .header("User-Agent", "phpantom-lsp-build")
         .call()?;
 
     let mut tarball_bytes = Vec::new();
     tarball_response
-        .into_reader()
+        .body_mut()
+        .as_reader()
         .read_to_end(&mut tarball_bytes)?;
 
     let decoder = GzDecoder::new(&tarball_bytes[..]);

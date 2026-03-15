@@ -576,6 +576,17 @@ pub fn detect_php_version(workspace_root: &Path) -> Option<PhpVersion> {
     None
 }
 
+/// Check whether a package name appears in `composer.json`'s `require-dev`.
+///
+/// Matches the package name exactly (e.g.
+/// `"friendsofphp/php-cs-fixer"`, `"squizlabs/php_codesniffer"`).
+pub(crate) fn has_require_dev(composer_json: &serde_json::Value, package: &str) -> bool {
+    composer_json
+        .get("require-dev")
+        .and_then(|rd| rd.as_object())
+        .is_some_and(|rd| rd.contains_key(package))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

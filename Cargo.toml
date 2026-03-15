@@ -12,24 +12,26 @@ serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1.39", features = ["full"] }
-mago-syntax = "1.8"
-mago-database = "1.8"
-mago-span = "1.8"
+mago-syntax = "1.14"
+mago-database = "1.14"
+mago-span = "1.14"
+mago-formatter = "1.14"
+mago-php-version = "1.14"
 bumpalo = "3"
 ignore = "0.4"
 memchr = "2"
 parking_lot = "0.12"
-toml = "0.8"
+toml = "1"
 
 [build-dependencies]
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 tar = "0.4"
 flate2 = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 [dev-dependencies]
-datatest-stable = "0.2"
+datatest-stable = "0.3"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 

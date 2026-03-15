@@ -414,11 +414,13 @@ workspace symbols on large codebases.
 
 ---
 
-## 19. Formatting proxy (`textDocument/formatting`)
+## 19. Formatting (`textDocument/formatting`)
 
-No outstanding items. The formatting proxy is fully implemented:
-per-tool command configuration, Composer bin-dir auto-detection,
-sequential pipeline execution, and sibling temp file config discovery.
+No outstanding items. Built-in formatting via mago-formatter (PER-CS
+2.0 style) works out of the box. Projects with php-cs-fixer or
+PHP_CodeSniffer in `require-dev` automatically use those external tools
+instead. Explicit tool paths and disable switches are supported via
+`.phpantom.toml`.
 
 ---
 

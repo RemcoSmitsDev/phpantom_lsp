@@ -542,30 +542,21 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri.to_string();
         let config = self.config();
 
-        // If both tools are explicitly disabled, skip entirely.
-        if config.formatting.is_disabled() {
-            return Ok(None);
-        }
-
-        // Resolve the formatting pipeline (zero, one, or two tools).
-        // Read Composer's configured bin directory so auto-detect looks
-        // in the right place (respects `config.bin-dir` in composer.json).
+        // Read Composer metadata for require-dev detection and bin-dir.
         let workspace_root = self.workspace_root.read().clone();
-        let bin_dir: Option<String> = workspace_root.as_deref().and_then(|root| {
+        let composer_json: Option<serde_json::Value> = workspace_root.as_deref().and_then(|root| {
             let content = std::fs::read_to_string(root.join("composer.json")).ok()?;
-            let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-            Some(composer::get_bin_dir(&json))
+            serde_json::from_str(&content).ok()
         });
-        let pipeline = formatting::resolve_pipeline(
+        let bin_dir: Option<String> = composer_json.as_ref().map(composer::get_bin_dir);
+
+        // Resolve the formatting strategy: external tools, built-in, or disabled.
+        let strategy = formatting::resolve_strategy(
             workspace_root.as_deref(),
             &config.formatting,
+            composer_json.as_ref(),
             bin_dir.as_deref(),
         );
-
-        if pipeline.is_empty() {
-            // No tools found — not an error, just nothing to do.
-            return Ok(None);
-        }
 
         // Resolve the file path from the URI for config discovery.
         let file_path = Url::parse(&uri).ok().and_then(|u| u.to_file_path().ok());
@@ -580,15 +571,17 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
 
-        // Run the formatting pipeline (php-cs-fixer then phpcbf).
-        match formatting::run_pipeline(&pipeline, &content, &file_path, &config.formatting) {
-            Ok(edits) => {
-                if edits.is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(edits))
-                }
-            }
+        let php_version = self.php_version();
+
+        // Execute the resolved formatting strategy.
+        match formatting::execute_strategy(
+            &strategy,
+            &content,
+            &file_path,
+            &config.formatting,
+            php_version,
+        ) {
+            Ok(edits) => Ok(edits),
             Err(e) => {
                 self.log(MessageType::ERROR, format!("Formatting failed: {}", e))
                     .await;

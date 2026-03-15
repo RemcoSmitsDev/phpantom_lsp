@@ -175,12 +175,24 @@ impl Backend {
 
                     let (call_range, args_text) = match call_site {
                         Some(cs) => {
+                            let args = extract_arguments(content, cs.args_start, cs.args_end);
+
+                            // When the template contains %class%, the
+                            // expanded replacement already includes the
+                            // subject expression, so the edit range must
+                            // cover the full `$subject->method(...)`, not
+                            // just `method(...)`.
+                            let range_start = if replacement_template.contains("%class%") {
+                                find_subject_start(content, span.start as usize, *is_static)
+                            } else {
+                                span.start as usize
+                            };
+
                             let range = offset_range_to_lsp_range(
                                 content,
-                                span.start as usize,
+                                range_start,
                                 cs.args_end as usize,
                             );
-                            let args = extract_arguments(content, cs.args_start, cs.args_end);
                             (range, args)
                         }
                         None => continue,
@@ -381,6 +393,99 @@ fn summarize_replacement(replacement: &str) -> String {
     } else {
         format!("`{}…`", &replacement[..57])
     }
+}
+
+/// Find the byte offset where the full member-access expression starts,
+/// scanning backward from the member name past the arrow (or `::`) and
+/// the subject expression.
+///
+/// For `$src->legacySetTimezone(...)` where `member_start` points at the
+/// `l`, this returns the offset of `$`.
+fn find_subject_start(content: &str, member_start: usize, is_static: bool) -> usize {
+    let bytes = content.as_bytes();
+
+    // Step 1: skip backward past the arrow/operator.
+    let mut pos = member_start;
+    if pos == 0 {
+        return 0;
+    }
+
+    // Skip any whitespace between operator and member name.
+    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
+        pos -= 1;
+    }
+
+    // Skip the operator itself: `->`, `?->`, or `::`.
+    if is_static {
+        if pos >= 2 && &content[pos - 2..pos] == "::" {
+            pos -= 2;
+        }
+    } else if pos >= 2 && &content[pos - 2..pos] == "->" {
+        pos -= 2;
+        // Also handle `?->` (nullsafe).
+        if pos > 0 && bytes[pos - 1] == b'?' {
+            pos -= 1;
+        }
+    }
+
+    // Skip any whitespace between subject and operator.
+    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
+        pos -= 1;
+    }
+
+    // Step 2: scan backward over the subject expression.
+    // Handle closing `)` or `]` by balancing brackets.
+    if pos > 0 && (bytes[pos - 1] == b')' || bytes[pos - 1] == b']') {
+        let close = bytes[pos - 1];
+        let open = if close == b')' { b'(' } else { b'[' };
+        let mut depth = 1;
+        pos -= 1;
+        while pos > 0 && depth > 0 {
+            pos -= 1;
+            if bytes[pos] == close {
+                depth += 1;
+            } else if bytes[pos] == open {
+                depth -= 1;
+            }
+        }
+        // Continue scanning backward for the identifier/expression
+        // before the parenthesized part (e.g. `func()` or `$arr[]`).
+        while pos > 0
+            && (bytes[pos - 1].is_ascii_alphanumeric()
+                || bytes[pos - 1] == b'_'
+                || bytes[pos - 1] == b'$'
+                || bytes[pos - 1] == b'\\')
+        {
+            pos -= 1;
+        }
+        // Handle chained `->` / `?->` / `::` before the identifier.
+        let mut chain_pos = pos;
+        while chain_pos > 0 && bytes[chain_pos - 1].is_ascii_whitespace() {
+            chain_pos -= 1;
+        }
+        if chain_pos >= 2
+            && (&content[chain_pos - 2..chain_pos] == "->"
+                || &content[chain_pos - 2..chain_pos] == "::")
+        {
+            // There's a deeper chain — recurse from the current pos.
+            return find_subject_start(content, pos, false);
+        }
+        if chain_pos >= 3 && &content[chain_pos - 3..chain_pos] == "?->" {
+            return find_subject_start(content, pos, false);
+        }
+    } else {
+        // Simple identifier: `$var`, `self`, `static`, `ClassName`, etc.
+        while pos > 0
+            && (bytes[pos - 1].is_ascii_alphanumeric()
+                || bytes[pos - 1] == b'_'
+                || bytes[pos - 1] == b'$'
+                || bytes[pos - 1] == b'\\')
+        {
+            pos -= 1;
+        }
+    }
+
+    pos
 }
 
 /// Convert an LSP `Position` to a byte offset in `content`.
@@ -636,5 +741,61 @@ mod tests {
         let summary = summarize_replacement(&long);
         assert!(summary.ends_with("…`"));
         assert!(summary.len() < 70);
+    }
+
+    // ── find_subject_start ──────────────────────────────────────────
+
+    #[test]
+    fn find_subject_start_simple_variable() {
+        let content = "$src->legacySetTimezone('UTC')";
+        // member_start points at 'l' in legacySetTimezone (offset 6)
+        let start = find_subject_start(content, 6, false);
+        assert_eq!(start, 0);
+        assert_eq!(&content[start..6], "$src->");
+    }
+
+    #[test]
+    fn find_subject_start_static_call() {
+        let content = "MyClass::oldMethod()";
+        // member_start points at 'o' in oldMethod (offset 9)
+        let start = find_subject_start(content, 9, true);
+        assert_eq!(start, 0);
+        assert_eq!(&content[start..9], "MyClass::");
+    }
+
+    #[test]
+    fn find_subject_start_nullsafe() {
+        let content = "$obj?->legacyMethod()";
+        // member_start points at 'l' in legacyMethod (offset 7)
+        let start = find_subject_start(content, 7, false);
+        assert_eq!(start, 0);
+        assert_eq!(&content[start..7], "$obj?->");
+    }
+
+    #[test]
+    fn find_subject_start_this() {
+        let content = "$this->legacyMethod()";
+        let start = find_subject_start(content, 7, false);
+        assert_eq!(start, 0);
+        assert_eq!(&content[start..7], "$this->");
+    }
+
+    #[test]
+    fn find_subject_start_with_prefix_code() {
+        // Subject is not at the start of the content.
+        let content = "if (true) { $src->legacyMethod() }";
+        // $src starts at 12, -> at 16, legacyMethod at 18
+        let start = find_subject_start(content, 18, false);
+        assert_eq!(start, 12);
+        assert_eq!(&content[start..18], "$src->");
+    }
+
+    #[test]
+    fn find_subject_start_namespaced_static() {
+        let content = "App\\Models\\User::oldMethod()";
+        // :: at 15..17, oldMethod at 17
+        let start = find_subject_start(content, 17, true);
+        assert_eq!(start, 0);
+        assert_eq!(&content[start..17], "App\\Models\\User::");
     }
 }

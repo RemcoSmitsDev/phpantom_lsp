@@ -62,22 +62,25 @@ impl DiagnosticsConfig {
     }
 }
 
-/// `[formatting]` section — controls the external formatting proxy.
+/// `[formatting]` section — controls the formatting strategy.
 ///
-/// PHPantom does not ship a formatter. Instead, it proxies
-/// `textDocument/formatting` requests to external tools.  Both tools
-/// can run in sequence: php-cs-fixer first, then phpcbf.
+/// PHPantom ships a built-in PHP formatter (mago-formatter) that works
+/// out of the box with PER-CS 2.0 defaults.  Projects that list
+/// `friendsofphp/php-cs-fixer` or `squizlabs/php_codesniffer` in their
+/// `composer.json` `require-dev` automatically use those external tools
+/// instead (resolved via Composer's bin-dir).
 ///
-/// Each tool has its own command setting.  When unset (`None`),
-/// PHPantom auto-detects via `vendor/bin/<tool>` then `$PATH`.
-/// Set to `""` (empty string) to explicitly disable a tool.
+/// Explicit configuration in `.phpantom.toml` always takes priority:
+/// set a tool path to use it, or set it to `""` to disable it.
+/// When no external tool is configured or detected, the built-in
+/// formatter is used.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct FormattingConfig {
     /// Command (path or name) to run php-cs-fixer.
     ///
-    /// - `None` (default) — auto-detect `vendor/bin/php-cs-fixer`,
-    ///   then `php-cs-fixer` on `$PATH`.
+    /// - `None` (default) — check `require-dev` in `composer.json`;
+    ///   if absent, fall back to the built-in formatter.
     /// - `""` — disable php-cs-fixer.
     /// - Any other value — use as the command (e.g.
     ///   `"/usr/local/bin/php-cs-fixer"` or `"php-cs-fixer"`).
@@ -85,8 +88,8 @@ pub struct FormattingConfig {
     pub php_cs_fixer: Option<String>,
     /// Command (path or name) to run phpcbf.
     ///
-    /// - `None` (default) — auto-detect `vendor/bin/phpcbf`, then
-    ///   `phpcbf` on `$PATH`.
+    /// - `None` (default) — check `require-dev` in `composer.json`;
+    ///   if absent, fall back to the built-in formatter.
     /// - `""` — disable phpcbf.
     /// - Any other value — use as the command.
     pub phpcbf: Option<String>,
@@ -260,13 +263,19 @@ pub const DEFAULT_CONFIG_CONTENT: &str = r#"# PHPantom project configuration
 # strategy = "composer"
 
 [formatting]
-# External formatter proxy. PHPantom delegates textDocument/formatting
-# to external tools. Both can run in sequence (php-cs-fixer first,
-# then phpcbf). When unset, each tool is auto-detected via
-# vendor/bin/<tool> then $PATH. Set to "" to disable a tool.
-# php-cs-fixer = "vendor/bin/php-cs-fixer"
+# Built-in formatting works out of the box (PER-CS 2.0 style).
+# Projects with php-cs-fixer or PHP_CodeSniffer in composer.json
+# require-dev automatically use those tools instead.
+#
+# Explicit path: always use this tool, skip require-dev detection.
+# php-cs-fixer = "/usr/local/bin/php-cs-fixer"
+# phpcbf = "/usr/local/bin/phpcbf"
+#
+# Empty string: disable this tool entirely.
+# php-cs-fixer = ""
 # phpcbf = ""
-# Maximum runtime in milliseconds per tool (default 10000).
+#
+# Maximum runtime in milliseconds per external tool (default 10000).
 # timeout = 10000
 
 [phpstan]

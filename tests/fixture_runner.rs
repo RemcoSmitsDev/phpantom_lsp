@@ -723,4 +723,6 @@ async fn run_signature_help(fixture: &ParsedFixture) -> Result<(), String> {
 
 // ─── Harness ────────────────────────────────────────────────────────────────
 
-datatest_stable::harness!(run_fixture, "tests/fixtures", r"\.fixture$",);
+datatest_stable::harness! {
+    { test = run_fixture, root = "tests/fixtures", pattern = r"\.fixture$" },
+}
