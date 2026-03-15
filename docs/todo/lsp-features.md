@@ -3,25 +3,26 @@
 Items are ordered by **impact** (descending), then **effort** (ascending)
 within the same impact tier.
 
-| Label | Scale |
-|---|---|
-| **Impact** | **Critical**, **High**, **Medium-High**, **Medium**, **Low-Medium**, **Low** |
+| Label      | Scale                                                                                                                  |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| **Impact** | **Critical**, **High**, **Medium-High**, **Medium**, **Low-Medium**, **Low**                                           |
 | **Effort** | **Low** (≤ 1 day), **Medium** (2-5 days), **Medium-High** (1-2 weeks), **High** (2-4 weeks), **Very High** (> 1 month) |
 
 ---
 
 ## 2. Document Highlighting (`textDocument/documentHighlight`)
+
 **Impact: Medium-High · Effort: Low**
 
 When the cursor lands on a symbol, highlight all other occurrences of that
-symbol in the current file.  This is a cheap, high-visibility UX
+symbol in the current file. This is a cheap, high-visibility UX
 improvement — users expect it from any modern language server and notice
 its absence immediately.
 
 ### Existing infrastructure
 
 The `SymbolMap` already records every navigable symbol occurrence in
-a file during `update_ast`.  Each `SymbolSpan` carries a `SymbolKind`
+a file during `update_ast`. Each `SymbolSpan` carries a `SymbolKind`
 discriminant (`ClassReference`, `ClassDeclaration`, `MemberAccess`,
 `Variable`, `FunctionCall`, `SelfStaticParent`, `ConstantReference`).
 The highlight handler can reuse these spans directly — no additional
@@ -45,7 +46,7 @@ parsing or AST walking is needed.
        resolved name is the same FQN.
      - `MemberAccess { member_name, is_static, .. }` → match all
        `MemberAccess` spans with the same `member_name` and `is_static`
-       flag.  Optionally resolve the subject type to avoid false positives
+       flag. Optionally resolve the subject type to avoid false positives
        across unrelated classes, but a name-only match is acceptable for v1.
      - `FunctionCall { name }` → match all `FunctionCall` spans with the
        same name.
@@ -72,7 +73,7 @@ parsing or AST walking is needed.
 ### Scope rules
 
 - **Variables** should be scoped to their enclosing function/method/closure
-  body via `find_enclosing_scope`.  A `$user` in method A must not
+  body via `find_enclosing_scope`. A `$user` in method A must not
   highlight `$user` in method B.
 - **Class names, member names, function names, constants** are file-global —
   highlight all occurrences in the file regardless of scope.
@@ -80,6 +81,7 @@ parsing or AST walking is needed.
 ---
 
 ## 3. PHPDoc block generation on `/**`
+
 **Impact: Medium-High · Effort: Medium**
 
 Typing `/**` above a function, class, property, or constant should
@@ -121,16 +123,17 @@ block. This generates the entire block from scratch.
 ---
 
 ## 6. Partial result streaming via `$/progress`
+
 **Impact: Medium · Effort: Medium-High**
 
 The LSP spec (3.17) allows requests that return arrays — such as
 `textDocument/implementation`, `textDocument/references`,
 `workspace/symbol`, and even `textDocument/completion` — to stream
 incremental batches of results via `$/progress` notifications when both
-sides negotiate a `partialResultToken`.  The final RPC response then
+sides negotiate a `partialResultToken`. The final RPC response then
 carries `null` (all items were already sent through progress).
 
-This would let PHPantom deliver the *first* useful results almost
+This would let PHPantom deliver the _first_ useful results almost
 instantly instead of blocking until every source has been scanned.
 
 ### Streaming between existing phases
@@ -139,12 +142,12 @@ instantly instead of blocking until every source has been scanned.
 `docs/ARCHITECTURE.md` § Go-to-Implementation):
 
 1. **Phase 1 — ast_map** (already-parsed classes in memory) — essentially
-   free.  Flush results immediately.
+   free. Flush results immediately.
 2. **Phase 2 — class_index** (FQN → URI entries not yet in ast_map) —
-   loads individual files.  Flush after each batch.
+   loads individual files. Flush after each batch.
 3. **Phase 3 — classmap files** (Composer classmap, user + vendor mixed)
    — iterates unique file paths, applies string pre-filter, parses
-   matches.  This is the widest phase and the best candidate for
+   matches. This is the widest phase and the best candidate for
    within-phase streaming (see below).
 4. **Phase 4 — embedded stubs** (string pre-filter → lazy parse) — flush
    after stubs are checked.
@@ -159,11 +162,11 @@ are still running.
 ### Prioritising user code within Phase 3
 
 Phase 3 iterates the Composer classmap, which contains both user and
-vendor entries.  Currently they are processed in arbitrary order.  A
+vendor entries. Currently they are processed in arbitrary order. A
 simple optimisation: partition classmap file paths into user paths
 (under PSR-4 roots from `composer.json` `autoload` / `autoload-dev`)
 and vendor paths (everything else, typically under `vendor/`), then
-process user paths first.  This way the results most relevant to the
+process user paths first. This way the results most relevant to the
 developer arrive before vendor matches, even within a single phase.
 
 ### Granularity options
@@ -172,7 +175,7 @@ developer arrive before vendor matches, even within a single phase.
   each of the five phase boundaries listed above.
 - **Per-file streaming** — within Phases 3 and 5, emit results as each
   file is parsed from disk instead of waiting for the entire phase to
-  finish.  Phase 3 can iterate hundreds of classmap files and Phase 5
+  finish. Phase 3 can iterate hundreds of classmap files and Phase 5
   recursively walks PSR-4 directories, so per-file flushing would
   significantly improve perceived latency for large projects.
 - **Adaptive batching** — collect results for a short window (e.g. 50 ms)
@@ -180,18 +183,18 @@ developer arrive before vendor matches, even within a single phase.
 
 ### Applicable requests
 
-| Request | Benefit |
-|---|---|
-| `textDocument/implementation` | Already scans five phases; each phase's matches can be streamed |
-| `textDocument/references` (§1) | Will need full-project scanning; streaming is essential |
-| `workspace/symbol` (§5) | Searches every known class/function; early batches feel instant |
-| `textDocument/completion` | Less critical (usually fast), but long chains through vendor code could benefit |
+| Request                        | Benefit                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------- |
+| `textDocument/implementation`  | Already scans five phases; each phase's matches can be streamed                 |
+| `textDocument/references` (§1) | Will need full-project scanning; streaming is essential                         |
+| `workspace/symbol` (§5)        | Searches every known class/function; early batches feel instant                 |
+| `textDocument/completion`      | Less critical (usually fast), but long chains through vendor code could benefit |
 
 ### Implementation sketch
 
 1. Check whether the client sent a `partialResultToken` in the request
    params.
-2. If yes, create a `$/progress` sender.  After each scan phase (or
+2. If yes, create a `$/progress` sender. After each scan phase (or
    per-file, depending on granularity), send a
    `ProgressParams { token, value: [items...] }` notification.
 3. Return `null` as the final response.
@@ -201,6 +204,7 @@ developer arrive before vendor matches, even within a single phase.
 ---
 
 ## 7. Rename (`textDocument/rename`)
+
 **Impact: Medium · Effort: Medium-High**
 
 No rename refactoring support. Rename builds on find-references (§1) —
@@ -225,6 +229,7 @@ can reject a rename before the user types a new name).
 ---
 
 ## 11. No go-to-definition for built-in (stub) functions and constants
+
 **Impact: Medium · Effort: Medium**
 
 Clicking on a built-in function name like `array_map`, `strlen`, or
@@ -247,6 +252,7 @@ limitation.
 ---
 
 ## 15. Document Links (`textDocument/documentLink`)
+
 **Impact: Low-Medium · Effort: Low**
 
 Makes file-referencing strings Ctrl+Clickable in the editor. The
@@ -261,6 +267,7 @@ The highest-value target. Legacy codebases (and even modern ones for
 bootstrap files) use file-based includes extensively.
 
 Supported patterns:
+
 - String literals: `require_once '/path/to/file.php';`
 - `__DIR__` concatenation: `require __DIR__ . '/bootstrap.php';`
 - `dirname(__FILE__)` and `dirname(__DIR__)`: common in older code.
@@ -286,7 +293,7 @@ across all clients.
 ### Implementation
 
 1. **Register the capability** — set `document_link_provider:
-   Some(DocumentLinkOptions { resolve_provider: Some(false) })` in
+Some(DocumentLinkOptions { resolve_provider: Some(false) })` in
    `ServerCapabilities`.
 
 2. **Handler:** Walk the AST and source text, emitting `DocumentLink`
@@ -329,46 +336,13 @@ across all clients.
 ---
 
 ## 16. Type Hierarchy (`textDocument/prepareTypeHierarchy`)
-**Impact: Low-Medium · Effort: Medium**
 
-Shows the class hierarchy (supertypes and subtypes) for a class under
-the cursor. The LSP Type Hierarchy is a three-step protocol:
-
-1. `textDocument/prepareTypeHierarchy` — returns a `TypeHierarchyItem`
-   for the class/interface/trait under the cursor.
-2. `typeHierarchy/supertypes` — returns parents. Walk the
-   `extends`/`implements` chain, which is already resolved during
-   inheritance. Essentially free.
-3. `typeHierarchy/subtypes` — returns children. Calls
-   `find_implementors`, same cost profile as go-to-implementation.
-
-The supertypes direction is cheap (data already computed). The subtypes
-direction has the same cost as go-to-implementation, but it's user-
-initiated (triggered via a command, not automatic), so the latency is
-acceptable.
-
-*Depends on: go-to-implementation infrastructure (already shipped).*
-
-**Implementation:**
-
-1. **Register the capability** — set `type_hierarchy_provider:
-   Some(TypeHierarchyServerCapabilities::Options(...))` in
-   `ServerCapabilities`.
-
-2. **Prepare handler:** Resolve the class under the cursor via
-   `find_or_load_class`. Return a `TypeHierarchyItem` with the class
-   name, kind, URI, range, and selection range.
-
-3. **Supertypes handler:** Walk the class's `extends` and `implements`
-   lists. For each parent/interface, resolve via `find_or_load_class`
-   and return a `TypeHierarchyItem`.
-
-4. **Subtypes handler:** Call `find_implementors` for the class name
-   and return a `TypeHierarchyItem` for each result.
+No outstanding items. Shipped in the current release cycle.
 
 ---
 
 ## 17. Incremental text sync
+
 **Impact: Low-Medium · Effort: Medium**
 
 > **Cross-reference:** This item is also tracked as
@@ -403,8 +377,8 @@ legacy PHP), sending 200KB on every keystroke can become noticeable.
 
 **Relationship with partial result streaming (§6):** These two features
 address different performance axes. Incremental text sync reduces the
-cost of *inbound* data (client to server per keystroke). Partial result
-streaming (§6) reduces the *perceived latency* of *outbound* results
+cost of _inbound_ data (client to server per keystroke). Partial result
+streaming (§6) reduces the _perceived latency_ of _outbound_ results
 (server to client for large result sets). They are independent and can
 be implemented in either order, but if both are planned, incremental
 text sync is lower priority because full-file sync is rarely the
@@ -425,6 +399,7 @@ instead. Explicit tool paths and disable switches are supported via
 ---
 
 ## 20. File rename on class rename
+
 **Impact: Medium · Effort: Medium**
 
 When a class, interface, trait, or enum is renamed and the file follows

@@ -897,7 +897,10 @@ mod tests {
         let result = format_with_mago(input, mago_php_version::PHPVersion::PHP84);
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
         let formatted = result.unwrap();
-        assert_ne!(formatted, input, "Formatter should have changed the messy input");
+        assert_ne!(
+            formatted, input,
+            "Formatter should have changed the messy input"
+        );
         // The formatter should produce proper brace placement.
         assert!(
             formatted.contains("class User\n{"),
@@ -977,10 +980,7 @@ mod tests {
         );
         assert!(result.is_ok());
         let edits = result.unwrap();
-        assert!(
-            edits.is_some(),
-            "Expected edits for messy class, got None"
-        );
+        assert!(edits.is_some(), "Expected edits for messy class, got None");
         let edits = edits.unwrap();
         assert!(!edits.is_empty());
         // The replacement text should have proper PER-CS formatting.

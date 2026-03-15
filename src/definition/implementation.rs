@@ -180,6 +180,7 @@ impl Backend {
             &target_fqn,
             &class_loader,
             target_is_concrete,
+            false,
         );
 
         if implementors.is_empty() {
@@ -393,7 +394,8 @@ impl Backend {
             .class_fqn_for_short(&target_short)
             .unwrap_or(target_short.clone());
 
-        let implementors = self.find_implementors(&target_short, &target_fqn, class_loader, false);
+        let implementors =
+            self.find_implementors(&target_short, &target_fqn, class_loader, false, false);
 
         let member_kind = if interface_class
             .methods
@@ -517,7 +519,7 @@ impl Backend {
                 .unwrap_or(target_short.clone());
 
             let implementors =
-                self.find_implementors(&target_short, &target_fqn, &class_loader, false);
+                self.find_implementors(&target_short, &target_fqn, &class_loader, false, false);
 
             for imp in &implementors {
                 // Check that the implementor actually has this member.
@@ -601,12 +603,20 @@ impl Backend {
     /// results so that only concrete implementations are returned.  When
     /// `true` (used for concrete-class targets), abstract subclasses are
     /// included because the user is exploring the full class hierarchy.
-    fn find_implementors(
+    ///
+    /// When `direct_only` is `true`, only classes/interfaces/enums whose
+    /// `extends`, `implements`, or `use` clause **directly** names the
+    /// target are returned.  Transitive relationships (e.g. a class that
+    /// extends another class that implements the target interface) are
+    /// excluded.  This mode is used by the type hierarchy protocol where
+    /// the client walks the tree one level at a time.
+    pub(crate) fn find_implementors(
         &self,
         target_short: &str,
         target_fqn: &str,
         class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
         include_abstract: bool,
+        direct_only: bool,
     ) -> Vec<ClassInfo> {
         let mut result: Vec<ClassInfo> = Vec::new();
         // Track by FQN to avoid short-name collisions across namespaces.
@@ -630,6 +640,7 @@ impl Backend {
                 target_fqn,
                 class_loader,
                 include_abstract,
+                direct_only,
             ) && seen_fqns.insert(cls_fqn)
             {
                 result.push(cls.clone());
@@ -655,6 +666,7 @@ impl Backend {
                     target_fqn,
                     class_loader,
                     include_abstract,
+                    direct_only,
                 )
             {
                 let cls_fqn = Self::build_fqn(&cls.name, &cls.file_namespace);
@@ -702,6 +714,7 @@ impl Backend {
                         target_fqn,
                         class_loader,
                         include_abstract,
+                        direct_only,
                     ) {
                         seen_fqns.insert(cls_fqn);
                         result.push(ClassInfo::clone(cls));
@@ -731,6 +744,7 @@ impl Backend {
                     target_fqn,
                     class_loader,
                     include_abstract,
+                    direct_only,
                 )
             {
                 let cls_fqn = Self::build_fqn(&cls.name, &cls.file_namespace);
@@ -798,6 +812,7 @@ impl Backend {
                                 target_fqn,
                                 class_loader,
                                 include_abstract,
+                                direct_only,
                             ) {
                                 seen_fqns.insert(cls_fqn);
                                 result.push(ClassInfo::clone(cls));
@@ -827,6 +842,7 @@ impl Backend {
         target_fqn: &str,
         class_loader: &dyn Fn(&str) -> Option<ClassInfo>,
         include_abstract: bool,
+        direct_only: bool,
     ) -> bool {
         // Build the FQN of the candidate class for comparison.
         let cls_fqn = Self::build_fqn(&cls.name, &cls.file_namespace);
@@ -836,15 +852,17 @@ impl Backend {
             return false;
         }
 
-        // Always skip interfaces — they are never implementations.
-        // Skip abstract classes unless `include_abstract` is set (used
-        // when the target is a concrete class and we want the full
-        // subclass hierarchy).
-        if cls.kind == ClassLikeKind::Interface {
-            return false;
-        }
-        if cls.is_abstract && !include_abstract {
-            return false;
+        // In direct_only mode (type hierarchy), interfaces that extend
+        // the target are valid subtypes, and traits that use the target
+        // are too.  In normal mode (go-to-implementation), interfaces
+        // are never implementations.
+        if !direct_only {
+            if cls.kind == ClassLikeKind::Interface {
+                return false;
+            }
+            if cls.is_abstract && !include_abstract {
+                return false;
+            }
         }
 
         // Whether the target has a known FQN (contains a namespace
@@ -865,6 +883,12 @@ impl Backend {
             && (parent == target_fqn || (!has_fqn && short_name(parent) == target_short))
         {
             return true;
+        }
+
+        // In direct_only mode we only care about the immediate
+        // extends/implements/use clauses checked above.
+        if direct_only {
+            return false;
         }
 
         // ── Transitive check: walk the interface-extends chains ─────────
@@ -1030,7 +1054,7 @@ impl Backend {
     /// Get the FQN for a class given its short name, by looking it up in
     /// the `class_index`.
     /// Build a fully-qualified name from a short name and optional namespace.
-    fn build_fqn(short_name: &str, namespace: &Option<String>) -> String {
+    pub(crate) fn build_fqn(short_name: &str, namespace: &Option<String>) -> String {
         match namespace {
             Some(ns) if !ns.is_empty() => format!("{}\\{}", ns, short_name),
             _ => short_name.to_string(),

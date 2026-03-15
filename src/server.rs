@@ -219,6 +219,20 @@ impl LanguageServer for Backend {
         tokio::spawn(async move {
             phpstan_backend.phpstan_worker().await;
         });
+
+        // ── Dynamic capability registration ─────────────────────────
+        // lsp-types 0.94 does not expose a `type_hierarchy_provider`
+        // field on `ServerCapabilities`, so we register the capability
+        // dynamically via `client/registerCapability` instead.
+        if let Some(client) = &self.client {
+            let _ = client
+                .register_capability(vec![Registration {
+                    id: "type-hierarchy".to_string(),
+                    method: "textDocument/prepareTypeHierarchy".to_string(),
+                    register_options: None,
+                }])
+                .await;
+        }
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -536,6 +550,55 @@ impl LanguageServer for Backend {
 
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         self.inlay_hint_request(params).await
+    }
+
+    async fn prepare_type_hierarchy(
+        &self,
+        params: TypeHierarchyPrepareParams,
+    ) -> Result<Option<Vec<TypeHierarchyItem>>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+        self.handle_with_position("prepare_type_hierarchy", &uri, position, |content| {
+            self.prepare_type_hierarchy_impl(&uri, content, position)
+        })
+    }
+
+    async fn supertypes(
+        &self,
+        params: TypeHierarchySupertypesParams,
+    ) -> Result<Option<Vec<TypeHierarchyItem>>> {
+        Ok(self.supertypes_impl(&params.item))
+    }
+
+    async fn subtypes(
+        &self,
+        params: TypeHierarchySubtypesParams,
+    ) -> Result<Option<Vec<TypeHierarchyItem>>> {
+        let backend = self.clone_for_blocking();
+        let item = params.item;
+        let token = match params.work_done_progress_params.work_done_token {
+            Some(t) => Some(t),
+            None => self.progress_create("type_hierarchy_subtypes").await,
+        };
+
+        if let Some(ref tok) = token {
+            self.progress_begin(tok, "Type Hierarchy", Some("Scanning…".to_string()))
+                .await;
+        }
+
+        let result = tokio::task::spawn_blocking(move || backend.subtypes_impl(&item))
+            .await
+            .unwrap_or(None);
+
+        if let Some(ref tok) = token {
+            self.progress_end(tok, Some("Done".to_string())).await;
+        }
+
+        Ok(result)
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {

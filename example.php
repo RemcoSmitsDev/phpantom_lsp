@@ -1759,6 +1759,17 @@ class ReverseImplementationDemo implements GtdPrintable
 }
 
 
+// ── Type Hierarchy ──────────────────────────────────────────────────────────
+// Right-click a class/interface name → "Show Type Hierarchy" to see its
+// supertypes (parent class, implemented interfaces) and subtypes (classes
+// that extend or implement it).
+//
+// Try on GtdPrintable: supertypes → (none), subtypes → GtdPlainPrinter, GtdHtmlPrinter, ReverseImplementationDemo
+// Try on ReverseImplementationDemo: supertypes → GtdPrintable, subtypes → (none)
+// Try on User: supertypes → Model, Renderable, subtypes → AdminUser
+// Try on Model: supertypes → (none), subtypes → User, Bakery, BlogAuthor, ...
+
+
 // ── Context-Aware Class Name Filtering ──────────────────────────────────────
 // Try: erase the class name after each keyword and re-trigger completion.
 //
