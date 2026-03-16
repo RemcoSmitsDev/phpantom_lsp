@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`@see` in deprecation diagnostics.** When a `@deprecated` docblock also contains `@see` tags, the diagnostic message now includes the referenced symbols or URLs. A bare `@deprecated` with `@see NewClass::method()` shows "See: NewClass::method()" and a `@deprecated` with a message shows it in parentheses, e.g. "Use the new API. (see: NewClass::method())".
+
 - **Change visibility.** Code action on any method, property, constant, or promoted constructor parameter offers to change its visibility (`public`, `protected`, `private`). Each alternative is a separate action with kind `refactor.rewrite`.
 - **Update docblock.** Code action on a function or method whose existing docblock is out of sync with its signature. Adds missing `@param` tags, removes stale ones, reorders to match the signature, fixes contradicted types, and removes redundant `@return void`. Refinement types (e.g. `non-empty-string`, `array<int, string>`) are preserved. Descriptions and unrelated tags (`@throws`, `@template`, `@deprecated`) are left untouched.
 - **Syntax error diagnostic.** Parse errors from the Mago parser now appear as Error-severity diagnostics instantly as you type. Covers unexpected tokens, missing semicolons, unclosed strings, unexpected end-of-file, and recursion limit exceeded. When the parser crashes on severely malformed input, a fallback diagnostic is shown on line 1.

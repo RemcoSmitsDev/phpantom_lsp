@@ -2372,3 +2372,282 @@ class OrderService
         unnecessary
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// @see references in @deprecated diagnostics
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn deprecated_class_with_see_reference_shows_see_in_message() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_see.php";
+    let text = r#"<?php
+/**
+ * @deprecated Use NewHelper instead.
+ * @see NewHelper
+ */
+class OldHelper {}
+
+class Consumer {
+    public function run(): void {
+        $x = new OldHelper();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        !deprecated.is_empty(),
+        "Expected at least one deprecated diagnostic"
+    );
+    assert!(
+        deprecated
+            .iter()
+            .any(|d| d.message.contains("see:") && d.message.contains("NewHelper")),
+        "Expected @see reference in deprecated diagnostic message, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_method_with_see_reference_shows_see_in_message() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_method_see.php";
+    let text = r#"<?php
+class Mailer {
+    /**
+     * @deprecated Use sendAsync() instead.
+     * @see Mailer::sendAsync()
+     */
+    public function sendLegacy(): void {}
+
+    public function sendAsync(): void {}
+}
+
+class App {
+    public function run(): void {
+        $m = new Mailer();
+        $m->sendLegacy();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.iter().any(|d| d.message.contains("sendLegacy")
+            && d.message.contains("see:")
+            && d.message.contains("Mailer::sendAsync()")),
+        "Expected @see reference in deprecated method diagnostic, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_bare_with_see_shows_see_as_main_message() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_bare_see.php";
+    let text = r#"<?php
+/**
+ * @deprecated
+ * @see NewClass
+ */
+class OldClass {}
+
+class Consumer {
+    public function run(): void {
+        $x = new OldClass();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        !deprecated.is_empty(),
+        "Expected at least one deprecated diagnostic"
+    );
+    // With bare @deprecated + @see, the message should show "See: NewClass"
+    assert!(
+        deprecated
+            .iter()
+            .any(|d| d.message.contains("See:") && d.message.contains("NewClass")),
+        "Expected 'See: NewClass' in diagnostic for bare @deprecated + @see, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_with_multiple_see_references() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_multi_see.php";
+    let text = r#"<?php
+class Counter {
+    /**
+     * @deprecated Use number_of() instead.
+     * @see number_of()                 Alias.
+     * @see Counter::$items             For the property.
+     * @see https://example.com/docs    Documentation.
+     */
+    public function count(): int { return 0; }
+
+    /** @var list<mixed> */
+    public array $items = [];
+}
+
+class App {
+    public function run(): void {
+        $c = new Counter();
+        $c->count();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated
+            .iter()
+            .any(|d| d.message.contains("see:") && d.message.contains("number_of()")),
+        "Expected @see references in deprecated method diagnostic, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_without_see_unchanged() {
+    // Ensure that existing @deprecated without @see still works as before.
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_no_see.php";
+    let text = r#"<?php
+/** @deprecated Use NewApi instead */
+class LegacyApi {}
+
+class Consumer {
+    public function run(): void {
+        $x = new LegacyApi();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated
+            .iter()
+            .any(|d| d.message.contains("Use NewApi instead")),
+        "Expected deprecation reason without 'see:' when no @see tags, got: {:?}",
+        deprecated
+    );
+    // Should NOT contain "see:" since there are no @see tags
+    assert!(
+        deprecated.iter().all(|d| !d.message.contains("see:")),
+        "Should not contain 'see:' when no @see tags, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_function_with_see_reference() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_func_see.php";
+    let text = r#"<?php
+/**
+ * @deprecated
+ * @see newFunction()
+ */
+function oldFunction(): void {}
+
+class App {
+    public function run(): void {
+        oldFunction();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated
+            .iter()
+            .any(|d| d.message.contains("See:") && d.message.contains("newFunction()")),
+        "Expected @see reference in deprecated function diagnostic, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_property_with_see_reference() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_prop_see.php";
+    let text = r#"<?php
+class Config {
+    /**
+     * @deprecated Use $newSetting instead.
+     * @see Config::$newSetting
+     */
+    public string $oldSetting = '';
+
+    public string $newSetting = '';
+}
+
+class App {
+    public function run(): void {
+        $c = new Config();
+        $c->oldSetting;
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.iter().any(|d| d.message.contains("oldSetting")
+            && d.message.contains("see:")
+            && d.message.contains("Config::$newSetting")),
+        "Expected @see reference in deprecated property diagnostic, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_constant_with_see_reference() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_const_see.php";
+    let text = r#"<?php
+class Features {
+    /**
+     * @deprecated
+     * @see Features::NEW_FLAG
+     */
+    const OLD_FLAG = 1;
+
+    const NEW_FLAG = 2;
+}
+
+class App {
+    public function run(): void {
+        Features::OLD_FLAG;
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.iter().any(|d| d.message.contains("OLD_FLAG")
+            && d.message.contains("See:")
+            && d.message.contains("Features::NEW_FLAG")),
+        "Expected @see reference in deprecated constant diagnostic, got: {:?}",
+        deprecated
+    );
+}

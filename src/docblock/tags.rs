@@ -85,6 +85,80 @@ pub fn has_deprecated_tag(docblock: &str) -> bool {
     extract_deprecation_message(docblock).is_some()
 }
 
+/// Extract all `@see` references from a PHPDoc block.
+///
+/// Returns the raw text after each `@see` tag, which may be:
+///   - A symbol reference: `ClassName`, `ClassName::method()`,
+///     `ClassName::$property`, `functionName()`
+///   - A URL: `https://example.com/docs`
+///   - A doc reference: `doc://getting-started/index`
+///
+/// The full text after `@see` (including any trailing description) is
+/// returned as-is, so `@see MyClass::foo() Use this instead` yields
+/// `"MyClass::foo() Use this instead"`.
+///
+/// This is used alongside [`extract_deprecation_message`] to enrich
+/// deprecated diagnostics with pointers to replacement APIs.
+pub fn extract_see_references(docblock: &str) -> Vec<String> {
+    let inner = docblock
+        .trim()
+        .strip_prefix("/**")
+        .unwrap_or(docblock)
+        .strip_suffix("*/")
+        .unwrap_or(docblock);
+
+    let mut refs = Vec::new();
+
+    for line in inner.lines() {
+        let trimmed = line.trim().trim_start_matches('*').trim();
+        if let Some(rest) = trimmed.strip_prefix("@see ") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                refs.push(rest.to_string());
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("@see\t") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                refs.push(rest.to_string());
+            }
+        }
+    }
+
+    refs
+}
+
+/// Extract the deprecation message from a `@deprecated` PHPDoc tag,
+/// enriched with any `@see` references from the same docblock.
+///
+/// Behaves like [`extract_deprecation_message`] but appends `@see`
+/// references (if present) to the returned message.  This gives
+/// diagnostic consumers a single string that includes both the
+/// deprecation reason and pointers to replacement APIs.
+///
+/// Format examples:
+///   - `@deprecated` alone → `Some("")`
+///   - `@deprecated` + `@see NewClass` → `Some("See: NewClass")`
+///   - `@deprecated Use new API` + `@see NewClass::method()` →
+///     `Some("Use new API (see: NewClass::method())")`
+///   - `@deprecated Use new API` + two `@see` tags →
+///     `Some("Use new API (see: NewClass::method(), OtherFunc())")`
+pub fn extract_deprecation_with_see(docblock: &str) -> Option<String> {
+    let base_msg = extract_deprecation_message(docblock)?;
+    let see_refs = extract_see_references(docblock);
+
+    if see_refs.is_empty() {
+        return Some(base_msg);
+    }
+
+    let see_list = see_refs.join(", ");
+
+    if base_msg.is_empty() {
+        Some(format!("See: {}", see_list))
+    } else {
+        Some(format!("{} (see: {})", base_msg, see_list))
+    }
+}
+
 /// Extract all `@mixin` tags from a class-level docblock.
 ///
 /// PHPDoc `@mixin` tags declare that the annotated class exposes public
@@ -1481,5 +1555,173 @@ mod tests {
     fn has_deprecated_tag_returns_false() {
         let doc = "/** @return string */";
         assert!(!has_deprecated_tag(doc));
+    }
+
+    // ── extract_see_references ──────────────────────────────────────
+
+    #[test]
+    fn see_references_empty_when_no_see_tag() {
+        let doc = "/** @deprecated Use foo() */";
+        assert!(extract_see_references(doc).is_empty());
+    }
+
+    #[test]
+    fn see_references_single_class() {
+        let doc = "/**\n * @deprecated\n * @see NewClass\n */";
+        assert_eq!(extract_see_references(doc), vec!["NewClass"]);
+    }
+
+    #[test]
+    fn see_references_method() {
+        let doc = "/**\n * @deprecated\n * @see MyClass::newMethod()\n */";
+        assert_eq!(extract_see_references(doc), vec!["MyClass::newMethod()"]);
+    }
+
+    #[test]
+    fn see_references_property() {
+        let doc = "/**\n * @deprecated\n * @see MyClass::$items\n */";
+        assert_eq!(extract_see_references(doc), vec!["MyClass::$items"]);
+    }
+
+    #[test]
+    fn see_references_function() {
+        let doc = "/**\n * @deprecated\n * @see number_of()\n */";
+        assert_eq!(extract_see_references(doc), vec!["number_of()"]);
+    }
+
+    #[test]
+    fn see_references_url() {
+        let doc = "/**\n * @see https://example.com/docs\n */";
+        assert_eq!(
+            extract_see_references(doc),
+            vec!["https://example.com/docs"]
+        );
+    }
+
+    #[test]
+    fn see_references_with_description() {
+        let doc = "/**\n * @see MyClass::setItems() To set the items.\n */";
+        assert_eq!(
+            extract_see_references(doc),
+            vec!["MyClass::setItems() To set the items."]
+        );
+    }
+
+    #[test]
+    fn see_references_multiple() {
+        let doc = "/**\n * @deprecated\n * @see number_of() Alias.\n * @see MyClass::$items For the property.\n * @see MyClass::setItems() To set items.\n */";
+        let refs = extract_see_references(doc);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0], "number_of() Alias.");
+        assert_eq!(refs[1], "MyClass::$items For the property.");
+        assert_eq!(refs[2], "MyClass::setItems() To set items.");
+    }
+
+    #[test]
+    fn see_references_with_tab_separator() {
+        let doc = "/**\n * @see\tMyClass\n */";
+        assert_eq!(extract_see_references(doc), vec!["MyClass"]);
+    }
+
+    #[test]
+    fn see_references_bare_see_tag_ignored() {
+        // A bare @see with no reference text should not produce an entry.
+        let doc = "/**\n * @see\n */";
+        assert!(extract_see_references(doc).is_empty());
+    }
+
+    // ── extract_deprecation_with_see ────────────────────────────────
+
+    #[test]
+    fn deprecation_with_see_no_deprecated_tag() {
+        let doc = "/**\n * @see NewClass\n * @return string\n */";
+        assert_eq!(extract_deprecation_with_see(doc), None);
+    }
+
+    #[test]
+    fn deprecation_with_see_no_see_tags() {
+        let doc = "/** @deprecated Use foo() instead */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("Use foo() instead".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_bare_deprecated_plus_see() {
+        let doc = "/**\n * @deprecated\n * @see NewClass\n */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("See: NewClass".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_message_plus_see() {
+        let doc = "/**\n * @deprecated Use the new API.\n * @see NewClass::newMethod()\n */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("Use the new API. (see: NewClass::newMethod())".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_message_plus_multiple_see() {
+        let doc =
+            "/**\n * @deprecated Old approach.\n * @see NewClass::foo()\n * @see OtherFunc()\n */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("Old approach. (see: NewClass::foo(), OtherFunc())".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_bare_deprecated_plus_multiple_see() {
+        let doc =
+            "/**\n * @deprecated\n * @see NewClass\n * @see https://example.com/migration\n */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("See: NewClass, https://example.com/migration".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_url_reference() {
+        let doc =
+            "/**\n * @deprecated\n * @see https://example.com/my/bar Documentation of Foo.\n */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("See: https://example.com/my/bar Documentation of Foo.".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_doc_protocol_reference() {
+        let doc = "/**\n * @deprecated\n * @see doc://getting-started/index Getting started.\n */";
+        assert_eq!(
+            extract_deprecation_with_see(doc),
+            Some("See: doc://getting-started/index Getting started.".to_string())
+        );
+    }
+
+    #[test]
+    fn deprecation_with_see_realistic_phpdoc() {
+        let doc = r#"/**
+ * Count the items.
+ *
+ * @see number_of()                 Alias.
+ * @see MyClass::$items             For the property whose items are counted.
+ * @see MyClass::setItems()         To set the items for this collection.
+ * @see https://example.com/my/bar  Documentation of Foo.
+ *
+ * @deprecated Use number_of() instead.
+ * @return int Indicates the number of items.
+ */"#;
+        let result = extract_deprecation_with_see(doc).unwrap();
+        assert!(result.starts_with("Use number_of() instead."));
+        assert!(result.contains("number_of()"));
+        assert!(result.contains("MyClass::$items"));
+        assert!(result.contains("MyClass::setItems()"));
+        assert!(result.contains("https://example.com/my/bar"));
     }
 }

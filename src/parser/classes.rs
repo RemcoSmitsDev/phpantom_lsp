@@ -109,7 +109,7 @@ fn extract_class_docblock<'a>(
         .collect();
 
     ClassDocblockInfo {
-        deprecation_message: docblock::extract_deprecation_message(doc_text),
+        deprecation_message: docblock::extract_deprecation_with_see(doc_text),
         template_params,
         template_param_bounds,
         extends_generics: docblock::extract_generics_tag(doc_text, "@extends"),
@@ -1624,7 +1624,7 @@ impl Backend {
                         });
 
                         let depr_info = merge_deprecation_info(
-                            docblock_text.and_then(docblock::extract_deprecation_message),
+                            docblock_text.and_then(docblock::extract_deprecation_with_see),
                             &method.attribute_lists,
                             doc_ctx,
                         );
@@ -1845,7 +1845,7 @@ impl Backend {
                         && let Some(doc_text) =
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
                     {
-                        let docblock_msg = docblock::extract_deprecation_message(doc_text);
+                        let docblock_msg = docblock::extract_deprecation_with_see(doc_text);
                         // Use merge_deprecation_info for version-aware suppression
                         // and replacement extraction.  Re-use the attribute lists
                         // from the property variant.
@@ -1913,7 +1913,7 @@ impl Backend {
                     let depr_info = {
                         let docblock_msg = if let Some(ctx) = doc_ctx {
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
-                                .and_then(docblock::extract_deprecation_message)
+                                .and_then(docblock::extract_deprecation_with_see)
                         } else {
                             None
                         };

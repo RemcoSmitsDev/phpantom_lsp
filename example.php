@@ -1998,6 +1998,8 @@ class ClosureMembersDemo
 
 // ── Deprecation Messages ────────────────────────────────────────────────────
 // Hover over deprecated members to see the message text from @deprecated.
+// When @see tags are present alongside @deprecated, the diagnostic message
+// includes the @see references so you know what to migrate to.
 // Completion shows deprecated items with strikethrough styling.
 
 class DeprecationDemo
@@ -2006,16 +2008,18 @@ class DeprecationDemo
     {
         $src = new ScaffoldingDeprecation();
 
-        // Hover: shows "🪦 **deprecated** Use sendAsync() instead."
+        // Diagnostic: "'sendLegacy' is deprecated: Use sendAsync() instead.
+        //   (see: ScaffoldingDeprecation::sendAsync())"
         $src->sendLegacy();
 
-        // Hover: shows bare "🪦 **deprecated**" (no message)
+        // Diagnostic: "'oldProcess' is deprecated: See: ScaffoldingDeprecation::sendAsync()"
+        // (bare @deprecated + @see → "See:" becomes the main text)
         $src->oldProcess();
 
-        // Hover on the property: shows deprecation message
+        // Diagnostic includes @see reference for the property too
         $src->debugMode;
 
-        // Hover on the constant: shows value and deprecation message
+        // Diagnostic includes @see reference for the constant
         ScaffoldingDeprecation::OLD_LIMIT;
 
         // Hover on any constant: shows its value inline (e.g. const MAX_LIMIT = 500;)
@@ -2641,11 +2645,13 @@ class ScaffoldingDeprecation
 {
     /**
      * @deprecated Use sendAsync() instead.
+     * @see ScaffoldingDeprecation::sendAsync()
      */
     public function sendLegacy(): void {}
 
     /**
      * @deprecated
+     * @see ScaffoldingDeprecation::sendAsync()
      */
     public function oldProcess(): void {}
 
@@ -2653,11 +2659,13 @@ class ScaffoldingDeprecation
 
     /**
      * @deprecated Use isDebug() instead.
+     * @see ScaffoldingDeprecation::sendAsync()
      */
     public bool $debugMode = false;
 
     /**
      * @deprecated Use MAX_LIMIT instead.
+     * @see ScaffoldingDeprecation::MAX_LIMIT
      */
     const OLD_LIMIT = 100;
 

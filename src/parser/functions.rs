@@ -120,7 +120,7 @@ impl Backend {
                             .unwrap_or_default();
 
                         let depr_info = merge_deprecation_info(
-                            docblock_text.and_then(docblock::extract_deprecation_message),
+                            docblock_text.and_then(docblock::extract_deprecation_with_see),
                             &func.attribute_lists,
                             Some(ctx),
                         );
