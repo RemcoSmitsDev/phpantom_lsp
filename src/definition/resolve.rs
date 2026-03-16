@@ -439,7 +439,7 @@ impl Backend {
                     drop(idx);
 
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let uri = format!("file://{}", path.display());
+                        let uri = crate::util::path_to_uri(&path);
                         self.update_ast(&uri, &content);
 
                         let dmap = self.global_defines.read();
@@ -468,7 +468,7 @@ impl Backend {
             let paths = self.autoload_file_paths.read().clone();
             let mut lazy_result = None;
             for path in &paths {
-                let uri = format!("file://{}", path.display());
+                let uri = crate::util::path_to_uri(path);
                 if self.ast_map.read().contains_key(&uri) {
                     continue;
                 }
@@ -644,7 +644,7 @@ impl Backend {
         file_path: &std::path::Path,
         fqn: &str,
     ) -> Option<Location> {
-        let target_uri_string = format!("file://{}", file_path.display());
+        let target_uri_string = crate::util::path_to_uri(file_path);
 
         // Ensure the file is parsed and cached.  If the file is already in
         // `ast_map` (opened via `did_open`, loaded from autoload files, or

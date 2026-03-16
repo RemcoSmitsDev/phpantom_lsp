@@ -160,7 +160,7 @@ impl Backend {
     /// go-to-implementation scanner.
     pub(crate) fn parse_and_cache_file(&self, file_path: &Path) -> Option<Vec<Arc<ClassInfo>>> {
         let content = std::fs::read_to_string(file_path).ok()?;
-        let uri = format!("file://{}", file_path.display());
+        let uri = crate::util::path_to_uri(file_path);
         self.parse_and_cache_content(&content, &uri)
     }
 
@@ -319,7 +319,7 @@ impl Backend {
                     drop(idx); // release read lock before parsing
 
                     if let Ok(content) = std::fs::read_to_string(&path) {
-                        let uri = format!("file://{}", path.display());
+                        let uri = crate::util::path_to_uri(&path);
                         self.update_ast(&uri, &content);
 
                         // Re-check global_functions after parsing.
@@ -348,7 +348,7 @@ impl Backend {
             for path in &paths {
                 // Skip files that have already been fully parsed (their
                 // functions are already in global_functions via Phase 1).
-                let uri = format!("file://{}", path.display());
+                let uri = crate::util::path_to_uri(path);
                 if self.ast_map.read().contains_key(&uri) {
                     continue;
                 }

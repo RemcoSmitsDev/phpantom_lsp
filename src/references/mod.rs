@@ -42,7 +42,7 @@ impl Backend {
     /// Returns all locations where the symbol under the cursor is
     /// referenced.  When `include_declaration` is true the declaration
     /// site itself is included in the results.
-    pub(crate) fn find_references(
+    pub fn find_references(
         &self,
         uri: &str,
         content: &str,
@@ -1241,7 +1241,7 @@ impl Backend {
             let phase2_work: Vec<(String, PathBuf)> = php_files
                 .into_iter()
                 .filter_map(|path| {
-                    let uri = format!("file://{}", path.display());
+                    let uri = crate::util::path_to_uri(&path);
                     if existing_uris.contains(&uri) {
                         None
                     } else {

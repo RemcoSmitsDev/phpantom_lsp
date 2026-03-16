@@ -75,6 +75,25 @@ pub(crate) fn catch_panic_unwind_safe<T>(
     catch_panic(label, uri, position, AssertUnwindSafe(f))
 }
 
+/// Convert a filesystem path to a properly percent-encoded `file://` URI string.
+///
+/// This **must** be used instead of `format!("file://{}", path.display())`
+/// everywhere in the codebase.  The `format!` approach produces raw,
+/// un-encoded paths (e.g. `file:///home/user/My Project/Foo.php`) while
+/// LSP clients send URIs through the `Url` type which percent-encodes
+/// special characters (e.g. `file:///home/user/My%20Project/Foo.php`).
+/// When both forms end up as keys in `symbol_maps`, the same file is
+/// indexed twice and every Find References result is duplicated.
+///
+/// Falls back to the raw `format!` form only when `Url::from_file_path`
+/// fails (non-absolute paths on some platforms), which should never
+/// happen in practice.
+pub(crate) fn path_to_uri(path: &Path) -> String {
+    Url::from_file_path(path)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|()| format!("file://{}", path.display()))
+}
+
 /// Recursively collect all `.php` files under a directory, respecting
 /// `.gitignore` rules and skipping hidden directories (`.git`,
 /// `.idea`, etc.).

@@ -1248,9 +1248,9 @@ impl Backend {
         // Store the URI prefix for URI-level skip logic (diagnostics,
         // find references, rename).
         let prefix = if let Ok(canonical) = vendor_path.canonicalize() {
-            format!("file://{}/", canonical.display())
+            format!("{}/", crate::util::path_to_uri(&canonical))
         } else {
-            format!("file://{}/", vendor_path.display())
+            format!("{}/", crate::util::path_to_uri(vendor_path))
         };
         {
             let mut prefixes = self.vendor_uri_prefixes.lock();
@@ -1278,7 +1278,7 @@ impl Backend {
             }
 
             if let Ok(content) = std::fs::read(&canonical) {
-                let uri = format!("file://{}", canonical.display());
+                let uri = crate::util::path_to_uri(&canonical);
 
                 // Lightweight byte-level scan: extract symbol names
                 // without building a full AST.

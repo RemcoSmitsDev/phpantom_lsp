@@ -497,7 +497,7 @@ impl Backend {
                         if let Some(path) = path
                             && let Ok(content) = std::fs::read_to_string(&path)
                         {
-                            let file_uri = format!("file://{}", path.display());
+                            let file_uri = crate::util::path_to_uri(&path);
                             self.update_ast(&file_uri, &content);
                             return self
                                 .global_defines
@@ -512,7 +512,7 @@ impl Backend {
                         // for constants missed by the byte-level scanner.
                         let paths = self.autoload_file_paths.read().clone();
                         for path in &paths {
-                            let uri = format!("file://{}", path.display());
+                            let uri = crate::util::path_to_uri(path);
                             if self.ast_map.read().contains_key(&uri) {
                                 continue;
                             }

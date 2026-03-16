@@ -689,7 +689,7 @@ impl Backend {
         let loaded_uris: HashSet<String> = self.ast_map.read().keys().cloned().collect();
 
         for path in &classmap_paths {
-            let uri = format!("file://{}", path.display());
+            let uri = crate::util::path_to_uri(path);
             if loaded_uris.contains(&uri) {
                 continue;
             }
@@ -790,7 +790,7 @@ impl Backend {
                         continue;
                     }
 
-                    let uri = format!("file://{}", php_file.display());
+                    let uri = crate::util::path_to_uri(&php_file);
                     if loaded_uris_p5.contains(&uri) {
                         continue;
                     }
