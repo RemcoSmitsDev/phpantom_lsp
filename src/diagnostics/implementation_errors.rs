@@ -59,9 +59,12 @@ impl Backend {
                 None => continue,
             };
 
-            // Only concrete classes can have implementation errors.
-            // Abstract classes, interfaces, traits, and enums are skipped.
-            if class_info.kind != ClassLikeKind::Class || class_info.is_abstract {
+            // Only concrete classes and enums can have implementation errors.
+            // Abstract classes, interfaces, and traits are skipped.
+            let is_concrete_class =
+                class_info.kind == ClassLikeKind::Class && !class_info.is_abstract;
+            let is_enum = class_info.kind == ClassLikeKind::Enum;
+            if !is_concrete_class && !is_enum {
                 continue;
             }
 
@@ -88,12 +91,18 @@ impl Backend {
             };
 
             // Build a single diagnostic listing all missing methods.
+            let kind_label = if class_info.kind == ClassLikeKind::Enum {
+                "Enum"
+            } else {
+                "Class"
+            };
+
             let message = if missing.len() == 1 {
                 let m = &missing[0];
                 let source = method_source_description(&class_info, &m.name, &class_loader);
                 format!(
-                    "Class '{}' must implement method '{}()' from {}",
-                    class_info.name, m.name, source
+                    "{} '{}' must implement method '{}()' from {}",
+                    kind_label, class_info.name, m.name, source
                 )
             } else {
                 let method_list: Vec<String> = missing
@@ -104,7 +113,8 @@ impl Backend {
                     })
                     .collect();
                 format!(
-                    "Class '{}' must implement {} methods: {}",
+                    "{} '{}' must implement {} methods: {}",
+                    kind_label,
                     class_info.name,
                     missing.len(),
                     method_list.join(", ")
@@ -391,7 +401,7 @@ trait MyTrait {
     }
 
     #[test]
-    fn no_diagnostic_for_enum() {
+    fn no_diagnostic_for_enum_with_all_methods_implemented() {
         let php = r#"<?php
 interface HasLabel { public function label(): string; }
 enum Color implements HasLabel {
@@ -408,6 +418,58 @@ enum Color implements HasLabel {
             diags.is_empty(),
             "Enum with implemented methods should have no diagnostics"
         );
+    }
+
+    #[test]
+    fn diagnostic_for_enum_missing_interface_method() {
+        let php = r#"<?php
+interface HasLabel { public function label(): string; }
+enum Color implements HasLabel {
+    case Red;
+    case Blue;
+}
+"#;
+        let diags = collect(php);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("Enum"));
+        assert!(diags[0].message.contains("Color"));
+        assert!(diags[0].message.contains("label()"));
+        assert!(diags[0].message.contains("interface"));
+        assert_eq!(diags[0].severity, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn no_diagnostic_for_enum_without_interfaces() {
+        let php = r#"<?php
+enum Suit {
+    case Hearts;
+    case Diamonds;
+}
+"#;
+        let diags = collect(php);
+        assert!(
+            diags.is_empty(),
+            "Enum without interfaces should have no diagnostics"
+        );
+    }
+
+    #[test]
+    fn enum_multiple_missing_methods() {
+        let php = r#"<?php
+interface HasLabel {
+    public function label(): string;
+    public function description(): string;
+}
+enum Color implements HasLabel {
+    case Red;
+}
+"#;
+        let diags = collect(php);
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("Enum"));
+        assert!(diags[0].message.contains("2 methods"));
+        assert!(diags[0].message.contains("label()"));
+        assert!(diags[0].message.contains("description()"));
     }
 
     #[test]

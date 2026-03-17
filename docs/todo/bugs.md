@@ -72,24 +72,6 @@ prefer precise ranges).
 
 ---
 
-## B5. Implementation error diagnostic skips enums
-
-**Impact: Medium · Effort: Low**
-
-PHP enums can implement interfaces and must provide all required
-methods. The filter in `collect_implementation_error_diagnostics`
-skips everything that is not `ClassLikeKind::Class`, so missing
-interface methods on enums are never flagged.
-
-The fix also needs to account for the methods that the engine
-provides automatically on enums (`UnitEnum::cases`,
-`BackedEnum::from`, `BackedEnum::tryFrom`). These should be excluded
-from the "missing" set.
-
-**File:** `src/diagnostics/implementation_errors.rs` L73-76.
-
----
-
 ## B7. Inlay hints: wrong parameter name with mixed named and positional arguments
 
 **Impact: Medium · Effort: Medium**
