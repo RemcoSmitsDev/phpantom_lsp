@@ -28,7 +28,8 @@ use crate::types::*;
 use crate::util::short_name;
 
 use super::class_completion::{
-    ClassItemCtx, ClassItemTexts, class_completion_texts, is_anonymous_class, matches_class_prefix,
+    ClassItemCtx, ClassItemTexts, build_affinity_table, class_edit_texts, is_anonymous_class,
+    matches_class_prefix,
 };
 use crate::completion::builder::analyze_use_block;
 use crate::completion::source::comment_position::position_to_byte_offset;
@@ -177,31 +178,70 @@ pub(crate) fn detect_catch_context(content: &str, position: Position) -> Option<
 ///
 /// Smart exception suggestions sort before any fallback items.
 /// `\Throwable` is always offered but sorted last among the suggestions.
-pub(crate) fn build_catch_completions(ctx: &CatchContext) -> Vec<CompletionItem> {
+/// Resolve a short exception name to a FQN using the file's use-map
+/// and namespace.
+///
+/// Resolution order (matching PHP semantics):
+///   1. If the name starts with `\`, it is already fully-qualified.
+///   2. If the use-map contains an import for the short name, use the
+///      imported FQN.
+///   3. If the file has a namespace, prepend it.
+///   4. Otherwise the name is global (returned as-is).
+fn resolve_exception_fqn(
+    name: &str,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
+) -> String {
+    let trimmed = name.trim_start_matches('\\');
+    // 1. Already FQN (leading backslash).
+    if name.starts_with('\\') {
+        return trimmed.to_string();
+    }
+    // 2. Use-map lookup (by short name / first segment).
+    if let Some(fqn) = use_map.get(trimmed) {
+        return fqn.clone();
+    }
+    // 3. Prepend file namespace.
+    if let Some(ns) = file_namespace {
+        return format!("{}\\{}", ns, trimmed);
+    }
+    // 4. Global.
+    trimmed.to_string()
+}
+
+pub(crate) fn build_catch_completions(
+    ctx: &CatchContext,
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
     let partial_lower = ctx.partial.to_lowercase();
 
     for (idx, exc_type) in ctx.suggested_types.iter().enumerate() {
-        let label = exc_type.trim_start_matches('\\');
+        let fqn = resolve_exception_fqn(exc_type, use_map, file_namespace);
+        let sn = short_name(&fqn);
 
         // Filter by the partial text the user has typed
-        if !partial_lower.is_empty() && !label.to_lowercase().starts_with(&partial_lower) {
+        if !partial_lower.is_empty()
+            && !sn.to_lowercase().starts_with(&partial_lower)
+            && !fqn.to_lowercase().starts_with(&partial_lower)
+        {
             continue;
         }
 
         // Sort \Throwable after specific exception types
         let sort_text = if exc_type.starts_with('\\') {
-            format!("1_{:03}_{}", idx, label)
+            format!("1_{:03}_{}", idx, sn)
         } else {
-            format!("0_{:03}_{}", idx, label)
+            format!("0_{:03}_{}", idx, sn)
         };
 
         items.push(CompletionItem {
-            label: label.to_string(),
+            label: fqn.clone(),
             kind: Some(CompletionItemKind::CLASS),
             detail: Some("Exception thrown in try block".to_string()),
             sort_text: Some(sort_text),
-            filter_text: Some(label.to_string()),
+            filter_text: Some(fqn),
             ..CompletionItem::default()
         });
     }
@@ -481,6 +521,18 @@ impl Backend {
         let mut seen_fqns: HashSet<String> = HashSet::new();
         let mut items: Vec<CompletionItem> = Vec::new();
 
+        // Extract the short-name portion of the typed prefix for match
+        // quality classification.
+        let quality_prefix = match normalized.rfind('\\') {
+            Some(pos) => normalized[pos + 1..].to_string(),
+            None => normalized.to_string(),
+        };
+
+        // Build the affinity table from the file's use-map and namespace.
+        let affinity_table = build_affinity_table(file_use_map, file_namespace);
+
+        let prefix_has_namespace = normalized.contains('\\');
+
         let ctx = ClassItemCtx {
             is_fqn_prefix,
             is_new,
@@ -488,6 +540,9 @@ impl Backend {
             file_use_map,
             use_block: analyze_use_block(content),
             file_namespace,
+            affinity_table,
+            quality_prefix,
+            prefix_has_namespace,
         };
 
         // Build the set of every FQN currently in the ast_map so that
@@ -510,35 +565,26 @@ impl Backend {
             if !self.is_throwable_descendant(fqn, 0) {
                 continue;
             }
-            let (label, base_name, filter, _use_import) = class_completion_texts(
+            let (base_name, filter, _use_import) = class_edit_texts(
                 short_name,
                 fqn,
                 is_fqn_prefix,
                 has_leading_backslash,
                 file_namespace,
-                &prefix_lower,
             );
-            let (insert_text, insert_text_format) = if is_new {
-                Self::build_new_insert(&base_name, None)
-            } else {
-                (base_name, None)
+            let texts = ClassItemTexts {
+                base_name,
+                filter,
+                use_import: None,
             };
-            items.push(CompletionItem {
-                label,
-                kind: Some(CompletionItemKind::CLASS),
-                detail: Some(fqn.clone()),
-                insert_text: Some(insert_text.clone()),
-                insert_text_format,
-                filter_text: Some(filter),
-                sort_text: Some(format!("0_{}", short_name.to_lowercase())),
-                text_edit: fqn_replace_range.map(|range| {
-                    CompletionTextEdit::Edit(TextEdit {
-                        range,
-                        new_text: insert_text.clone(),
-                    })
-                }),
-                ..CompletionItem::default()
-            });
+            items.push(ctx.build_item(
+                texts,
+                fqn,
+                '0',
+                false,
+                |name| Self::build_new_insert(name, None),
+                false,
+            ));
         }
 
         // ── 1b. Same-namespace classes (must be concrete + Throwable)
@@ -600,42 +646,26 @@ impl Backend {
                 if !self.is_throwable_descendant(&fqn, 0) {
                     continue;
                 }
-                let (label, base_name, filter, _use_import) = class_completion_texts(
+                let (base_name, filter, _use_import) = class_edit_texts(
                     &name,
                     &fqn,
                     is_fqn_prefix,
                     has_leading_backslash,
                     file_namespace,
-                    &prefix_lower,
                 );
-                let (insert_text, insert_text_format) = if is_new {
-                    // Same-namespace classes are collected without
-                    // ClassInfo, so we cannot check __construct here.
-                    Self::build_new_insert(&base_name, None)
-                } else {
-                    (base_name, None)
+                let texts = ClassItemTexts {
+                    base_name,
+                    filter,
+                    use_import: None,
                 };
-                items.push(CompletionItem {
-                    label,
-                    kind: Some(CompletionItemKind::CLASS),
-                    detail: Some(fqn),
-                    insert_text: Some(insert_text.clone()),
-                    insert_text_format,
-                    filter_text: Some(filter),
-                    sort_text: Some(format!("1_{}", name.to_lowercase())),
-                    deprecated: if deprecation_message.is_some() {
-                        Some(true)
-                    } else {
-                        None
-                    },
-                    text_edit: fqn_replace_range.map(|range| {
-                        CompletionTextEdit::Edit(TextEdit {
-                            range,
-                            new_text: insert_text.clone(),
-                        })
-                    }),
-                    ..CompletionItem::default()
-                });
+                items.push(ctx.build_item(
+                    texts,
+                    &fqn,
+                    '1',
+                    false,
+                    |name| Self::build_new_insert(name, None),
+                    deprecation_message.is_some(),
+                ));
             }
         }
 
@@ -656,16 +686,14 @@ impl Backend {
                 if !self.is_throwable_descendant(fqn, 0) {
                     continue;
                 }
-                let (label, base_name, filter, use_import) = class_completion_texts(
+                let (base_name, filter, use_import) = class_edit_texts(
                     sn,
                     fqn,
                     is_fqn_prefix,
                     has_leading_backslash,
                     file_namespace,
-                    &prefix_lower,
                 );
                 let mut texts = ClassItemTexts {
-                    label,
                     base_name,
                     filter,
                     use_import,
@@ -674,7 +702,8 @@ impl Backend {
                 items.push(ctx.build_item(
                     texts,
                     fqn,
-                    format!("2_{}", sn.to_lowercase()),
+                    '2',
+                    false,
                     |name| (format!("{name}()$0"), Some(InsertTextFormat::SNIPPET)),
                     false,
                 ));
@@ -699,17 +728,15 @@ impl Backend {
                 if !seen_fqns.insert(fqn.clone()) {
                     continue;
                 }
-                let prefix_num = if sn.ends_with("Exception") { "3" } else { "5" };
-                let (label, base_name, filter, use_import) = class_completion_texts(
+                let demoted = !sn.ends_with("Exception") && !sn.ends_with("Error");
+                let (base_name, filter, use_import) = class_edit_texts(
                     sn,
                     fqn,
                     is_fqn_prefix,
                     has_leading_backslash,
                     file_namespace,
-                    &prefix_lower,
                 );
                 let mut texts = ClassItemTexts {
-                    label,
                     base_name,
                     filter,
                     use_import,
@@ -718,7 +745,8 @@ impl Backend {
                 items.push(ctx.build_item(
                     texts,
                     fqn,
-                    format!("{}_{}", prefix_num, sn.to_lowercase()),
+                    '2',
+                    demoted,
                     |name| (format!("{name}()$0"), Some(InsertTextFormat::SNIPPET)),
                     false,
                 ));
@@ -738,17 +766,15 @@ impl Backend {
             if !seen_fqns.insert(name.to_string()) {
                 continue;
             }
-            let prefix_num = if sn.ends_with("Exception") { "4" } else { "6" };
-            let (label, base_name, filter, use_import) = class_completion_texts(
+            let demoted = !sn.ends_with("Exception") && !sn.ends_with("Error");
+            let (base_name, filter, use_import) = class_edit_texts(
                 sn,
                 name,
                 is_fqn_prefix,
                 has_leading_backslash,
                 file_namespace,
-                &prefix_lower,
             );
             let mut texts = ClassItemTexts {
-                label,
                 base_name,
                 filter,
                 use_import,
@@ -757,7 +783,8 @@ impl Backend {
             items.push(ctx.build_item(
                 texts,
                 name,
-                format!("{}_{}", prefix_num, sn.to_lowercase()),
+                '2',
+                demoted,
                 |name| (format!("{name}()$0"), Some(InsertTextFormat::SNIPPET)),
                 false,
             ));

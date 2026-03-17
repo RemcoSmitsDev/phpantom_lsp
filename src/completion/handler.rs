@@ -35,7 +35,9 @@ use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 
 use crate::Backend;
-use crate::completion::class_completion::{ClassNameContext, detect_class_name_context};
+use crate::completion::class_completion::{
+    ClassCompletionParams, ClassNameContext, detect_class_name_context,
+};
 use crate::completion::named_args::{NamedArgContext, parse_existing_args};
 use crate::docblock::types::PHPDOC_TYPE_KEYWORDS;
 use crate::symbol_map::SymbolKind;
@@ -440,14 +442,16 @@ impl Backend {
                     })
                     .collect();
 
-                let (class_items, class_incomplete) = self.build_class_name_completions(
-                    &ctx.use_map,
-                    &ctx.namespace,
-                    &partial,
-                    content,
-                    ClassNameContext::Any,
-                    position,
-                );
+                let (class_items, class_incomplete) =
+                    self.build_class_name_completions(ClassCompletionParams {
+                        file_use_map: &ctx.use_map,
+                        file_namespace: &ctx.namespace,
+                        prefix: &partial,
+                        content,
+                        context: ClassNameContext::Any,
+                        position,
+                        affinity_table_override: None,
+                    });
                 items.extend(class_items);
 
                 if items.is_empty() {
@@ -538,14 +542,16 @@ impl Backend {
                 })
                 .collect();
 
-        let (class_items, class_incomplete) = self.build_class_name_completions(
-            &ctx.use_map,
-            &ctx.namespace,
-            &th_ctx.partial,
-            content,
-            ClassNameContext::Any,
-            position,
-        );
+        let (class_items, class_incomplete) =
+            self.build_class_name_completions(ClassCompletionParams {
+                file_use_map: &ctx.use_map,
+                file_namespace: &ctx.namespace,
+                prefix: &th_ctx.partial,
+                content,
+                context: ClassNameContext::Any,
+                position,
+                affinity_table_override: None,
+            });
 
         // When a leading space is needed (return type after `:` with no
         // space), prefix the insert text of each class-name item so that
@@ -906,7 +912,11 @@ impl Backend {
         let catch_ctx =
             crate::completion::catch_completion::detect_catch_context(content, position)?;
 
-        let items = crate::completion::catch_completion::build_catch_completions(&catch_ctx);
+        let items = crate::completion::catch_completion::build_catch_completions(
+            &catch_ctx,
+            &ctx.use_map,
+            &ctx.namespace,
+        );
         if catch_ctx.has_specific_types && !items.is_empty() {
             return Some(CompletionResponse::Array(items));
         }
@@ -1048,25 +1058,47 @@ impl Backend {
         // use_map contains the half-typed line (e.g. `use c` → "c")
         // which would appear as a bogus completion item.  Existing
         // imports are irrelevant when writing a new use statement.
-        let use_map_for_completion = if matches!(class_ctx, ClassNameContext::UseImport) {
-            &HashMap::new()
-        } else {
-            &ctx.use_map
-        };
+        let (use_map_for_completion, affinity_override) =
+            if matches!(class_ctx, ClassNameContext::UseImport) {
+                // Pass an empty use_map so the half-typed `use` line
+                // doesn't appear as a bogus completion item, but build
+                // the affinity table from the *real* use-map so that
+                // tier-2 candidates are still ranked by namespace affinity.
+                let table = crate::completion::class_completion::build_affinity_table(
+                    &ctx.use_map,
+                    &ctx.namespace,
+                );
+                (&HashMap::new() as &HashMap<String, String>, Some(table))
+            } else {
+                (&ctx.use_map, None)
+            };
 
-        let (class_items, class_incomplete) = self.build_class_name_completions(
-            use_map_for_completion,
-            &ctx.namespace,
-            &partial,
-            content,
-            class_ctx,
-            position,
-        );
+        let (class_items, class_incomplete) =
+            self.build_class_name_completions(ClassCompletionParams {
+                file_use_map: use_map_for_completion,
+                file_namespace: &ctx.namespace,
+                prefix: &partial,
+                content,
+                context: class_ctx,
+                position,
+                affinity_table_override: affinity_override,
+            });
 
         // ── `use` (class import) → classes + keyword hints ──────────
         if matches!(class_ctx, ClassNameContext::UseImport) {
             // Filter out classes defined in the current file.
             let class_items = filter_current_file_classes(class_items, ctx);
+            // Filter out classes that are already imported via `use`.
+            let already_imported: std::collections::HashSet<&str> =
+                ctx.use_map.values().map(|v| v.as_str()).collect();
+            let class_items: Vec<CompletionItem> = class_items
+                .into_iter()
+                .filter(|item| {
+                    item.detail
+                        .as_deref()
+                        .is_none_or(|fqn| !already_imported.contains(fqn))
+                })
+                .collect();
             let mut items = append_semicolon_to_insert_text(class_items);
             // Inject `function` / `const` keyword suggestions when the
             // partial is a case-sensitive prefix of the keyword.  This

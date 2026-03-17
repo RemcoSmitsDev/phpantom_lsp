@@ -373,7 +373,9 @@ fn test_build_catch_completions_filters_by_partial() {
         ],
         has_specific_types: true,
     };
-    let items = build_catch_completions(&ctx);
+    let empty_use_map = std::collections::HashMap::new();
+    let no_namespace = None;
+    let items = build_catch_completions(&ctx, &empty_use_map, &no_namespace);
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].label, "RuntimeException");
 }
@@ -388,7 +390,9 @@ fn test_build_catch_completions_empty_partial_shows_all() {
         ],
         has_specific_types: true,
     };
-    let items = build_catch_completions(&ctx);
+    let empty_use_map = std::collections::HashMap::new();
+    let no_namespace = None;
+    let items = build_catch_completions(&ctx, &empty_use_map, &no_namespace);
     assert_eq!(items.len(), 2);
 }
 

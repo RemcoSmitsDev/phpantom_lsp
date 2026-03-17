@@ -61,6 +61,10 @@ impl Backend {
         };
 
         // ── Find ClassReference spans overlapping the request range ─────
+        let affinity_table = crate::completion::class_completion::build_affinity_table(
+            &file_use_map,
+            &file_namespace,
+        );
         for span in &symbol_map.spans {
             // Check overlap: span overlaps the request range if
             // span.start < request_end && span.end > request_start
@@ -103,7 +107,7 @@ impl Backend {
             }
 
             // ── Name is unresolved — find import candidates ─────────────
-            let candidates = self.find_import_candidates(ref_name);
+            let candidates = self.find_import_candidates(ref_name, &affinity_table);
 
             if candidates.is_empty() {
                 continue;
@@ -215,6 +219,8 @@ impl Backend {
         symbol_map: &crate::symbol_map::SymbolMap,
         out: &mut Vec<CodeActionOrCommand>,
     ) {
+        let affinity_table =
+            crate::completion::class_completion::build_affinity_table(file_use_map, file_namespace);
         for span in &symbol_map.spans {
             if span.start as usize >= request_end || span.end as usize <= request_start {
                 continue;
@@ -261,7 +267,7 @@ impl Backend {
                 continue;
             }
 
-            let candidates = self.find_import_candidates(subject);
+            let candidates = self.find_import_candidates(subject, &affinity_table);
             if candidates.is_empty() {
                 continue;
             }
@@ -318,7 +324,11 @@ impl Backend {
     /// `name` (case-insensitive).
     ///
     /// Returns a deduplicated, sorted list of fully-qualified class names.
-    fn find_import_candidates(&self, name: &str) -> Vec<String> {
+    fn find_import_candidates(
+        &self,
+        name: &str,
+        affinity_table: &HashMap<String, u32>,
+    ) -> Vec<String> {
         let mut candidates = Vec::new();
         let name_lower = name.to_lowercase();
 
@@ -384,6 +394,14 @@ impl Backend {
 
         candidates.sort();
         candidates.dedup();
+
+        // Sort by affinity score descending, with alphabetical tiebreak.
+        candidates.sort_by(|a, b| {
+            let score_a = crate::completion::class_completion::affinity_score(a, affinity_table);
+            let score_b = crate::completion::class_completion::affinity_score(b, affinity_table);
+            score_b.cmp(&score_a).then_with(|| a.cmp(b))
+        });
+
         candidates
     }
 }
@@ -469,7 +487,8 @@ mod tests {
             );
         }
 
-        let candidates = backend.find_import_candidates("User");
+        let table = std::collections::HashMap::new();
+        let candidates = backend.find_import_candidates("User", &table);
         assert!(candidates.contains(&"App\\Models\\User".to_string()));
         assert!(!candidates.contains(&"App\\Http\\Request".to_string()));
     }
@@ -485,7 +504,8 @@ mod tests {
             );
         }
 
-        let candidates = backend.find_import_candidates("Zygomorphic");
+        let table = std::collections::HashMap::new();
+        let candidates = backend.find_import_candidates("Zygomorphic", &table);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0], "Vendor\\Obscure\\ZYGOMORPHIC");
     }
@@ -503,7 +523,8 @@ mod tests {
             cmap.insert("App\\Foo".to_string(), "/foo.php".into());
         }
 
-        let candidates = backend.find_import_candidates("Foo");
+        let table = std::collections::HashMap::new();
+        let candidates = backend.find_import_candidates("Foo", &table);
         let count = candidates.iter().filter(|c| *c == "App\\Foo").count();
         assert_eq!(count, 1, "should not have duplicates");
     }

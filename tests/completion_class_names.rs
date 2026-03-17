@@ -64,6 +64,19 @@ fn labels(items: &[CompletionItem]) -> Vec<&str> {
     items.iter().map(|i| i.label.as_str()).collect()
 }
 
+/// Find a completion item by its FQN (stored in the `detail` field).
+fn find_by_fqn<'a>(items: &[&'a CompletionItem], fqn: &str) -> Option<&'a CompletionItem> {
+    items
+        .iter()
+        .find(|i| i.detail.as_deref() == Some(fqn))
+        .copied()
+}
+
+/// Extract FQNs from a list of completion item references (via `detail`).
+fn fqns<'a>(items: &'a [&'a CompletionItem]) -> Vec<&'a str> {
+    items.iter().filter_map(|i| i.detail.as_deref()).collect()
+}
+
 // ─── extract_partial_class_name tests ───────────────────────────────────────
 
 #[test]
@@ -377,16 +390,20 @@ async fn test_class_name_completion_includes_use_imports() {
 
     let items = complete_at(&backend, &uri, text, 2, 7).await;
     let classes = class_items(&items);
-    let class_labels: Vec<&str> = classes.iter().map(|i| i.label.as_str()).collect();
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"Service"),
-        "Should include use-imported class 'Service', got: {:?}",
-        class_labels
+        class_fqns.contains(&"Acme\\Service"),
+        "Should include use-imported class 'Acme\\Service', got: {:?}",
+        class_fqns
     );
 
-    // Check that the detail shows the FQN
-    let service_item = classes.iter().find(|i| i.label == "Service").unwrap();
+    // Check that the detail shows the FQN and label is the short name
+    let service_item = find_by_fqn(&classes, "Acme\\Service").unwrap();
+    assert_eq!(
+        service_item.label, "Service",
+        "Label should be the short name"
+    );
     assert_eq!(
         service_item.detail.as_deref(),
         Some("Acme\\Service"),
@@ -416,11 +433,13 @@ async fn test_class_name_completion_use_import_has_higher_sort_priority() {
     let items = complete_at(&backend, &uri, text, 2, 7).await;
     let classes = class_items(&items);
 
-    let widget_item = classes.iter().find(|i| i.label == "Widget").unwrap();
+    let widget_item = find_by_fqn(&classes, "Acme\\Widget").unwrap();
     let sort = widget_item.sort_text.as_deref().unwrap_or("");
+    // New format: {quality}{tier}{affinity:4}{demote}_{name}
+    // Tier '0' = use-imported, at position 1.
     assert!(
-        sort.starts_with("0_"),
-        "Use-imported classes should have sort prefix '0_', got: {:?}",
+        sort.len() > 1 && &sort[1..2] == "0",
+        "Use-imported classes should have source tier '0' at position 1, got: {:?}",
         sort
     );
 }
@@ -497,20 +516,20 @@ async fn test_class_name_completion_same_namespace() {
 
     let items = complete_at(&backend, &uri, text, 4, 16).await;
     let classes = class_items(&items);
-    let class_labels: Vec<&str> = classes.iter().map(|i| i.label.as_str()).collect();
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"UserService"),
-        "Should include same-namespace class 'UserService', got: {:?}",
-        class_labels
+        class_fqns.contains(&"App\\UserService"),
+        "Should include same-namespace class 'App\\UserService', got: {:?}",
+        class_fqns
     );
 
-    // Same-namespace should have sort prefix "1_"
-    let service_item = classes.iter().find(|i| i.label == "UserService").unwrap();
+    // Same-namespace should have source tier '1' at position 1.
+    let service_item = find_by_fqn(&classes, "App\\UserService").unwrap();
     let sort = service_item.sort_text.as_deref().unwrap_or("");
     assert!(
-        sort.starts_with("1_"),
-        "Same-namespace classes should have sort prefix '1_', got: {:?}",
+        sort.len() > 1 && &sort[1..2] == "1",
+        "Same-namespace classes should have source tier '1' at position 1, got: {:?}",
         sort
     );
 }
@@ -561,43 +580,38 @@ async fn test_class_name_completion_from_classmap() {
     let text = concat!("<?php\n", "new Coll\n",);
     let items = complete_at(&backend, &uri, text, 1, 8).await;
     let classes = class_items(&items);
-    let class_labels: Vec<&str> = classes.iter().map(|i| i.label.as_str()).collect();
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"Collection"),
-        "Should include classmap class 'Collection', got: {:?}",
-        class_labels
+        class_fqns.contains(&"Illuminate\\Support\\Collection"),
+        "Should include classmap class 'Illuminate\\Support\\Collection', got: {:?}",
+        class_fqns
     );
 
     // Check Model matches prefix "Mo"
     let text_mo = concat!("<?php\n", "new Mo\n",);
     let items_mo = complete_at(&backend, &uri, text_mo, 1, 6).await;
     let classes_mo = class_items(&items_mo);
-    let labels_mo: Vec<&str> = classes_mo.iter().map(|i| i.label.as_str()).collect();
+    let fqns_mo = fqns(&classes_mo);
     assert!(
-        labels_mo.contains(&"Model"),
-        "Should include classmap class 'Model', got: {:?}",
-        labels_mo
+        fqns_mo.contains(&"Illuminate\\Database\\Eloquent\\Model"),
+        "Should include classmap class 'Illuminate\\Database\\Eloquent\\Model', got: {:?}",
+        fqns_mo
     );
 
     // Check Carbon matches prefix "Car"
     let text_car = concat!("<?php\n", "new Car\n",);
     let items_car = complete_at(&backend, &uri, text_car, 1, 7).await;
     let classes_car = class_items(&items_car);
-    let labels_car: Vec<&str> = classes_car.iter().map(|i| i.label.as_str()).collect();
+    let fqns_car = fqns(&classes_car);
     assert!(
-        labels_car.contains(&"Carbon"),
-        "Should include classmap class 'Carbon', got: {:?}",
-        labels_car
+        fqns_car.contains(&"Carbon\\Carbon"),
+        "Should include classmap class 'Carbon\\Carbon', got: {:?}",
+        fqns_car
     );
 
     // Check that detail shows the FQN
-    let collection = classes
-        .iter()
-        .find(|i| {
-            i.label == "Collection"
-                && i.detail.as_deref() == Some("Illuminate\\Support\\Collection")
-        })
+    let collection = find_by_fqn(&classes, "Illuminate\\Support\\Collection")
         .expect("Should have a Collection item with FQN Illuminate\\Support\\Collection in detail");
     assert_eq!(
         collection.detail.as_deref(),
@@ -631,24 +645,24 @@ async fn test_class_name_completion_from_class_index() {
     let text = concat!("<?php\n", "new Us\n",);
     let items = complete_at(&backend, &uri, text, 1, 6).await;
     let classes = class_items(&items);
-    let class_labels: Vec<&str> = classes.iter().map(|i| i.label.as_str()).collect();
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"User"),
-        "Should include class_index class 'User', got: {:?}",
-        class_labels
+        class_fqns.contains(&"App\\Models\\User"),
+        "Should include class_index class 'App\\Models\\User', got: {:?}",
+        class_fqns
     );
 
     // Check Order matches prefix "Or"
     let text_or = concat!("<?php\n", "new Or\n",);
     let items_or = complete_at(&backend, &uri, text_or, 1, 6).await;
     let classes_or = class_items(&items_or);
-    let labels_or: Vec<&str> = classes_or.iter().map(|i| i.label.as_str()).collect();
+    let fqns_or = fqns(&classes_or);
 
     assert!(
-        labels_or.contains(&"Order"),
-        "Should include class_index class 'Order', got: {:?}",
-        labels_or
+        fqns_or.contains(&"App\\Models\\Order"),
+        "Should include class_index class 'App\\Models\\Order', got: {:?}",
+        fqns_or
     );
 }
 
@@ -703,8 +717,11 @@ async fn test_class_name_completion_deduplicates_by_fqn() {
     let items = complete_at(&backend, &uri, text, 1, 7).await;
     let classes = class_items(&items);
 
-    // Count how many times "Duplicated" appears
-    let dup_count = classes.iter().filter(|i| i.label == "Duplicated").count();
+    // Count how many times "Acme\Duplicated" appears (by FQN in detail)
+    let dup_count = classes
+        .iter()
+        .filter(|i| i.detail.as_deref() == Some("Acme\\Duplicated"))
+        .count();
     assert_eq!(
         dup_count, 1,
         "Should deduplicate classes with the same FQN, got {} occurrences",
@@ -914,22 +931,22 @@ async fn test_class_name_completion_combines_all_sources() {
     let text_cm = concat!("<?php\n", "use App\\IndexedClass;\n", "new Classmap\n",);
     let items_cm = complete_at(&backend, &uri, text_cm, 2, 12).await;
     let classes_cm = class_items(&items_cm);
-    let labels_cm: Vec<&str> = classes_cm.iter().map(|i| i.label.as_str()).collect();
+    let fqns_cm = fqns(&classes_cm);
     assert!(
-        labels_cm.contains(&"ClassmapClass"),
+        fqns_cm.contains(&"Vendor\\ClassmapClass"),
         "Should include classmap class, got: {:?}",
-        labels_cm
+        fqns_cm
     );
 
     // Check use-import / class_index: "Indexed" matches "IndexedClass"
     let text_idx = concat!("<?php\n", "use App\\IndexedClass;\n", "new Indexed\n",);
     let items_idx = complete_at(&backend, &uri, text_idx, 2, 11).await;
     let classes_idx = class_items(&items_idx);
-    let labels_idx: Vec<&str> = classes_idx.iter().map(|i| i.label.as_str()).collect();
+    let fqns_idx = fqns(&classes_idx);
     assert!(
-        labels_idx.contains(&"IndexedClass"),
+        fqns_idx.contains(&"App\\IndexedClass"),
         "Should include use-imported / class_index class, got: {:?}",
-        labels_idx
+        fqns_idx
     );
 }
 
@@ -972,7 +989,8 @@ async fn test_class_name_completion_insert_text_is_short_name() {
     let items = complete_at(&backend, &uri, text, 1, 6).await;
     let classes = class_items(&items);
 
-    let my_class = classes.iter().find(|i| i.label == "MyClass").unwrap();
+    let my_class = find_by_fqn(&classes, "Deep\\Nested\\Namespace\\MyClass")
+        .expect("Should find Deep\\Nested\\Namespace\\MyClass by FQN");
     assert_eq!(
         my_class.insert_text.as_deref(),
         Some("MyClass()$0"),
@@ -1035,10 +1053,7 @@ async fn test_auto_import_classmap_class_adds_use_statement() {
     let items = complete_at(&backend, &uri, text, 4, 8).await;
     let collection = items
         .iter()
-        .find(|i| {
-            i.label == "Collection"
-                && i.detail.as_deref() == Some("Illuminate\\Support\\Collection")
-        })
+        .find(|i| i.detail.as_deref() == Some("Illuminate\\Support\\Collection"))
         .expect("Should have Collection completion");
 
     let edits = collection
@@ -1086,10 +1101,7 @@ async fn test_auto_import_class_index_adds_use_statement() {
     let items = complete_at(&backend, &uri, text, 3, 11).await;
     let payment = items
         .iter()
-        .find(|i| {
-            i.label == "PaymentService"
-                && i.detail.as_deref() == Some("App\\Services\\PaymentService")
-        })
+        .find(|i| i.detail.as_deref() == Some("App\\Services\\PaymentService"))
         .expect("Should have PaymentService completion");
 
     let edits = payment
@@ -1178,7 +1190,7 @@ async fn test_no_auto_import_for_already_imported_class() {
     // The use-imported version (source 1) should be the first match
     let collection = items
         .iter()
-        .find(|i| i.label == "Collection")
+        .find(|i| i.detail.as_deref() == Some("Illuminate\\Support\\Collection"))
         .expect("Should have Collection completion");
 
     assert!(
@@ -1206,7 +1218,7 @@ async fn test_auto_import_inserts_after_php_open_tag() {
     let items = complete_at(&backend, &uri, text, 2, 7).await;
     let widget = items
         .iter()
-        .find(|i| i.label == "Widget" && i.detail.as_deref() == Some("Vendor\\Lib\\Widget"))
+        .find(|i| i.detail.as_deref() == Some("Vendor\\Lib\\Widget"))
         .expect("Should have Widget completion");
 
     let edits = widget
@@ -1263,9 +1275,7 @@ async fn test_auto_import_not_confused_by_trait_use_in_class_body() {
     let items = complete_at(&backend, &uri, text, 13, 19).await;
     let cluster = items
         .iter()
-        .find(|i| {
-            i.label == "DefaultCluster" && i.detail.as_deref() == Some("Cassandra\\DefaultCluster")
-        })
+        .find(|i| i.detail.as_deref() == Some("Cassandra\\DefaultCluster"))
         .expect("Should have DefaultCluster completion");
 
     let edits = cluster
@@ -1482,20 +1492,18 @@ async fn test_new_context_excludes_loaded_abstract_class() {
     );
 
     let items = complete_at(&backend, &uri, text, 4, 7).await;
-    let class_labels: Vec<&str> = class_items(&items)
-        .iter()
-        .map(|i| i.label.as_str())
-        .collect();
+    let classes = class_items(&items);
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"ConcreteWidget"),
+        class_fqns.contains(&"App\\ConcreteWidget"),
         "Should include concrete class, got: {:?}",
-        class_labels
+        class_fqns
     );
     assert!(
-        !class_labels.contains(&"AbstractWidget"),
+        !class_fqns.contains(&"App\\AbstractWidget"),
         "Should exclude loaded abstract class, got: {:?}",
-        class_labels
+        class_fqns
     );
 }
 
@@ -1513,20 +1521,18 @@ async fn test_new_context_excludes_loaded_interface() {
     );
 
     let items = complete_at(&backend, &uri, text, 4, 10).await;
-    let class_labels: Vec<&str> = class_items(&items)
-        .iter()
-        .map(|i| i.label.as_str())
-        .collect();
+    let classes = class_items(&items);
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"HtmlRenderer"),
+        class_fqns.contains(&"App\\HtmlRenderer"),
         "Should include concrete class, got: {:?}",
-        class_labels
+        class_fqns
     );
     assert!(
-        !class_labels.contains(&"Renderable"),
+        !class_fqns.contains(&"App\\Renderable"),
         "Should exclude loaded interface, got: {:?}",
-        class_labels
+        class_fqns
     );
 }
 
@@ -1544,20 +1550,18 @@ async fn test_new_context_excludes_loaded_trait() {
     );
 
     let items = complete_at(&backend, &uri, text, 4, 8).await;
-    let class_labels: Vec<&str> = class_items(&items)
-        .iter()
-        .map(|i| i.label.as_str())
-        .collect();
+    let classes = class_items(&items);
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"Logger"),
+        class_fqns.contains(&"App\\Logger"),
         "Should include concrete class, got: {:?}",
-        class_labels
+        class_fqns
     );
     assert!(
-        !class_labels.contains(&"Loggable"),
+        !class_fqns.contains(&"App\\Loggable"),
         "Should exclude loaded trait, got: {:?}",
-        class_labels
+        class_fqns
     );
 }
 
@@ -1575,20 +1579,18 @@ async fn test_new_context_excludes_loaded_enum() {
     );
 
     let items = complete_at(&backend, &uri, text, 4, 9).await;
-    let class_labels: Vec<&str> = class_items(&items)
-        .iter()
-        .map(|i| i.label.as_str())
-        .collect();
+    let classes = class_items(&items);
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"ColorPicker"),
+        class_fqns.contains(&"App\\ColorPicker"),
         "Should include concrete class, got: {:?}",
-        class_labels
+        class_fqns
     );
     assert!(
-        !class_labels.contains(&"ColorEnum"),
+        !class_fqns.contains(&"App\\ColorEnum"),
         "Should exclude loaded enum, got: {:?}",
-        class_labels
+        class_fqns
     );
 }
 
@@ -1650,64 +1652,93 @@ async fn test_new_context_demotes_likely_non_instantiable_classmap() {
     let items = complete_at(&backend, &uri, text, 1, 11).await;
     let classes = class_items(&items);
 
-    let concrete = classes
-        .iter()
-        .find(|i| i.label == "ConcreteHandler")
-        .expect("Should find ConcreteHandler");
+    // New sort_text format: {quality}{tier}{affinity:4}{gap:3}{demote}_{name}
+    // Demote flag is at position 9 ('0' = normal, '1' = demoted).
+    // Within the same match quality group, demoted items sort after
+    // normal items.
 
-    // These should all be demoted below ConcreteHandler.
+    // Helper: extract the demote flag (position 9) from a sort_text.
+    let demote_flag = |item: &CompletionItem| -> char {
+        item.sort_text
+            .as_deref()
+            .and_then(|s| s.chars().nth(9))
+            .unwrap_or('?')
+    };
+
+    let concrete = find_by_fqn(&classes, "Vendor\\ConcreteHandler")
+        .expect("Should find Vendor\\ConcreteHandler");
+
+    // ConcreteHandler should NOT be demoted.
+    assert_eq!(
+        demote_flag(concrete),
+        '0',
+        "ConcreteHandler should not be demoted, sort_text: {:?}",
+        concrete.sort_text
+    );
+
+    // These should all be demoted (demote flag = '1').
     let demoted_names = [
-        "AbstractHandler",
-        "HandlerAbstract",
-        "HandlerInterface",
-        "IHandler",
-        "BaseHandler",
+        "Vendor\\AbstractHandler",
+        "Vendor\\HandlerAbstract",
+        "Vendor\\HandlerInterface",
+        "Vendor\\IHandler",
+        "Vendor\\BaseHandler",
     ];
     for name in &demoted_names {
-        let item = classes
-            .iter()
-            .find(|i| i.label == *name)
+        let item = find_by_fqn(&classes, name)
             .unwrap_or_else(|| panic!("Should find {} (unloaded, included but demoted)", name));
-        assert!(
-            concrete.sort_text < item.sort_text,
-            "ConcreteHandler ({:?}) should sort before {} ({:?})",
-            concrete.sort_text,
+        assert_eq!(
+            demote_flag(item),
+            '1',
+            "{} should be demoted (flag '1'), sort_text: {:?}",
             name,
             item.sort_text
         );
     }
 
+    // Within the same match quality tier, demoted items sort after
+    // non-demoted items.  Compare pairs that share a match quality.
+    // ConcreteHandler and AbstractHandler both start with a different
+    // letter than the prefix "Handler", so both are substring matches
+    // (quality 'c').  The demote flag should push Abstract below Concrete.
+    let abstract_h = find_by_fqn(&classes, "Vendor\\AbstractHandler")
+        .expect("Should find Vendor\\AbstractHandler");
+    assert!(
+        concrete.sort_text < abstract_h.sort_text,
+        "ConcreteHandler ({:?}) should sort before AbstractHandler ({:?}) \
+         (same match quality, demoted vs normal)",
+        concrete.sort_text,
+        abstract_h.sort_text
+    );
+
     // ImageHandler starts with "I" but second char is lowercase — NOT demoted.
-    let image = classes
-        .iter()
-        .find(|i| i.label == "ImageHandler")
-        .expect("Should find ImageHandler");
+    let image =
+        find_by_fqn(&classes, "Vendor\\ImageHandler").expect("Should find Vendor\\ImageHandler");
     assert_eq!(
-        concrete.sort_text.as_deref().map(|s| &s[..2]),
-        image.sort_text.as_deref().map(|s| &s[..2]),
-        "ImageHandler should have the same sort prefix as ConcreteHandler (not demoted)"
+        demote_flag(image),
+        '0',
+        "ImageHandler should not be demoted, sort_text: {:?}",
+        image.sort_text
     );
 
     // DatabaseHandler contains "base" but not case-sensitive "Base" — NOT demoted.
-    let database = classes
-        .iter()
-        .find(|i| i.label == "DatabaseHandler")
-        .expect("Should find DatabaseHandler");
+    let database = find_by_fqn(&classes, "Vendor\\DatabaseHandler")
+        .expect("Should find Vendor\\DatabaseHandler");
     assert_eq!(
-        concrete.sort_text.as_deref().map(|s| &s[..2]),
-        database.sort_text.as_deref().map(|s| &s[..2]),
-        "DatabaseHandler should have the same sort prefix as ConcreteHandler (not demoted)"
+        demote_flag(database),
+        '0',
+        "DatabaseHandler should not be demoted, sort_text: {:?}",
+        database.sort_text
     );
 
     // BaselineHandler starts with "Base" but 5th char is lowercase — NOT demoted.
-    let baseline = classes
-        .iter()
-        .find(|i| i.label == "BaselineHandler")
-        .expect("Should find BaselineHandler");
+    let baseline = find_by_fqn(&classes, "Vendor\\BaselineHandler")
+        .expect("Should find Vendor\\BaselineHandler");
     assert_eq!(
-        concrete.sort_text.as_deref().map(|s| &s[..2]),
-        baseline.sort_text.as_deref().map(|s| &s[..2]),
-        "BaselineHandler should have the same sort prefix as ConcreteHandler (not demoted)"
+        demote_flag(baseline),
+        '0',
+        "BaselineHandler should not be demoted, sort_text: {:?}",
+        baseline.sort_text
     );
 }
 
@@ -1796,20 +1827,18 @@ async fn test_new_context_excludes_use_imported_interface() {
     );
 
     let items = complete_at(&backend, &uri, text, 3, 9).await;
-    let class_labels: Vec<&str> = class_items(&items)
-        .iter()
-        .map(|i| i.label.as_str())
-        .collect();
+    let classes = class_items(&items);
+    let class_fqns = fqns(&classes);
 
     assert!(
-        class_labels.contains(&"CacheStore"),
+        class_fqns.contains(&"App\\Models\\CacheStore"),
         "Should include concrete use-imported class, got: {:?}",
-        class_labels
+        class_fqns
     );
     assert!(
-        !class_labels.contains(&"Cacheable"),
+        !class_fqns.contains(&"App\\Contracts\\Cacheable"),
         "Should exclude use-imported interface in `new` context, got: {:?}",
-        class_labels
+        class_fqns
     );
 }
 
@@ -1848,7 +1877,7 @@ async fn test_new_context_excludes_class_index_abstract() {
         .collect();
 
     assert!(
-        !class_labels.contains(&"AbstractRepo"),
+        !class_labels.contains(&"App\\AbstractRepo"),
         "Should exclude class_index entry that is loaded as abstract, got: {:?}",
         class_labels
     );
@@ -2033,10 +2062,16 @@ async fn test_fqn_prefix_skips_auto_import() {
     }
 }
 
-/// The filter_text should include the FQN so that the client's fuzzy
-/// filter can match against namespace segments (not just the short name).
+/// In non-FQN mode (no `\` in the typed prefix), filter_text should be
+/// the short name so the editor's fuzzy scorer ranks candidates by
+/// short-name relevance rather than finding accidental substring hits
+/// inside namespace paths.  The FQN remains visible in `label` and
+/// `detail`.
+///
+/// In FQN mode (prefix contains `\`), filter_text should include the
+/// full namespace path so the editor can drill into namespaces.
 #[tokio::test]
-async fn test_filter_text_includes_fqn_for_namespace_matching() {
+async fn test_filter_text_uses_short_name_in_non_fqn_mode() {
     let backend = create_test_backend_with_stubs();
 
     let scaffolding_uri = Url::parse("file:///filter_scaffold.php").unwrap();
@@ -2056,22 +2091,40 @@ async fn test_filter_text_includes_fqn_for_namespace_matching() {
         })
         .await;
 
+    // ── Non-FQN mode: filter_text = short name ─────────────────
     let uri = Url::parse("file:///filter_test.php").unwrap();
     let text = concat!("<?php\n", "new Wid\n",);
 
     let items = complete_at(&backend, &uri, text, 1, 7).await;
     let classes = class_items(&items);
 
-    let widget = classes
-        .iter()
-        .find(|i| i.label == "Widget" && i.detail.as_deref() == Some("Vendor\\Package\\Widget"))
-        .expect("Should find Widget");
+    let widget = find_by_fqn(&classes, "Vendor\\Package\\Widget")
+        .expect("Should find Vendor\\Package\\Widget");
 
     let filter = widget.filter_text.as_deref().unwrap_or("");
-    assert!(
-        filter.contains("Vendor\\Package"),
-        "filter_text should include the FQN so namespace segments are matchable, got: {:?}",
+    assert_eq!(
+        filter, "Widget",
+        "non-FQN filter_text should be the short name, got: {:?}",
         filter
+    );
+
+    // ── FQN mode: filter_text = full path ──────────────────────
+    let uri_fqn = Url::parse("file:///filter_fqn_test.php").unwrap();
+    let text_fqn = concat!("<?php\n", "new Vendor\\Pack\n",);
+
+    let items_fqn = complete_at(&backend, &uri_fqn, text_fqn, 1, 15).await;
+    let classes_fqn = class_items(&items_fqn);
+
+    let widget_fqn = classes_fqn
+        .iter()
+        .find(|i| i.label == "Vendor\\Package\\Widget")
+        .expect("Should find Vendor\\Package\\Widget in FQN mode");
+
+    let filter_fqn = widget_fqn.filter_text.as_deref().unwrap_or("");
+    assert!(
+        filter_fqn.contains("Vendor\\Package"),
+        "FQN-mode filter_text should include the namespace path, got: {:?}",
+        filter_fqn
     );
 }
 
@@ -2199,11 +2252,8 @@ async fn test_fqn_prefix_same_namespace_simplifies_to_short_name() {
         .find(|i| i.detail.as_deref() == Some("Demo\\Box"))
         .expect("Should find Box via FQN prefix \\Demo\\");
 
-    // The label and insert text should be simplified to `Box`.
-    assert_eq!(
-        box_item.label, "Box",
-        "Label should be the relative name 'Box' when FQN is in current namespace"
-    );
+    // The label should be the FQN.
+    assert_eq!(box_item.label, "Demo\\Box", "Label should be the FQN");
 
     // The text_edit should replace `\Demo\` with just `Box`.
     let te = box_item
@@ -2964,10 +3014,10 @@ async fn test_fqn_shortened_via_use_map_prefix() {
         .find(|i| i.detail.as_deref() == Some("Cassandra\\Exception\\AlreadyExistsException"))
         .expect("Should find AlreadyExistsException in completions");
 
-    // The label should be the shortened form, not the full FQN.
+    // The label should be the full FQN.
     assert_eq!(
-        item.label, "Exception\\AlreadyExistsException",
-        "label should be shortened via use-map prefix"
+        item.label, "Cassandra\\Exception\\AlreadyExistsException",
+        "label should be the full FQN"
     );
 
     // The text_edit should insert the shortened form.
@@ -3024,10 +3074,10 @@ async fn test_fqn_shortened_via_use_map_exact_match_leading_backslash() {
         .find(|i| i.detail.as_deref() == Some("Cassandra\\Exception\\AlreadyExistsException"))
         .expect("Should find AlreadyExistsException in completions");
 
-    // The label should be the short imported name.
+    // The label should be the full FQN.
     assert_eq!(
-        item.label, "AlreadyExistsException",
-        "label should be shortened to the imported alias"
+        item.label, "Cassandra\\Exception\\AlreadyExistsException",
+        "label should be the full FQN"
     );
 
     // The text_edit should replace `\Cassa` with just the short name.
@@ -3169,13 +3219,13 @@ async fn test_undiscovered_use_import_still_shown() {
 
     let items = complete_at(&backend, &uri, text, 2, 7).await;
     let cls = class_items(&items);
-    let labels: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
+    let class_fqns = fqns(&cls);
 
     // The imported class should appear even though it's not in any index.
     assert!(
-        labels.contains(&"Widget"),
+        class_fqns.contains(&"Vendor\\SomeLibrary\\Widget"),
         "Undiscovered use-imported class should still appear, got: {:?}",
-        labels
+        class_fqns
     );
 }
 
@@ -4471,5 +4521,230 @@ async fn test_namespace_segments_deduplicated() {
         models_count, 1,
         "App\\Models should appear exactly once, got {} occurrences",
         models_count
+    );
+}
+
+// ─── label is FQN tests ────────────────────────────────────────────────────
+
+/// In a method body (non-FQN mode), the label for a namespaced class
+/// should be the fully-qualified name.
+#[tokio::test]
+async fn test_class_name_completion_label_is_short_name_in_method_body() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/"
+                }
+            }
+        }"#,
+        &[(
+            "src/Models/Order.php",
+            concat!(
+                "<?php\n",
+                "namespace App\\Models;\n",
+                "class Order {\n",
+                "    public function id(): int { return 1; }\n",
+                "}\n",
+            ),
+        )],
+    );
+
+    // Open the Order file so it's in ast_map
+    let order_uri = Url::parse(&format!(
+        "file://{}",
+        _dir.path().join("src/Models/Order.php").display()
+    ))
+    .unwrap();
+    let order_content = std::fs::read_to_string(_dir.path().join("src/Models/Order.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: order_uri,
+                language_id: "php".to_string(),
+                version: 1,
+                text: order_content,
+            },
+        })
+        .await;
+
+    let uri = Url::parse("file:///test_label_details.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "namespace App\\Http\\Controllers;\n",
+        "class TestController {\n",
+        "    public function index() {\n",
+        "        $order = new Orde\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 4, 25).await;
+    let classes = class_items(&items);
+    let order_item = find_by_fqn(&classes, "App\\Models\\Order");
+
+    assert!(
+        order_item.is_some(),
+        "Should find 'App\\Models\\Order' in completions (via detail), got: {:?}",
+        fqns(&classes)
+    );
+    // In non-FQN mode the label is the short name
+    assert_eq!(
+        order_item.unwrap().label,
+        "Order",
+        "Label should be the short name in non-FQN mode"
+    );
+}
+
+/// In a `use` import context, the label should also be the FQN.
+#[tokio::test]
+async fn test_class_name_completion_label_is_fqn_in_use_import() {
+    let (backend, _dir) = create_psr4_workspace(
+        r#"{
+            "autoload": {
+                "psr-4": {
+                    "App\\": "src/"
+                }
+            }
+        }"#,
+        &[(
+            "src/Models/Order.php",
+            concat!("<?php\n", "namespace App\\Models;\n", "class Order {}\n",),
+        )],
+    );
+
+    // Open the Order file so it's in ast_map
+    let order_uri = Url::parse(&format!(
+        "file://{}",
+        _dir.path().join("src/Models/Order.php").display()
+    ))
+    .unwrap();
+    let order_content = std::fs::read_to_string(_dir.path().join("src/Models/Order.php")).unwrap();
+    backend
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: order_uri,
+                language_id: "php".to_string(),
+                version: 1,
+                text: order_content,
+            },
+        })
+        .await;
+
+    let uri = Url::parse("file:///test_use_ld.php").unwrap();
+    let text = concat!("<?php\n", "use App\\Models\\Orde\n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 19).await;
+    let classes = class_items(&items);
+    let order_item = classes.iter().find(|i| i.label == "App\\Models\\Order");
+
+    assert!(
+        order_item.is_some(),
+        "Should find 'App\\Models\\Order' in use-import completions, got: {:?}",
+        classes.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Global classes (no namespace) should have label == short name (FQN == short name).
+#[tokio::test]
+async fn test_class_name_completion_label_is_short_name_for_global() {
+    let backend = create_test_backend_with_stubs();
+
+    let uri = Url::parse("file:///test_global_ld.php").unwrap();
+    let text = concat!("<?php\n", "class MyLocalClass {}\n", "new MyLocal\n",);
+
+    let items = complete_at(&backend, &uri, text, 2, 11).await;
+    let classes = class_items(&items);
+    let local = classes.iter().find(|i| i.label == "MyLocalClass");
+
+    assert!(
+        local.is_some(),
+        "Should find 'MyLocalClass' (FQN == short name for globals), got: {:?}",
+        classes.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+}
+
+/// Classes from the classmap source should have short name as label
+/// and FQN in the detail field when prefix has no namespace separator.
+#[tokio::test]
+async fn test_class_name_completion_classmap_label_is_short_name() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    fs::write(
+        dir.path().join("composer.json"),
+        r#"{"name": "test/project"}"#,
+    )
+    .expect("failed to write composer.json");
+
+    let composer_dir = dir.path().join("vendor").join("composer");
+    fs::create_dir_all(&composer_dir).expect("failed to create vendor/composer");
+    fs::write(
+        composer_dir.join("autoload_classmap.php"),
+        concat!(
+            "<?php\n",
+            "$vendorDir = dirname(__DIR__);\n",
+            "$baseDir = dirname($vendorDir);\n",
+            "return array(\n",
+            "    'Vendor\\\\Payments\\\\Invoice' => $vendorDir . '/pkg/src/Invoice.php',\n",
+            ");\n",
+        ),
+    )
+    .expect("failed to write autoload_classmap.php");
+
+    let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), vec![]);
+    let classmap = parse_autoload_classmap(dir.path(), "vendor");
+    {
+        let mut cm = backend.classmap().write();
+        *cm = classmap;
+    }
+
+    let uri = Url::parse("file:///test_cm_ld.php").unwrap();
+    let text = concat!("<?php\n", "new Invoic\n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+    let classes = class_items(&items);
+    let invoice = find_by_fqn(&classes, "Vendor\\Payments\\Invoice");
+
+    assert!(
+        invoice.is_some(),
+        "Should find 'Vendor\\Payments\\Invoice' from classmap (via detail), got: {:?}",
+        fqns(&classes)
+    );
+    assert_eq!(
+        invoice.unwrap().label,
+        "Invoice",
+        "Label should be the short name in non-FQN mode"
+    );
+}
+
+/// Classes from the class_index source should have short name as label
+/// and FQN in the detail field when prefix has no namespace separator.
+#[tokio::test]
+async fn test_class_name_completion_class_index_label_is_short_name() {
+    let backend = create_test_backend_with_stubs();
+
+    {
+        let mut idx = backend.class_index().write();
+        idx.insert(
+            "Acme\\Billing\\Receipt".to_string(),
+            "file:///acme/Billing/Receipt.php".to_string(),
+        );
+    }
+
+    let uri = Url::parse("file:///test_idx_ld.php").unwrap();
+    let text = concat!("<?php\n", "new Receip\n",);
+
+    let items = complete_at(&backend, &uri, text, 1, 10).await;
+    let classes = class_items(&items);
+    let receipt = find_by_fqn(&classes, "Acme\\Billing\\Receipt");
+
+    assert!(
+        receipt.is_some(),
+        "Should find 'Acme\\Billing\\Receipt' from class_index (via detail), got: {:?}",
+        fqns(&classes)
+    );
+    assert_eq!(
+        receipt.unwrap().label,
+        "Receipt",
+        "Label should be the short name in non-FQN mode"
     );
 }

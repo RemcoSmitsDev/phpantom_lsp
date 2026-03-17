@@ -61,6 +61,19 @@ fn labels(items: &[CompletionItem]) -> Vec<&str> {
     items.iter().map(|i| i.label.as_str()).collect()
 }
 
+/// Find a completion item by its FQN (stored in the `detail` field).
+fn find_by_fqn<'a>(items: &'a [&CompletionItem], fqn: &str) -> Option<&'a CompletionItem> {
+    items
+        .iter()
+        .find(|i| i.detail.as_deref() == Some(fqn))
+        .copied()
+}
+
+/// Extract FQNs from a list of completion items (via the `detail` field).
+fn fqn_labels<'a>(items: &'a [&'a CompletionItem]) -> Vec<&'a str> {
+    items.iter().filter_map(|i| i.detail.as_deref()).collect()
+}
+
 /// Load scaffolding classes into the backend's ast_map so the context
 /// filter can inspect their `ClassLikeKind` / `is_final` / `is_abstract`.
 async fn load_scaffolding(backend: &Backend) {
@@ -467,27 +480,29 @@ async fn test_top_level_use_no_filter() {
 
     let items = complete_at(&backend, &uri, text, 1, 6).await;
     let cls = class_items(&items);
-    let lbls: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
-
     // Top-level `use` should offer all kinds: classes, interfaces,
     // traits, and enums — no kind-filtering should be applied.
     // Labels are FQNs in UseImport context because the user is writing
     // a fully-qualified import statement.
+    // Labels may be short names or FQNs depending on whether the prefix
+    // contains a namespace separator.  Use the `detail` field (which
+    // always holds the FQN) for reliable lookup.
+    let fqns = fqn_labels(&cls);
     assert!(
-        lbls.contains(&"Qx\\QxConcreteClass"),
-        "top-level use should offer classes, got: {lbls:?}"
+        fqns.contains(&"Qx\\QxConcreteClass"),
+        "top-level use should offer classes, got: {fqns:?}"
     );
     assert!(
-        lbls.contains(&"Qx\\QxSomeInterface"),
-        "top-level use should offer interfaces, got: {lbls:?}"
+        fqns.contains(&"Qx\\QxSomeInterface"),
+        "top-level use should offer interfaces, got: {fqns:?}"
     );
     assert!(
-        lbls.contains(&"Qx\\QxSomeTrait"),
-        "top-level use should offer traits, got: {lbls:?}"
+        fqns.contains(&"Qx\\QxSomeTrait"),
+        "top-level use should offer traits, got: {fqns:?}"
     );
     assert!(
-        lbls.contains(&"Qx\\QxSomeEnum"),
-        "top-level use should offer enums, got: {lbls:?}"
+        fqns.contains(&"Qx\\QxSomeEnum"),
+        "top-level use should offer enums, got: {fqns:?}"
     );
 }
 
@@ -805,11 +820,11 @@ async fn test_unloaded_classes_pass_through_filter() {
 
     let items = complete_at(&backend, &uri, text, 1, 31).await;
     let cls = class_items(&items);
-    let lbls: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
+    let fqns = fqn_labels(&cls);
 
     assert!(
-        lbls.contains(&"MysteryClass"),
-        "unloaded classes should pass through the filter, got: {lbls:?}"
+        fqns.contains(&"UnknownKind\\MysteryClass"),
+        "unloaded classes should pass through the filter, got: {fqns:?}"
     );
 }
 
@@ -1567,7 +1582,7 @@ async fn test_classmap_loaded_interface_excluded_from_extends_class() {
     let lbls: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
 
     assert!(
-        !lbls.contains(&"Searchable"),
+        !lbls.contains(&"App\\Contracts\\Searchable"),
         "loaded interface in classmap should be excluded from class extends, got: {lbls:?}"
     );
 }
@@ -1606,7 +1621,7 @@ async fn test_classmap_loaded_trait_excluded_from_implements() {
     let lbls: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
 
     assert!(
-        !lbls.contains(&"Sortable"),
+        !lbls.contains(&"App\\Traits\\Sortable"),
         "loaded trait in classmap should be excluded from implements, got: {lbls:?}"
     );
 }
@@ -1649,9 +1664,9 @@ async fn test_extends_class_demotes_interface_looking_names() {
     items.extend(items_izx);
     let cls = class_items(&items);
 
-    let repo_item = cls.iter().find(|i| i.label == "ZxUserRepository");
-    let iface_item = cls.iter().find(|i| i.label == "ZxUserInterface");
-    let ilogger_item = cls.iter().find(|i| i.label == "IZxLogger");
+    let repo_item = find_by_fqn(&cls, "App\\ZxUserRepository");
+    let iface_item = find_by_fqn(&cls, "App\\ZxUserInterface");
+    let ilogger_item = find_by_fqn(&cls, "App\\IZxLogger");
 
     assert!(repo_item.is_some(), "ZxUserRepository should be present");
     assert!(
@@ -1721,9 +1736,9 @@ async fn test_implements_demotes_abstract_looking_names() {
     items.extend(items_base);
     let cls = class_items(&items);
 
-    let loggable_item = cls.iter().find(|i| i.label == "YxLoggable");
-    let abstract_item = cls.iter().find(|i| i.label == "AbstractYxHandler");
-    let base_item = cls.iter().find(|i| i.label == "BaseYxController");
+    let loggable_item = find_by_fqn(&cls, "App\\YxLoggable");
+    let abstract_item = find_by_fqn(&cls, "App\\AbstractYxHandler");
+    let base_item = find_by_fqn(&cls, "App\\BaseYxController");
 
     assert!(loggable_item.is_some(), "YxLoggable should be present");
     assert!(
@@ -1788,9 +1803,9 @@ async fn test_trait_use_demotes_non_trait_looking_names() {
     items.extend(items_abs);
     let cls = class_items(&items);
 
-    let ts_item = cls.iter().find(|i| i.label == "WxHasTimestamps");
-    let iface_item = cls.iter().find(|i| i.label == "WxUserInterface");
-    let abs_item = cls.iter().find(|i| i.label == "AbstractWxModel");
+    let ts_item = find_by_fqn(&cls, "App\\WxHasTimestamps");
+    let iface_item = find_by_fqn(&cls, "App\\WxUserInterface");
+    let abs_item = find_by_fqn(&cls, "App\\AbstractWxModel");
 
     assert!(ts_item.is_some(), "WxHasTimestamps should be present");
     assert!(
@@ -1840,8 +1855,8 @@ async fn test_instanceof_no_heuristic_demotion() {
     let items = complete_at(&backend, &uri, text, 1, 21).await;
     let cls = class_items(&items);
 
-    let repo_item = cls.iter().find(|i| i.label == "UserRepository");
-    let iface_item = cls.iter().find(|i| i.label == "UserInterface");
+    let repo_item = find_by_fqn(&cls, "App\\UserRepository");
+    let iface_item = find_by_fqn(&cls, "App\\UserInterface");
 
     assert!(repo_item.is_some(), "UserRepository should be present");
     assert!(iface_item.is_some(), "UserInterface should be present");
@@ -1891,8 +1906,8 @@ async fn test_extends_interface_does_not_demote_interface_names() {
     let items = complete_at(&backend, &uri, text, 1, 28).await;
     let cls = class_items(&items);
 
-    let logger_item = cls.iter().find(|i| i.label == "LoggerInterface");
-    let loggable_item = cls.iter().find(|i| i.label == "Loggable");
+    let logger_item = find_by_fqn(&cls, "App\\LoggerInterface");
+    let loggable_item = find_by_fqn(&cls, "App\\Loggable");
 
     assert!(logger_item.is_some(), "LoggerInterface should be present");
     assert!(loggable_item.is_some(), "Loggable should be present");
@@ -1961,9 +1976,10 @@ async fn test_anonymous_class_excluded_plain_context() {
     let cls = class_items(&items);
     let lbls: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
 
+    let fqns = fqn_labels(&cls);
     assert!(
-        lbls.contains(&"AnonContainer"),
-        "plain context should offer AnonContainer, got: {lbls:?}"
+        fqns.contains(&"AnonTest\\AnonContainer"),
+        "plain context should offer AnonContainer, got: {fqns:?}"
     );
     assert!(
         !lbls.iter().any(|l| l.starts_with("__anonymous")),
@@ -2804,7 +2820,7 @@ async fn test_trait_use_filters_stub_use_map_entries() {
     let lbls_e: Vec<&str> = cls_e.iter().map(|i| i.label.as_str()).collect();
 
     assert!(
-        !lbls_e.contains(&"Exception"),
+        !lbls_e.contains(&"Cassandra\\Exception"),
         "stub class Cassandra\\Exception should be excluded from trait use, got: {lbls_e:?}"
     );
 
@@ -2823,11 +2839,11 @@ async fn test_trait_use_filters_stub_use_map_entries() {
     );
     let items_r = complete_at(&backend, &uri_r, text_r, 6, 9).await;
     let cls_r = class_items(&items_r);
-    let lbls_r: Vec<&str> = cls_r.iter().map(|i| i.label.as_str()).collect();
+    let fqns_r = fqn_labels(&cls_r);
 
     assert!(
-        lbls_r.contains(&"RetryPolicy"),
-        "stub trait RetryPolicy should be included in trait use, got: {lbls_r:?}"
+        fqns_r.contains(&"Cassandra\\RetryPolicy"),
+        "stub trait RetryPolicy should be included in trait use, got: {fqns_r:?}"
     );
 }
 
@@ -2856,7 +2872,7 @@ async fn test_trait_use_rejects_unknown_use_map_entries() {
     let lbls: Vec<&str> = cls.iter().map(|i| i.label.as_str()).collect();
 
     assert!(
-        !lbls.contains(&"ExceptionInterface"),
+        !lbls.contains(&"Cassandra\\ExceptionInterface"),
         "unknown use-map entry should be excluded from trait use, got: {lbls:?}"
     );
 }

@@ -35,49 +35,54 @@ use crate::completion::builder::{
 /// suggestions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClassNameContext {
-    /// No special context. Offer all class-like types.
+    /// No specific context — any class-like is valid.
     Any,
-    /// After `new`. Only concrete (non-abstract) classes.
+    /// After `new` keyword — only concrete (non-abstract) classes.
     New,
-    /// After `extends` in a class declaration. Only non-final classes
-    /// (abstract classes are valid targets for extension).
+    /// After `extends` in a class declaration — only non-final,
+    /// non-abstract-only classes.
     ExtendsClass,
-    /// After `extends` in an interface declaration. Only interfaces.
+    /// After `extends` in an interface declaration — only interfaces.
     ExtendsInterface,
-    /// After `implements`. Only interfaces.
+    /// After `implements` — only interfaces.
     Implements,
-    /// `use` inside a class body. Only traits.
+    /// After `use` inside a class body — only traits.
     TraitUse,
-    /// After `instanceof`. Classes, interfaces, and enums (not traits).
+    /// After `instanceof` — classes, interfaces, enums (not traits).
     Instanceof,
-    /// Top-level `use` import (no `function`/`const` keyword).
-    /// Classes, interfaces, traits, and enums only.
+    /// After `use` at the top level — any class (namespace import).
+    /// Treated specially: FQN is always inserted, no `use` text-edit.
     UseImport,
-    /// `use function`. Functions only.
+    /// After `use function` — only functions (handled elsewhere).
     UseFunction,
-    /// `use const`. Constants only.
+    /// After `use const` — only constants (handled elsewhere).
     UseConst,
-    /// After the `namespace` keyword at the top level.
-    /// Only namespace names should be suggested (no class names).
+    /// After `namespace` keyword at the top level — namespace names
+    /// (handled by `namespace_completion`).
     NamespaceDeclaration,
 }
 
 impl ClassNameContext {
-    /// Check whether a loaded `ClassInfo` should be included in
-    /// completion results for this context.
-    pub(crate) fn matches(self, cls: &ClassInfo) -> bool {
-        self.matches_kind_flags(cls.kind, cls.is_abstract, cls.is_final)
+    /// Check whether a `ClassInfo` matches this context.
+    pub(crate) fn matches(&self, cls: &ClassInfo) -> bool {
+        match self {
+            Self::Any => true,
+            Self::New => cls.kind == ClassLikeKind::Class && !cls.is_abstract,
+            Self::ExtendsClass => cls.kind == ClassLikeKind::Class && !cls.is_final,
+            Self::ExtendsInterface => cls.kind == ClassLikeKind::Interface,
+            Self::Implements => cls.kind == ClassLikeKind::Interface,
+            Self::TraitUse => cls.kind == ClassLikeKind::Trait,
+            Self::Instanceof => cls.kind != ClassLikeKind::Trait,
+            Self::UseImport => true,
+            Self::UseFunction | Self::UseConst | Self::NamespaceDeclaration => false,
+        }
     }
 
-    /// Check whether a class-like declaration with the given kind and
-    /// modifier flags should be included in completion results for this
-    /// context.
-    ///
-    /// This is the shared implementation behind both `matches` (which
-    /// takes a full `ClassInfo`) and the lightweight stub scanner (which
-    /// only extracts kind/abstract/final from raw PHP source).
+    /// Check whether a class-like matches this context given only kind
+    /// flags (used when the full `ClassInfo` is not available, e.g.
+    /// scanning a raw stub source).
     pub(crate) fn matches_kind_flags(
-        self,
+        &self,
         kind: ClassLikeKind,
         is_abstract: bool,
         is_final: bool,
@@ -90,122 +95,124 @@ impl ClassNameContext {
             Self::Implements => kind == ClassLikeKind::Interface,
             Self::TraitUse => kind == ClassLikeKind::Trait,
             Self::Instanceof => kind != ClassLikeKind::Trait,
-            // UseFunction, UseConst, and NamespaceDeclaration are handled
-            // specially by the handler — they never reach class-kind filtering.
             Self::UseFunction | Self::UseConst | Self::NamespaceDeclaration => false,
         }
     }
 
-    /// Whether this context restricts completions to class-like names
-    /// only (constants and functions should be suppressed).
-    pub(crate) fn is_class_only(self) -> bool {
-        !matches!(
+    /// Whether only class-like names are valid in this context (as
+    /// opposed to constants and functions).
+    pub(crate) fn is_class_only(&self) -> bool {
+        matches!(
             self,
-            Self::Any | Self::UseFunction | Self::UseConst | Self::NamespaceDeclaration
+            Self::New
+                | Self::ExtendsClass
+                | Self::ExtendsInterface
+                | Self::Implements
+                | Self::TraitUse
+                | Self::Instanceof
+                | Self::UseImport
         )
     }
 
-    /// Whether this context should use constructor snippet insertion
-    /// (only applicable after `new`).
-    pub(crate) fn is_new(self) -> bool {
+    /// Whether this context is `New`.
+    pub(crate) fn is_new(&self) -> bool {
         matches!(self, Self::New)
     }
 
-    /// Whether this context expects a very specific class-like kind
-    /// (trait, interface) where unverifiable use-map entries should be
-    /// rejected rather than shown with benefit of the doubt.
-    pub(crate) fn is_narrow_kind(self) -> bool {
+    /// Whether this context requires a very specific class-like kind
+    /// (trait, interface, etc.) and should reject unverifiable entries.
+    pub(crate) fn is_narrow_kind(&self) -> bool {
         matches!(
             self,
             Self::TraitUse | Self::Implements | Self::ExtendsInterface
         )
     }
 
-    /// Heuristic check: does `short_name` look like a poor match for
-    /// this context based on naming conventions alone?
+    /// Heuristic: names that are unlikely to match this context.
     ///
-    /// Used to demote (not remove) unloaded classes whose kind is
-    /// unknown. For example, `LoggerInterface` is demoted in
-    /// `ExtendsClass` context because it is almost certainly an
-    /// interface, not an extendable class.
-    pub(crate) fn likely_mismatch(self, short_name: &str) -> bool {
+    /// Used to demote (but not exclude) items from classmap/stubs
+    /// where we cannot verify the actual class kind. For example,
+    /// `new AbstractFoo` is very likely wrong.
+    pub(crate) fn likely_mismatch(&self, short_name: &str) -> bool {
         match self {
             Self::New => likely_non_instantiable(short_name),
             Self::ExtendsClass => likely_interface_name(short_name),
-            Self::ExtendsInterface | Self::Implements => likely_non_interface_name(short_name),
+            Self::Implements | Self::ExtendsInterface => likely_non_interface_name(short_name),
             Self::TraitUse => likely_non_instantiable(short_name),
-            Self::Instanceof
-            | Self::Any
-            | Self::UseImport
-            | Self::UseFunction
-            | Self::UseConst
-            | Self::NamespaceDeclaration => false,
+            _ => false,
         }
     }
 }
 
-/// Check whether the keyword `kw` ends exactly at position `end` in `chars`,
-/// with a word boundary before it (i.e. the character at `end - kw.len() - 1`
-/// is not alphanumeric or underscore).
-fn keyword_ends_at(chars: &[char], end: usize, kw: &str) -> bool {
-    let kw_len = kw.len();
+/// Check whether a keyword (case-insensitive) ends exactly at position
+/// `end` in the character array.
+fn keyword_ends_at(chars: &[char], end: usize, keyword: &str) -> bool {
+    let kw_len = keyword.len();
     if end < kw_len {
         return false;
     }
     let start = end - kw_len;
-    for (i, kc) in kw.chars().enumerate() {
-        if chars[start + i] != kc {
-            return false;
-        }
-    }
-    // Word boundary: character before keyword must not be alphanumeric / underscore.
+
+    // The character before the keyword must NOT be alphanumeric or `_`
+    // (otherwise we matched the tail end of a longer identifier).
     if start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
         return false;
     }
-    true
+
+    let candidate: String = chars[start..end].iter().collect();
+    candidate.eq_ignore_ascii_case(keyword)
 }
 
-/// Determine whether `extends` is in a class or interface declaration
-/// by walking backward from the keyword through the class/interface name
-/// to find the declaration keyword.
+/// Determine whether `extends` is in a class or interface declaration.
 fn determine_extends_context(chars: &[char], extends_start: usize) -> ClassNameContext {
-    let mut j = extends_start;
-
-    // Skip whitespace before `extends`.
-    while j > 0 && chars[j - 1].is_ascii_whitespace() {
-        j -= 1;
+    // Walk backward past whitespace, then past any identifier (the
+    // class/interface name itself), then past more whitespace, looking
+    // for the `class` or `interface` keyword.
+    let mut i = extends_start;
+    while i > 0 && chars[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    // Skip over the class/interface name.
+    while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+        i -= 1;
+    }
+    // Skip whitespace.
+    while i > 0 && chars[i - 1].is_ascii_whitespace() {
+        i -= 1;
     }
 
-    // Skip the class/interface name (identifiers + backslash for FQN).
-    while j > 0 && (chars[j - 1].is_alphanumeric() || chars[j - 1] == '_' || chars[j - 1] == '\\') {
-        j -= 1;
+    // Check for `interface` first (longer match).
+    if keyword_ends_at(chars, i, "interface") {
+        return ClassNameContext::ExtendsInterface;
     }
-
-    // Skip whitespace before the name.
-    while j > 0 && chars[j - 1].is_ascii_whitespace() {
-        j -= 1;
+    if keyword_ends_at(chars, i, "class") {
+        return ClassNameContext::ExtendsClass;
     }
-
-    if keyword_ends_at(chars, j, "interface") {
-        ClassNameContext::ExtendsInterface
-    } else {
-        // `class`, `abstract class`, `final class`, `enum` — all
-        // resolve to ExtendsClass (enums can't use extends in PHP,
-        // but if a user writes it, offering classes is reasonable).
-        ClassNameContext::ExtendsClass
+    // Could be after modifiers like `final`, `abstract`, `readonly`.
+    // Walk past those and check again.
+    for _ in 0..5 {
+        while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+            i -= 1;
+        }
+        while i > 0 && chars[i - 1].is_ascii_whitespace() {
+            i -= 1;
+        }
+        if keyword_ends_at(chars, i, "class") {
+            return ClassNameContext::ExtendsClass;
+        }
     }
+    // Fallback — allow anything.
+    ClassNameContext::ExtendsClass
 }
 
-/// Compute the brace depth at a given character offset by counting
-/// unmatched `{` and `}` from the start of the content.
+/// Count the brace depth at a given character position.
 ///
-/// This is a simple heuristic that does not account for braces inside
-/// strings or comments, but is sufficient for detecting whether the
-/// cursor is inside a class body.
-fn brace_depth_at(chars: &[char], offset: usize) -> i32 {
-    let mut depth: i32 = 0;
-    for &ch in &chars[..offset] {
-        match ch {
+/// Used to distinguish top-level `use` (namespace import) from `use`
+/// inside a class body (trait use).
+fn brace_depth_at(chars: &[char], pos: usize) -> i32 {
+    let mut depth = 0i32;
+    for &c in &chars[..pos] {
+        match c {
             '{' => depth += 1,
             '}' => depth -= 1,
             _ => {}
@@ -214,14 +221,11 @@ fn brace_depth_at(chars: &[char], offset: usize) -> i32 {
     depth
 }
 
-/// Detect the syntactic context for class name completion at the given
-/// cursor position.
+/// Detect the syntactic context for a class name being typed at
+/// `position`.
 ///
-/// Walks backward from the cursor through the partial identifier,
-/// whitespace, and comma-separated lists to find the governing keyword
-/// (`extends`, `implements`, `use`, `instanceof`, `new`).
-///
-/// Returns `ClassNameContext::Any` when no special context is detected.
+/// Walks backward from the cursor past identifiers, whitespace, and
+/// comma-separated lists to find the preceding keyword.
 pub(crate) fn detect_class_name_context(content: &str, position: Position) -> ClassNameContext {
     let chars: Vec<char> = content.chars().collect();
     let Some(offset) = position_to_char_offset(&chars, position) else {
@@ -314,103 +318,93 @@ pub(crate) fn detect_class_name_context(content: &str, position: Position) -> Cl
     ClassNameContext::Any
 }
 
-/// Quickly scan raw PHP source to determine the `ClassLikeKind` (and
-/// `is_abstract` / `is_final` flags) of the declaration matching
-/// `name`, without performing a full parse.
+/// Detect the class-like kind from raw PHP stub source without
+/// full parsing.
 ///
-/// Searches for `{keyword} {short_name}` where keyword is one of
-/// `interface`, `trait`, `enum`, `abstract class`, `final class`, or
-/// `class`.  The short name must be followed by a non-identifier
-/// character to avoid partial matches (e.g. matching `Foo` inside
-/// `FooBar`).
-///
-/// Returns `None` if the declaration cannot be found (e.g. the stub
-/// file doesn't contain this particular class).
+/// Looks for a declaration line like `class Foo`, `interface Bar`,
+/// `trait Baz`, or `enum Qux` and returns the kind along with
+/// `is_abstract` and `is_final` flags.
 pub(crate) fn detect_stub_class_kind(
-    name: &str,
+    class_name: &str,
     source: &str,
 ) -> Option<(ClassLikeKind, bool, bool)> {
-    let short = short_name(name);
-    let bytes = source.as_bytes();
+    let sn = short_name(class_name);
+    // Quick rejection: the short name must appear somewhere in the
+    // source (a necessary condition for a declaration line).
+    if !source.contains(sn) {
+        return None;
+    }
 
-    let mut search_from = 0;
-    while let Some(rel_pos) = source[search_from..].find(short) {
-        let abs_pos = search_from + rel_pos;
-
-        // The name must be followed by a non-identifier character (or EOF).
-        let after = abs_pos + short.len();
-        if after < bytes.len() {
-            let next = bytes[after];
-            if next.is_ascii_alphanumeric() || next == b'_' {
-                search_from = abs_pos + 1;
-                continue;
-            }
-        }
-
-        // The name must be preceded by a space (the keyword separator).
-        if abs_pos == 0 || bytes[abs_pos - 1] != b' ' {
-            search_from = abs_pos + 1;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        // Skip comments and blank lines.
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('*')
+            || trimmed.starts_with("/*")
+        {
             continue;
         }
 
-        // Look at the text before the name to find the declaration keyword.
-        let before = source[..abs_pos].trim_end();
-
-        if before.ends_with("interface") {
-            return Some((ClassLikeKind::Interface, false, false));
-        }
-        if before.ends_with("trait") {
-            return Some((ClassLikeKind::Trait, false, false));
-        }
-        if before.ends_with("enum") {
-            return Some((ClassLikeKind::Enum, false, false));
-        }
-        if let Some(rest) = before.strip_suffix("class") {
-            let mut pre_class = rest.trim_end();
-            // PHP 8.2 allows `readonly` between abstract/final and class
-            // (e.g. `final readonly class Foo`).  Strip it so the
-            // abstract/final check sees the right trailing keyword.
-            if let Some(before_readonly) = pre_class.strip_suffix("readonly") {
-                pre_class = before_readonly.trim_end();
+        // We're looking for `<modifiers> class|interface|trait|enum ShortName`.
+        // Split by whitespace and find the keyword + name pair.
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+        for (idx, token) in tokens.iter().enumerate() {
+            let kind = match token.to_lowercase().as_str() {
+                "class" => Some(ClassLikeKind::Class),
+                "interface" => Some(ClassLikeKind::Interface),
+                "trait" => Some(ClassLikeKind::Trait),
+                "enum" => Some(ClassLikeKind::Enum),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                // The token after the keyword should be the class name
+                // (possibly followed by `{`, `extends`, etc.).
+                if let Some(name_token) = tokens.get(idx + 1) {
+                    let name = name_token.trim_end_matches(['{', ':']);
+                    if name == sn {
+                        let prefix = &tokens[..idx];
+                        let is_abstract = prefix.iter().any(|t| t.eq_ignore_ascii_case("abstract"));
+                        let is_final = prefix.iter().any(|t| t.eq_ignore_ascii_case("final"));
+                        return Some((kind, is_abstract, is_final));
+                    }
+                }
             }
-            let is_abstract = pre_class.ends_with("abstract");
-            let is_final = pre_class.ends_with("final");
-            return Some((ClassLikeKind::Class, is_abstract, is_final));
         }
-
-        search_from = abs_pos + 1;
     }
+
     None
 }
 
-/// Heuristic: does the name look like an interface?
-///
-/// Matches `*Interface` suffix and `I[A-Z]` prefix (C#-style).
-fn likely_interface_name(short_name: &str) -> bool {
-    if short_name.to_ascii_lowercase().ends_with("interface") {
-        return true;
-    }
-    // I[A-Z] prefix — C#-style interface naming (ILogger, IRepository).
-    if short_name.starts_with('I') && short_name.len() >= 2 {
-        let second = short_name.as_bytes()[1];
-        if second.is_ascii_uppercase() {
+/// Heuristic: names that look like interfaces (`IFoo`, `FooInterface`).
+fn likely_interface_name(name: &str) -> bool {
+    if name.starts_with('I') && name.len() > 1 {
+        let second = name.chars().nth(1).unwrap();
+        if second.is_uppercase() {
             return true;
         }
+    }
+    if name.ends_with("Interface") {
+        return true;
     }
     false
 }
 
-/// Heuristic: does the name look like an abstract / base class rather
-/// than an interface?
+/// Heuristic: names that positively look like non-interface types.
 ///
-/// Matches `Abstract*`, `*Abstract`, and `Base[A-Z]*`.
-fn likely_non_interface_name(short_name: &str) -> bool {
-    let lower = short_name.to_ascii_lowercase();
-    if lower.ends_with("abstract") || lower.starts_with("abstract") {
+/// Used to demote unlikely interface candidates in `Implements` and
+/// `ExtendsInterface` contexts. Only returns `true` when the name
+/// matches a known non-interface naming pattern (Abstract*, *Abstract,
+/// Base[A-Z]*). Names that don't match any pattern are left alone
+/// (returns `false`).
+fn likely_non_interface_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("abstract") || lower.ends_with("abstract") {
         return true;
     }
-    if short_name.starts_with("Base") && short_name.len() >= 5 {
-        let fifth = short_name.as_bytes()[4];
+    // `Base[A-Z]` prefix — e.g. `BaseController`, `BaseModel`.
+    if name.starts_with("Base") && name.len() >= 5 {
+        let fifth = name.as_bytes()[4];
         if fifth.is_ascii_uppercase() {
             return true;
         }
@@ -418,37 +412,41 @@ fn likely_non_interface_name(short_name: &str) -> bool {
     false
 }
 
-/// Heuristic check for class names that are unlikely to be instantiable.
+/// Heuristic: names that look like they cannot be instantiated.
 ///
-/// Returns `true` when the short name matches common naming conventions
-/// for abstract classes and interfaces:
-///
-/// - **Abstract:** case-insensitive `"abstract"` as prefix or suffix
-///   (e.g. `AbstractController`, `HandlerAbstract`)
-/// - **Interface:** case-insensitive `"interface"` as suffix
-///   (e.g. `LoggerInterface`)
-/// - **I-prefix:** `I` followed by an uppercase letter
-///   (e.g. `ILogger`, `IRepository` — C#-style interface naming)
-/// - **Base-prefix:** `Base` followed by an uppercase letter
-///   (e.g. `BaseController`, `BaseModel`)
-fn likely_non_instantiable(short_name: &str) -> bool {
-    likely_interface_name(short_name) || likely_non_interface_name(short_name)
+/// Combines interface-like names, abstract-like names, and trait-like
+/// names. Used to demote (but not exclude) classmap/stub items in
+/// `new` context.
+fn likely_non_instantiable(name: &str) -> bool {
+    if likely_interface_name(name) {
+        return true;
+    }
+    if name.starts_with("Abstract") {
+        return true;
+    }
+    // `Base[A-Z]` prefix — e.g. `BaseController`, `BaseModel`.
+    // `Baseline`, `Based`, etc. are NOT matched (5th char is lowercase).
+    if name.starts_with("Base") && name.len() >= 5 {
+        let fifth = name.as_bytes()[4];
+        if fifth.is_ascii_uppercase() {
+            return true;
+        }
+    }
+    if name.ends_with("Abstract") || name.ends_with("Trait") {
+        return true;
+    }
+    false
 }
 
-/// Check whether a class name is a synthetic anonymous class name
-/// (e.g. `__anonymous@27775`).  These are internal bookkeeping entries
-/// that should never appear in completion results.
+/// Whether a class name represents an anonymous class.
 pub(in crate::completion) fn is_anonymous_class(name: &str) -> bool {
     name.starts_with("__anonymous@")
 }
 
-/// Check whether a class matches the typed prefix.
+/// Whether a class name (short or FQN) matches a typed prefix.
 ///
-/// In FQN-prefix mode (`is_fqn` is `true`) both the short name and the
-/// fully-qualified name are checked so that `App\Models\U` can surface
-/// `App\Models\User`.  In non-FQN mode only the short name is checked
-/// to avoid flooding the response with every class under a broad
-/// namespace prefix.
+/// In FQN mode, matches against both the short name and the full FQN.
+/// In non-FQN mode, only matches against the short name.
 pub(in crate::completion) fn matches_class_prefix(
     short_name: &str,
     fqn: &str,
@@ -492,27 +490,155 @@ fn shorten_fqn_via_use_map(fqn: &str, use_map: &HashMap<String, String>) -> Opti
     best
 }
 
-/// Compute the label, insert-text base, filter-text, and optional
-/// use-import FQN for a class completion item.
+/// Build a table mapping namespace prefixes to their occurrence count.
 ///
-/// In FQN-prefix mode the namespace path is shown and inserted.  When
-/// the FQN belongs to the current namespace the reference is simplified
-/// to a relative name (e.g. typing `\Demo\` in namespace `Demo` for
-/// class `Demo\Box` produces just `Box`).
+/// The table is derived from the file's `use` imports and its own
+/// namespace declaration.  Each FQN's namespace portion is exploded
+/// into all ancestor prefixes, and the count records how many sources
+/// (imports + file namespace) contribute to each prefix.
 ///
-/// In non-FQN mode the short name is used with a full `use` import.
+/// Used once per completion request to score candidates by namespace
+/// affinity.
+pub(crate) fn build_affinity_table(
+    use_map: &HashMap<String, String>,
+    file_namespace: &Option<String>,
+) -> HashMap<String, u32> {
+    let mut table: HashMap<String, u32> = HashMap::new();
+
+    let mut namespaces: Vec<&str> = Vec::new();
+
+    if let Some(ns) = file_namespace {
+        namespaces.push(ns.as_str());
+    }
+
+    for fqn in use_map.values() {
+        if let Some(pos) = fqn.rfind('\\') {
+            namespaces.push(&fqn[..pos]);
+        }
+    }
+
+    for ns in namespaces {
+        let parts: Vec<&str> = ns.split('\\').collect();
+        for depth in 1..=parts.len() {
+            let prefix = parts[..depth].join("\\");
+            *table.entry(prefix).or_insert(0) += 1;
+        }
+    }
+
+    table
+}
+
+/// Score a candidate FQN against the affinity table.
 ///
-/// Returns `(label, insert_base, filter_text, use_import_fqn)`.
+/// Extracts the candidate's namespace, explodes it into ancestor
+/// prefixes, and sums the counts from the table for every matching
+/// prefix.  Higher scores indicate the candidate lives in a namespace
+/// that is heavily used by the current file.
+pub(crate) fn affinity_score(fqn: &str, table: &HashMap<String, u32>) -> u32 {
+    let ns = match fqn.rfind('\\') {
+        Some(pos) => &fqn[..pos],
+        None => return 0,
+    };
+    let parts: Vec<&str> = ns.split('\\').collect();
+    let mut score = 0u32;
+    for depth in 1..=parts.len() {
+        let prefix = parts[..depth].join("\\");
+        if let Some(&count) = table.get(&prefix) {
+            score += count;
+        }
+    }
+    score
+}
+
+/// Classify how well a short name matches the typed prefix.
+///
+/// Returns `'a'` for exact match, `'b'` for starts-with (or empty
+/// prefix), `'c'` for substring-only.  The character is used as the
+/// highest-weight dimension of the sort_text so exact matches always
+/// appear before prefix matches, which always appear before substring
+/// matches.
+pub(in crate::completion) fn match_quality(short_name: &str, prefix: &str) -> char {
+    if prefix.is_empty() {
+        return 'b';
+    }
+    let sn = short_name.to_lowercase();
+    let p = prefix.to_lowercase();
+    if sn == p {
+        'a'
+    } else if sn.starts_with(&p) {
+        'b'
+    } else {
+        'c'
+    }
+}
+
+/// Assemble a sort_text string for a class name completion item.
+///
+/// The format is `{match_quality}{source_tier}{affinity}{gap}{demote}_{short_name_lower}`
+/// where:
+/// - `match_quality`: `'a'` exact, `'b'` starts-with, `'c'` contains
+/// - `source_tier`: `'0'` use-imported, `'1'` same-namespace, `'2'` everything else
+/// - `affinity`: 4-digit inverted score (`9999 - score`, so higher scores sort first)
+/// - `gap`: 3-digit distance between short name length and prefix length
+///   (`short_name.len() - prefix.len()`).  Within the same affinity
+///   group, names closer in length to what the user typed sort first.
+///   This smooths the visual transition as a prefix match narrows toward
+///   an exact match (e.g. typing "Pro" ranks `Product` above
+///   `ProductFilterTerm` when both share the same affinity).
+/// - `demote`: `'0'` normal, `'1'` heuristically demoted
+pub(in crate::completion) fn class_sort_text(
+    short_name: &str,
+    fqn: &str,
+    prefix: &str,
+    source_tier: char,
+    demoted: bool,
+    affinity_table: &HashMap<String, u32>,
+) -> String {
+    let quality = match_quality(short_name, prefix);
+    let score = affinity_score(fqn, affinity_table);
+    let affinity = format!("{:04}", 9999_u32.saturating_sub(score.min(9999)));
+    let gap = format!(
+        "{:03}",
+        short_name.len().saturating_sub(prefix.len()).min(999)
+    );
+    let demote = if demoted { '1' } else { '0' };
+    format!(
+        "{}{}{}{}{}_{}",
+        quality,
+        source_tier,
+        affinity,
+        gap,
+        demote,
+        short_name.to_lowercase()
+    )
+}
+
+/// Compute the insert-text base, filter-text, and optional use-import
+/// FQN for a class completion item.
+///
+/// This function handles **editing concerns only** (what text to insert
+/// and whether a `use` statement is needed).  The completion item's
+/// visual presentation (label, label_details, filter_text) is set by
+/// [`ClassItemCtx::build_item`], the single authority for how items
+/// appear in the editor popup.
+///
+/// In FQN-prefix mode the insert text is the namespace-qualified
+/// reference.  When the FQN belongs to the current namespace the
+/// reference is simplified to a relative name (e.g. typing `\Demo\` in
+/// namespace `Demo` for class `Demo\Box` inserts just `Box`).
+///
+/// In non-FQN mode the short name is inserted with a `use` import.
+///
+/// Returns `(insert_base, filter_text, use_import_fqn)`.
 /// `use_import_fqn` is `None` when no `use` statement is needed (FQN
 /// mode or same-namespace class).
-pub(in crate::completion) fn class_completion_texts(
+pub(in crate::completion) fn class_edit_texts(
     short_name: &str,
     fqn: &str,
     is_fqn: bool,
     has_leading_backslash: bool,
     file_namespace: &Option<String>,
-    _prefix_lower: &str,
-) -> (String, String, String, Option<String>) {
+) -> (String, String, Option<String>) {
     if is_fqn {
         // When the FQN belongs to the current namespace, simplify to a
         // relative reference so that `\Demo\` + `Demo\Box` → `Box`.
@@ -526,7 +652,7 @@ pub(in crate::completion) fn class_completion_texts(
                 } else {
                     fqn.to_string()
                 };
-                return (relative.to_string(), relative.to_string(), filter, None);
+                return (relative.to_string(), filter, None);
             }
         }
 
@@ -535,16 +661,15 @@ pub(in crate::completion) fn class_completion_texts(
         } else {
             fqn.to_string()
         };
-        (fqn.to_string(), insert.clone(), insert, None)
+        (insert.clone(), insert, None)
     } else {
         // Non-FQN mode: insert the short name and import the full FQN.
-        let filter = fqn.to_string();
-        (
-            short_name.to_string(),
-            short_name.to_string(),
-            filter,
-            Some(fqn.to_string()),
-        )
+        // Use the short name as filter_text so the editor's fuzzy
+        // matcher scores candidates by short-name relevance, not by
+        // accidental substring hits inside the namespace path.  The
+        // FQN is still visible in `label` and `detail`.
+        let filter = short_name.to_string();
+        (short_name.to_string(), filter, Some(fqn.to_string()))
     }
 }
 
@@ -560,24 +685,54 @@ pub(in crate::completion) struct ClassItemCtx<'a> {
     pub(in crate::completion) file_use_map: &'a HashMap<String, String>,
     pub(in crate::completion) use_block: use_edit::UseBlockInfo,
     pub(in crate::completion) file_namespace: &'a Option<String>,
+    /// Namespace prefix → occurrence count table used for affinity scoring.
+    pub(in crate::completion) affinity_table: HashMap<String, u32>,
+    /// The short-name portion of the typed prefix, used for match quality
+    /// classification (e.g. `"Order"` from `"Illuminate\\Database\\Order"`).
+    pub(in crate::completion) quality_prefix: String,
+    /// Whether the typed prefix contains a `\` (after stripping a leading
+    /// `\`).  When false in FQN mode (e.g. `use Order` rather than
+    /// `use Illuminate\Order`), `build_item` uses the short name as
+    /// `filter_text` so the editor's fuzzy scorer matches against class
+    /// names rather than full namespace paths.
+    pub(in crate::completion) prefix_has_namespace: bool,
 }
 
-/// Per-item text fields produced by `class_completion_texts` and
+/// Parameters for [`Backend::build_class_name_completions`].
+///
+/// Groups the arguments that the three call sites assemble differently
+/// (especially `affinity_table_override` for `UseImport` context).
+pub(crate) struct ClassCompletionParams<'a> {
+    pub(crate) file_use_map: &'a HashMap<String, String>,
+    pub(crate) file_namespace: &'a Option<String>,
+    pub(crate) prefix: &'a str,
+    pub(crate) content: &'a str,
+    pub(crate) context: ClassNameContext,
+    pub(crate) position: Position,
+    /// When `Some`, used for namespace affinity scoring instead of
+    /// building a table from `file_use_map`.  Needed for `UseImport`
+    /// context where the caller passes an empty use-map (to suppress
+    /// bogus source-1 entries) but still wants affinity from the real
+    /// imports.
+    pub(crate) affinity_table_override: Option<HashMap<String, u32>>,
+}
+
+/// Per-item editing fields produced by `class_edit_texts` and
 /// post-processed by `apply_import_fixups`.
+///
+/// These fields control *what gets inserted* when the user accepts the
+/// completion.  The label and filter_text (what the user *sees* and
+/// what the editor matches against) are set by
+/// [`ClassItemCtx::build_item`].
 pub(in crate::completion) struct ClassItemTexts {
-    pub(in crate::completion) label: String,
     pub(in crate::completion) base_name: String,
     pub(in crate::completion) filter: String,
     pub(in crate::completion) use_import: Option<String>,
 }
 
 impl ClassItemCtx<'_> {
-    /// Fix up `base_name` and `use_import` after `class_completion_texts`
+    /// Fix up `base_name` and `use_import` after `class_edit_texts`
     /// to handle import conflicts and FQN alias collisions.
-    ///
-    /// This logic was repeated across every class source (class_index,
-    /// classmap, stubs) in both `build_class_name_completions` and
-    /// `build_catch_class_name_completions`.
     ///
     /// - If the short name conflicts with an existing import, falls back
     ///   to a fully-qualified reference (prepends `\`).
@@ -611,30 +766,93 @@ impl ClassItemCtx<'_> {
 
     /// Build a `CompletionItem` for a class name completion.
     ///
-    /// This is the shared construction logic used by both
-    /// `build_class_name_completions` and
-    /// `build_catch_class_name_completions` for class_index, classmap,
-    /// and stub sources.
+    /// This is the **single authority** for the visual presentation of
+    /// class name completions.
+    ///
+    /// When the typed prefix contains no namespace separator (e.g.
+    /// `Order`, `Exc`), the label is the **short name** and the
+    /// namespace is shown via `label_details.description`, giving a
+    /// clean two-column layout:
+    ///
+    /// ```text
+    ///   Order            App\Models
+    ///   Order            Luxplus\Database\Model\Orders
+    /// ```
+    ///
+    /// The `filter_text` is also the short name so the editor's fuzzy
+    /// scorer matches against class names, not accidental substrings
+    /// inside namespace paths.
+    ///
+    /// When the prefix is namespace-qualified (e.g. `Illuminate\D`,
+    /// `\App\Models\U`), the label and filter_text remain the full
+    /// FQN so namespace drilling works as expected.
+    ///
+    /// The sort_text is computed internally from `source_tier` and
+    /// `demoted` using the affinity table and quality prefix stored
+    /// in `ClassItemCtx`.
     pub(in crate::completion) fn build_item(
         &self,
         texts: ClassItemTexts,
         fqn: &str,
-        sort_text: String,
+        source_tier: char,
+        demoted: bool,
         new_insert_fn: impl FnOnce(&str) -> (String, Option<InsertTextFormat>),
         is_deprecated: bool,
     ) -> CompletionItem {
+        let short_name = crate::util::short_name(fqn);
+        let sort_text = class_sort_text(
+            short_name,
+            fqn,
+            &self.quality_prefix,
+            source_tier,
+            demoted,
+            &self.affinity_table,
+        );
         let (insert_text, insert_text_format) = if self.is_new {
             new_insert_fn(&texts.base_name)
         } else {
             (texts.base_name, None)
         };
+        // When the typed prefix is a simple name (no `\`), use the
+        // short name as filter_text so the editor's fuzzy scorer
+        // ranks candidates by short-name relevance.  With the FQN as
+        // filter_text, the editor finds accidental substring hits
+        // inside namespace paths (e.g. "Order" matching inside
+        // "Mockery\HigherOrderMessage") and may promote them above
+        // genuine prefix matches.  In FQN mode with a namespace-
+        // qualified prefix (e.g. `use Illuminate\D`), keep the
+        // original filter_text so namespace drilling works.
+        //
+        // In the same non-FQN case, set the label to the short name
+        // and show the namespace in `label_details.description`.
+        // This gives a clean two-column layout in the editor popup:
+        //
+        //   Order            App\Models
+        //   Order            Luxplus\Database\Model\Orders
+        //
+        // so users can distinguish same-named classes without the
+        // label being a long FQN that the editor truncates.
+        let (label, filter_text, label_details) = if self.prefix_has_namespace {
+            (fqn.to_string(), texts.filter, None)
+        } else {
+            let ns = fqn.rsplit_once('\\').map(|(ns, _)| ns.to_string());
+            (
+                short_name.to_string(),
+                short_name.to_string(),
+                ns.map(|desc| CompletionItemLabelDetails {
+                    detail: None,
+                    description: Some(desc),
+                }),
+            )
+        };
         CompletionItem {
-            label: texts.label,
+            label,
+            label_details,
             kind: Some(CompletionItemKind::CLASS),
             detail: Some(fqn.to_string()),
             insert_text: Some(insert_text.clone()),
             insert_text_format,
-            filter_text: Some(texts.filter),
+            filter_text: Some(filter_text),
             sort_text: Some(sort_text),
             deprecated: if is_deprecated { Some(true) } else { None },
             text_edit: self.fqn_replace_range.map(|range| {
@@ -703,120 +921,101 @@ impl Backend {
         Some(partial)
     }
 
-    /// Detect whether the cursor is in a `throw new ClassName` context.
+    /// Detect whether the cursor is immediately after `throw new`.
     ///
-    /// Returns `true` when the text immediately before the partial
-    /// identifier (at the cursor) is `throw new` (with optional
-    /// whitespace).  This tells the handler to restrict completion to
-    /// Throwable descendants only and skip constants / functions.
+    /// Used by the handler to offer exception-only completions in
+    /// `throw new` context.
     pub(crate) fn is_throw_new_context(content: &str, position: Position) -> bool {
         let lines: Vec<&str> = content.lines().collect();
         if position.line as usize >= lines.len() {
             return false;
         }
-
         let line = lines[position.line as usize];
         let chars: Vec<char> = line.chars().collect();
         let col = (position.character as usize).min(chars.len());
 
-        // Walk backward past the partial identifier (same logic as
-        // extract_partial_class_name) to find where it starts.
+        // Walk back past the partial class name
         let mut i = col;
         while i > 0
             && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_' || chars[i - 1] == '\\')
         {
             i -= 1;
         }
-
-        // Now skip whitespace before the identifier
-        let mut j = i;
-        while j > 0 && chars[j - 1] == ' ' {
-            j -= 1;
+        // Skip whitespace
+        while i > 0 && chars[i - 1].is_ascii_whitespace() {
+            i -= 1;
         }
-
-        // Check for `new` keyword
-        if j >= 3
-            && chars[j - 3] == 'n'
-            && chars[j - 2] == 'e'
-            && chars[j - 1] == 'w'
-            && (j < 4 || !chars[j - 4].is_alphanumeric())
-        {
-            // Skip whitespace before `new`
-            let mut k = j - 3;
-            while k > 0 && chars[k - 1] == ' ' {
-                k -= 1;
-            }
-
-            // Check for `throw` keyword
-            if k >= 5
-                && chars[k - 5] == 't'
-                && chars[k - 4] == 'h'
-                && chars[k - 3] == 'r'
-                && chars[k - 2] == 'o'
-                && chars[k - 1] == 'w'
-                && (k < 6 || !chars[k - 6].is_alphanumeric())
-            {
-                return true;
-            }
+        // Should be `new`
+        if i < 3 {
+            return false;
         }
-
-        false
+        let new_candidate: String = chars[i - 3..i].iter().collect();
+        if !new_candidate.eq_ignore_ascii_case("new") {
+            return false;
+        }
+        let j = i - 3;
+        // Skip whitespace
+        let mut k = j;
+        while k > 0 && chars[k - 1].is_ascii_whitespace() {
+            k -= 1;
+        }
+        // Should be `throw`
+        if k < 5 {
+            return false;
+        }
+        let throw_candidate: String = chars[k - 5..k].iter().collect();
+        throw_candidate.eq_ignore_ascii_case("throw")
     }
 
-    /// Build `(insert_text, insert_text_format)` for a class in `new` context.
+    /// Build the insert text (and optional format) for a `new` context
+    /// class name completion.
     ///
-    /// When `ctor_params` is `Some`, those constructor parameters are used
-    /// to build a snippet with tab-stops for each required argument.
-    /// When `None`, a plain `Name()$0` snippet is returned so the user
-    /// still gets parentheses inserted automatically.
+    /// If constructor parameters are available, generates a callable
+    /// snippet; otherwise generates `Name()$0`.
     pub(in crate::completion) fn build_new_insert(
-        short_name: &str,
+        name: &str,
         ctor_params: Option<&[ParameterInfo]>,
     ) -> (String, Option<InsertTextFormat>) {
-        let snippet = if let Some(p) = ctor_params {
-            build_callable_snippet(short_name, p)
+        if let Some(params) = ctor_params
+            && !params.is_empty()
+        {
+            let snippet = build_callable_snippet(name, params);
+            (snippet, Some(InsertTextFormat::SNIPPET))
         } else {
-            // No constructor info available — insert empty parens.
-            format!("{short_name}()$0")
-        };
-
-        (snippet, Some(InsertTextFormat::SNIPPET))
+            (format!("{name}()$0"), Some(InsertTextFormat::SNIPPET))
+        }
     }
 
-    /// Build completion items for class names from all known sources.
+    /// Maximum number of class name completions to return.
     ///
-    /// Sources (in priority order):
-    ///   1. Classes imported via `use` statements in the current file
-    ///   2. Classes in the same namespace (from the ast_map)
-    ///   3. Classes from the class_index (discovered during parsing)
-    ///   4. Classes from the Composer classmap (`autoload_classmap.php`)
-    ///   5. Built-in PHP classes from embedded stubs
-    ///
-    /// Each item uses the short class name as `label` and the
-    /// fully-qualified name as `detail`.  Items are deduplicated by FQN.
-    ///
-    /// Returns `(items, is_incomplete)`.  When the total number of
-    /// matching classes exceeds [`MAX_CLASS_COMPLETIONS`], the result is
-    /// truncated and `is_incomplete` is `true`, signalling the client to
-    /// re-request as the user types more characters.
-    pub(in crate::completion) const MAX_CLASS_COMPLETIONS: usize = 100;
+    /// After this limit the result is marked `is_incomplete = true` so
+    /// the editor re-requests as the user types more characters.
+    pub(in crate::completion) const MAX_CLASS_COMPLETIONS: usize = 300;
 
-    /// Build completion items for class, interface, trait, and enum names
-    /// matching `prefix`.
+    /// Build completion items for class, interface, trait, and enum
+    /// names.
     ///
-    /// The `context` parameter controls which kinds of class-like
-    /// declarations are included. For example, `ClassNameContext::Implements`
-    /// filters results to interfaces only, while `ClassNameContext::Any`
-    /// offers everything.
+    /// Searches five sources in priority order:
+    ///   1. File's `use` imports (already imported)
+    ///   2. Same-namespace classes (from `ast_map`)
+    ///   3. `class_index` (discovered / interacted-with classes)
+    ///   4. Composer classmap (all autoloaded classes)
+    ///   5. Built-in PHP stubs
+    ///
+    /// Returns `(items, is_incomplete)`.
     pub(crate) fn build_class_name_completions(
         &self,
-        file_use_map: &HashMap<String, String>,
-        file_namespace: &Option<String>,
-        prefix: &str,
-        content: &str,
-        context: ClassNameContext,
-        position: Position,
+        params: ClassCompletionParams<'_>,
     ) -> (Vec<CompletionItem>, bool) {
+        let ClassCompletionParams {
+            file_use_map,
+            file_namespace,
+            prefix,
+            content,
+            context,
+            position,
+            affinity_table_override,
+        } = params;
         let is_new = context.is_new();
         let is_use_import = matches!(context, ClassNameContext::UseImport);
         // In FQN mode (except UseImport), try to shorten references
@@ -836,7 +1035,7 @@ impl Backend {
         // In UseImport context, suppress namespace-relative
         // simplification — `use User;` is wrong even when the cursor
         // file lives in the same namespace as `User`.  Passing `None`
-        // makes `class_completion_texts` emit the full FQN.
+        // makes `class_edit_texts` emit the full FQN.
         let no_namespace: Option<String> = None;
         let effective_namespace = if is_use_import {
             &no_namespace
@@ -865,9 +1064,28 @@ impl Backend {
         let mut seen_fqns: HashSet<String> = HashSet::new();
         let mut items: Vec<CompletionItem> = Vec::new();
 
+        // Build the affinity table from the file's use-map and namespace,
+        // unless the caller provided a pre-built one (e.g. UseImport
+        // context where the real use-map differs from file_use_map).
+        let affinity_table = affinity_table_override
+            .unwrap_or_else(|| build_affinity_table(file_use_map, file_namespace));
+
+        // Extract the short-name portion of the typed prefix for match
+        // quality classification.  E.g. `"Order"` from `"App\\Order"`.
+        let quality_prefix = match normalized.rfind('\\') {
+            Some(pos) => normalized[pos + 1..].to_string(),
+            None => normalized.to_string(),
+        };
+
         // Pre-compute the use-block info for alphabetical `use` insertion.
-        // Only items from sources 3–5 (not already imported, not same
-        // namespace) will carry an `additional_text_edits` entry.
+        // In UseImport context, always treat as namespace-qualified so
+        // labels remain FQNs (the user is writing a fully-qualified
+        // import statement like `use Foo\Bar`).  Also treat a leading
+        // backslash (e.g. `\Cassa`) as namespace-qualified so labels
+        // stay as FQNs in explicit-global-namespace mode.
+        let prefix_has_namespace =
+            normalized.contains('\\') || has_leading_backslash || is_use_import;
+
         let ctx = ClassItemCtx {
             is_fqn_prefix,
             is_new,
@@ -875,11 +1093,14 @@ impl Backend {
             file_use_map,
             use_block: analyze_use_block(content),
             file_namespace: effective_namespace,
+            affinity_table,
+            quality_prefix,
+            prefix_has_namespace,
         };
 
         // ── 1. Use-imported classes (highest priority) ──────────────
-        for (short_name, fqn) in file_use_map {
-            if !matches_class_prefix(short_name, fqn, &prefix_lower, is_fqn_prefix) {
+        for (sn, fqn) in file_use_map {
+            if !matches_class_prefix(sn, fqn, &prefix_lower, is_fqn_prefix) {
                 continue;
             }
             // Skip use-map entries that are namespace aliases rather
@@ -902,45 +1123,39 @@ impl Backend {
             if context.is_narrow_kind() && !self.is_known_class_like(fqn) {
                 continue;
             }
-            let (mut label, mut base_name, filter, _use_import) = class_completion_texts(
-                short_name,
+            let (mut base_name, filter, _use_import) = class_edit_texts(
+                sn,
                 fqn,
                 is_fqn_prefix,
                 has_leading_backslash,
                 effective_namespace,
-                &prefix_lower,
             );
             if should_shorten_via_imports
                 && let Some(shortened) = shorten_fqn_via_use_map(fqn, file_use_map)
             {
-                label = shortened.clone();
                 base_name = shortened;
             }
-            let (insert_text, insert_text_format) = if is_new {
-                Self::build_new_insert(&base_name, None)
-            } else {
-                (base_name, None)
+            // Source 1 never needs a use-import (already imported).
+            let texts = ClassItemTexts {
+                base_name,
+                filter,
+                use_import: None,
             };
-            items.push(CompletionItem {
-                label,
-                kind: Some(CompletionItemKind::CLASS),
-                detail: Some(fqn.clone()),
-                insert_text: Some(insert_text.clone()),
-                insert_text_format,
-                filter_text: Some(filter),
-                sort_text: Some(format!("0_{}", short_name.to_lowercase())),
-                text_edit: fqn_replace_range.map(|range| {
-                    CompletionTextEdit::Edit(TextEdit {
-                        range,
-                        new_text: insert_text,
-                    })
-                }),
-                ..CompletionItem::default()
-            });
+            items.push(ctx.build_item(
+                texts,
+                fqn,
+                '0',
+                false,
+                |name| Self::build_new_insert(name, None),
+                false,
+            ));
         }
 
         // ── 2. Same-namespace classes (from ast_map) ────────────────
-        if let Some(ns) = file_namespace {
+        // Skip in UseImport context: same-namespace classes don't need
+        // a `use` statement (PHP auto-resolves them), so offering them
+        // in `use |` completion is not useful.
+        if !is_use_import && let Some(ns) = file_namespace {
             let nmap = self.namespace_map.read();
             // Find all URIs that share the same namespace
             let same_ns_uris: Vec<String> = nmap
@@ -979,55 +1194,41 @@ impl Backend {
                             if !seen_fqns.insert(cls_fqn.clone()) {
                                 continue;
                             }
-                            let (mut label, mut base_name, filter, _use_import) =
-                                class_completion_texts(
-                                    &cls.name,
-                                    &cls_fqn,
-                                    is_fqn_prefix,
-                                    has_leading_backslash,
-                                    effective_namespace,
-                                    &prefix_lower,
-                                );
+                            let (mut base_name, filter, _use_import) = class_edit_texts(
+                                &cls.name,
+                                &cls_fqn,
+                                is_fqn_prefix,
+                                has_leading_backslash,
+                                effective_namespace,
+                            );
                             if should_shorten_via_imports
                                 && let Some(shortened) =
                                     shorten_fqn_via_use_map(&cls_fqn, file_use_map)
                             {
-                                label = shortened.clone();
                                 base_name = shortened;
                             }
-                            let (insert_text, insert_text_format) = if is_new {
-                                // We already have the ClassInfo — check
-                                // for __construct directly.
-                                let ctor_params: Option<Vec<ParameterInfo>> = cls
-                                    .methods
-                                    .iter()
-                                    .find(|m| m.name.eq_ignore_ascii_case("__construct"))
-                                    .map(|m| m.parameters.clone());
-                                Self::build_new_insert(&base_name, ctor_params.as_deref())
-                            } else {
-                                (base_name, None)
+                            // Source 2 has ClassInfo — check __construct
+                            // for richer `new` snippets.
+                            let ctor_params: Option<Vec<ParameterInfo>> = cls
+                                .methods
+                                .iter()
+                                .find(|m| m.name.eq_ignore_ascii_case("__construct"))
+                                .map(|m| m.parameters.clone());
+                            // Source 2 never needs a use-import
+                            // (same namespace).
+                            let texts = ClassItemTexts {
+                                base_name,
+                                filter,
+                                use_import: None,
                             };
-                            items.push(CompletionItem {
-                                label,
-                                kind: Some(CompletionItemKind::CLASS),
-                                detail: Some(cls_fqn),
-                                insert_text: Some(insert_text.clone()),
-                                insert_text_format,
-                                filter_text: Some(filter),
-                                sort_text: Some(format!("1_{}", cls.name.to_lowercase())),
-                                deprecated: if cls.deprecation_message.is_some() {
-                                    Some(true)
-                                } else {
-                                    None
-                                },
-                                text_edit: fqn_replace_range.map(|range| {
-                                    CompletionTextEdit::Edit(TextEdit {
-                                        range,
-                                        new_text: insert_text,
-                                    })
-                                }),
-                                ..CompletionItem::default()
-                            });
+                            items.push(ctx.build_item(
+                                texts,
+                                &cls_fqn,
+                                '1',
+                                false,
+                                |name| Self::build_new_insert(name, ctor_params.as_deref()),
+                                cls.deprecation_message.is_some(),
+                            ));
                         }
                     }
                 }
@@ -1049,41 +1250,32 @@ impl Backend {
                 if context.is_class_only() && !self.matches_context_or_unloaded(fqn, context) {
                     continue;
                 }
-                let (mut label, mut base_name, filter, mut use_import) = class_completion_texts(
+                let (mut base_name, filter, mut use_import) = class_edit_texts(
                     sn,
                     fqn,
                     is_fqn_prefix,
                     has_leading_backslash,
                     effective_namespace,
-                    &prefix_lower,
                 );
                 let mut was_shortened = false;
                 if should_shorten_via_imports
                     && let Some(shortened) = shorten_fqn_via_use_map(fqn, file_use_map)
                 {
-                    label = shortened.clone();
                     base_name = shortened;
                     use_import = None;
                     was_shortened = true;
                 }
                 let mut texts = ClassItemTexts {
-                    label,
                     base_name,
                     filter,
                     use_import,
                 };
                 ctx.apply_import_fixups(&mut texts.base_name, &mut texts.use_import, was_shortened);
-                // Demote names that heuristically mismatch the context
-                // so better-looking candidates appear first.
-                let sort_prefix = if context.likely_mismatch(sn) {
-                    "7"
-                } else {
-                    "2"
-                };
                 items.push(ctx.build_item(
                     texts,
                     fqn,
-                    format!("{}_{}", sort_prefix, sn.to_lowercase()),
+                    '2',
+                    context.likely_mismatch(sn),
                     |name| (format!("{name}()$0"), Some(InsertTextFormat::SNIPPET)),
                     false,
                 ));
@@ -1105,41 +1297,32 @@ impl Backend {
                 if context.is_class_only() && !self.matches_context_or_unloaded(fqn, context) {
                     continue;
                 }
-                let (mut label, mut base_name, filter, mut use_import) = class_completion_texts(
+                let (mut base_name, filter, mut use_import) = class_edit_texts(
                     sn,
                     fqn,
                     is_fqn_prefix,
                     has_leading_backslash,
                     effective_namespace,
-                    &prefix_lower,
                 );
                 let mut was_shortened = false;
                 if should_shorten_via_imports
                     && let Some(shortened) = shorten_fqn_via_use_map(fqn, file_use_map)
                 {
-                    label = shortened.clone();
                     base_name = shortened;
                     use_import = None;
                     was_shortened = true;
                 }
                 let mut texts = ClassItemTexts {
-                    label,
                     base_name,
                     filter,
                     use_import,
                 };
                 ctx.apply_import_fixups(&mut texts.base_name, &mut texts.use_import, was_shortened);
-                // Demote names that heuristically mismatch the context
-                // so better-looking candidates appear first.
-                let sort_prefix = if context.likely_mismatch(sn) {
-                    "8"
-                } else {
-                    "3"
-                };
                 items.push(ctx.build_item(
                     texts,
                     fqn,
-                    format!("{}_{}", sort_prefix, sn.to_lowercase()),
+                    '2',
+                    context.likely_mismatch(sn),
                     |name| Self::build_new_insert(name, None),
                     false,
                 ));
@@ -1177,41 +1360,32 @@ impl Backend {
                     // If the scan fails, allow through.
                 }
             }
-            let (mut label, mut base_name, filter, mut use_import) = class_completion_texts(
+            let (mut base_name, filter, mut use_import) = class_edit_texts(
                 sn,
                 name,
                 is_fqn_prefix,
                 has_leading_backslash,
                 effective_namespace,
-                &prefix_lower,
             );
             let mut was_shortened = false;
             if should_shorten_via_imports
                 && let Some(shortened) = shorten_fqn_via_use_map(name, file_use_map)
             {
-                label = shortened.clone();
                 base_name = shortened;
                 use_import = None;
                 was_shortened = true;
             }
             let mut texts = ClassItemTexts {
-                label,
                 base_name,
                 filter,
                 use_import,
             };
             ctx.apply_import_fixups(&mut texts.base_name, &mut texts.use_import, was_shortened);
-            // Demote names that heuristically mismatch the context
-            // so better-looking candidates appear first.
-            let sort_prefix = if context.likely_mismatch(sn) {
-                "9"
-            } else {
-                "4"
-            };
             items.push(ctx.build_item(
                 texts,
                 name,
-                format!("{}_{}", sort_prefix, sn.to_lowercase()),
+                '2',
+                context.likely_mismatch(sn),
                 |name| (format!("{name}()$0"), Some(InsertTextFormat::SNIPPET)),
                 false,
             ));
@@ -1266,8 +1440,8 @@ impl Backend {
                 for segment in &seen_segments {
                     let short = segment.rsplit('\\').next().unwrap_or(segment);
 
-                    // Compute insert text and label the same way
-                    // class_completion_texts does for FQN mode.
+                    // Compute insert text the same way class_edit_texts
+                    // does for FQN mode.
                     let (label, insert_ns) = if let Some(ns) = effective_namespace {
                         let ns_with_slash = format!("{}\\", ns);
                         if let Some(relative) = segment.strip_prefix(&ns_with_slash) {
@@ -1308,13 +1482,17 @@ impl Backend {
             }
         }
 
+        // Always sort by sort_text so the editor receives items in our
+        // intended order.  Editors apply their own fuzzy scoring on top,
+        // but many use sort_text as the primary or tie-breaking key when
+        // items share the same fuzzy-match quality.  Sending items
+        // unsorted lets the editor's internal ordering dominate, which
+        // defeats our match-quality / tier / affinity scheme.
+        items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+
         // Cap the result set so the client isn't overwhelmed.
-        // Sort by sort_text first so that higher-priority items
-        // (use-imports, same-namespace, user project classes) survive
-        // the truncation ahead of lower-priority SPL stubs.
         let is_incomplete = items.len() > Self::MAX_CLASS_COMPLETIONS;
         if is_incomplete {
-            items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
             items.truncate(Self::MAX_CLASS_COMPLETIONS);
         }
 

@@ -57,9 +57,10 @@ fn find_function<'a>(items: &'a [CompletionItem], name: &str) -> Option<&'a Comp
 }
 
 fn find_class<'a>(items: &'a [CompletionItem], name: &str) -> Option<&'a CompletionItem> {
-    items
-        .iter()
-        .find(|i| i.kind == Some(CompletionItemKind::CLASS) && i.label == name)
+    items.iter().find(|i| {
+        i.kind == Some(CompletionItemKind::CLASS)
+            && (i.label == name || i.detail.as_deref() == Some(name))
+    })
 }
 
 // ─── Method Snippet Tests ───────────────────────────────────────────────────
@@ -448,7 +449,7 @@ async fn test_snippet_new_class_namespaced_gets_constructor_params() {
     );
 
     let items = complete_at(&backend, &uri, text, 5, 7).await;
-    let item = find_class(&items, "MoneyFactory").expect("Should find MoneyFactory");
+    let item = find_class(&items, "App\\MoneyFactory").expect("Should find MoneyFactory");
 
     assert_eq!(
         item.insert_text.as_deref(),
@@ -491,7 +492,7 @@ async fn test_snippet_new_class_mixed_params() {
     );
 
     let items = complete_at(&backend, &uri, text, 5, 8).await;
-    let item = find_class(&items, "Connection").expect("Should find Connection");
+    let item = find_class(&items, "App\\Connection").expect("Should find Connection");
 
     assert_eq!(
         item.insert_text.as_deref(),
@@ -516,7 +517,7 @@ async fn test_snippet_new_class_all_optional_constructor() {
     );
 
     let items = complete_at(&backend, &uri, text, 5, 7).await;
-    let item = find_class(&items, "Options").expect("Should find Options");
+    let item = find_class(&items, "App\\Options").expect("Should find Options");
 
     assert_eq!(
         item.insert_text.as_deref(),
@@ -541,7 +542,7 @@ async fn test_snippet_new_class_multiple_required() {
     );
 
     let items = complete_at(&backend, &uri, text, 5, 7).await;
-    let item = find_class(&items, "Point").expect("Should find Point");
+    let item = find_class(&items, "Geo\\Point").expect("Should find Point");
 
     assert_eq!(
         item.insert_text.as_deref(),
@@ -570,7 +571,7 @@ async fn test_snippet_class_name_no_new_context() {
     let items = complete_at(&backend, &uri, text, 6, 27).await;
     let widget = items
         .iter()
-        .find(|i| i.kind == Some(CompletionItemKind::CLASS) && i.label == "Widget");
+        .find(|i| i.kind == Some(CompletionItemKind::CLASS) && i.label == "App\\Widget");
 
     if let Some(item) = widget {
         // When not in `new` context, insert_text should be the plain class name
@@ -667,7 +668,7 @@ async fn test_snippet_new_inside_method_same_namespace() {
     );
 
     let items = complete_at(&backend, &uri, text, 7, 22).await;
-    let item = find_class(&items, "Logger").expect("Should find Logger");
+    let item = find_class(&items, "App\\Logger").expect("Should find Logger");
 
     assert_eq!(
         item.insert_text.as_deref(),

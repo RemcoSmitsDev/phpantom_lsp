@@ -514,6 +514,7 @@ async fn docblock_param_empty_type_completion() {
     let uri = Url::parse("file:///docblock_param_empty_type.php").unwrap();
     let text = concat!(
         "<?php\n",
+        "namespace App;\n",
         "class MyService {}\n",
         "/**\n",
         " * @param \n",
@@ -522,7 +523,7 @@ async fn docblock_param_empty_type_completion() {
     );
 
     // Cursor right after `@param ` with empty partial — should still offer types
-    let result = complete_at_raw(&backend, &uri, text, 3, 10).await;
+    let result = complete_at_raw(&backend, &uri, text, 4, 10).await;
     assert!(
         result.is_some(),
         "Should provide type completions after '@param ' with empty partial"
@@ -967,6 +968,7 @@ async fn docblock_type_empty_partial_suggests_scalars_and_classes() {
     let uri = Url::parse("file:///docblock_scalar_all.php").unwrap();
     let text = concat!(
         "<?php\n",
+        "namespace App;\n",
         "class MyService {}\n",
         "/**\n",
         " * @param \n",
@@ -975,7 +977,7 @@ async fn docblock_type_empty_partial_suggests_scalars_and_classes() {
     );
 
     // Empty partial — should offer both scalar types and class names
-    let result = complete_at_raw(&backend, &uri, text, 3, 10).await;
+    let result = complete_at_raw(&backend, &uri, text, 4, 10).await;
     assert!(
         result.is_some(),
         "Should provide completions with empty partial"
@@ -994,7 +996,7 @@ async fn docblock_type_empty_partial_suggests_scalars_and_classes() {
     );
     assert!(
         labels.iter().any(|l| l.contains("MyService")),
-        "Should also suggest class names. Got: {:?}",
+        "Should also suggest class names (App\\MyService). Got: {:?}",
         labels
     );
 }

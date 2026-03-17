@@ -151,15 +151,15 @@ The definition subsystem uses a **three-tier** approach, from fastest to slowest
 
 During `update_ast`, every navigable symbol occurrence in a file is recorded as a `SymbolSpan` in a sorted vec stored in `symbol_maps` (keyed by file URI). Each span records the byte range and a `SymbolKind` variant:
 
-| `SymbolKind` | What it captures |
-|---|---|
-| `ClassReference` | Class/interface/trait/enum names in type contexts (`new Foo`, `extends`, `implements`, type hints, catch, docblock types) |
-| `ClassDeclaration` | Class name at its declaration site (cursor already at definition) |
-| `MemberAccess` | `->`, `?->`, `::` member names with the subject text and static/method-call flags |
-| `Variable` | `$variable` tokens (both usage and definition sites) |
-| `FunctionCall` | Standalone function call names |
-| `SelfStaticParent` | `self`, `static`, `parent` keywords in navigable contexts |
-| `ConstantReference` | Constant names (`define()` name, class constant access, standalone constant reference) |
+| `SymbolKind`        | What it captures                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `ClassReference`    | Class/interface/trait/enum names in type contexts (`new Foo`, `extends`, `implements`, type hints, catch, docblock types)       |
+| `ClassDeclaration`  | Class name at its declaration site (cursor already at definition)                                                               |
+| `MemberAccess`      | `->`, `?->`, `::` member names with the subject text and static/method-call flags                                               |
+| `Variable`          | `$variable` tokens (both usage and definition sites)                                                                            |
+| `FunctionCall`      | Standalone function call names                                                                                                  |
+| `SelfStaticParent`  | `self`, `static`, `parent` keywords in navigable contexts                                                                       |
+| `ConstantReference` | Constant names (`define()` name, class constant access, standalone constant reference)                                          |
 | `MemberDeclaration` | Method, property, or constant name at its declaration site (not navigable for go-to-definition, but needed for find-references) |
 
 When a go-to-definition request arrives, `resolve_definition` converts the cursor position to a byte offset and does a binary search on the symbol map. If a `SymbolSpan` is found, it dispatches directly to the appropriate resolution path — no text scanning needed. If the offset falls in a gap (whitespace, string interior, comment interior, etc.), the request is instantly rejected.
@@ -203,14 +203,14 @@ The handler (`definition/type_definition.rs`) reuses the same symbol-map lookup 
 
 2. **Type resolution by symbol kind:**
 
-   | `SymbolKind` | Resolution path |
-   |---|---|
-   | `Variable` | `resolve_variable_type_string` (type-string path) with fallback to `resolve_variable_types` (ClassInfo path). `$this` resolves to the enclosing class. |
-   | `MemberAccess` | `resolve_target_classes` finds the subject's class, then the method's `return_type` or the property's `type_hint` is extracted. `self`/`static`/`$this` in return types are replaced with the owning class name. |
-   | `SelfStaticParent` | `self`/`static` resolve to the enclosing class; `parent` resolves to the parent class. |
-   | `ClassReference` | The type is the class itself. |
-   | `FunctionCall` | The function's `return_type` is extracted. |
-   | `ClassDeclaration`, `MemberDeclaration`, `ConstantReference` | No type definition target; returns `None`. |
+   | `SymbolKind`                                                 | Resolution path                                                                                                                                                                                                  |
+   | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | `Variable`                                                   | `resolve_variable_type_string` (type-string path) with fallback to `resolve_variable_types` (ClassInfo path). `$this` resolves to the enclosing class.                                                           |
+   | `MemberAccess`                                               | `resolve_target_classes` finds the subject's class, then the method's `return_type` or the property's `type_hint` is extracted. `self`/`static`/`$this` in return types are replaced with the owning class name. |
+   | `SelfStaticParent`                                           | `self`/`static` resolve to the enclosing class; `parent` resolves to the parent class.                                                                                                                           |
+   | `ClassReference`                                             | The type is the class itself.                                                                                                                                                                                    |
+   | `FunctionCall`                                               | The function's `return_type` is extracted.                                                                                                                                                                       |
+   | `ClassDeclaration`, `MemberDeclaration`, `ConstantReference` | No type definition target; returns `None`.                                                                                                                                                                       |
 
 3. **Type string to class names.** `extract_class_names_from_type_string` splits union types at depth-0 `|` separators, strips `?` (nullable), generic parameters (`<…>`), array shapes (`{…}`), and trailing `[]`. Scalar types (`int`, `string`, `array`, `void`, `mixed`, `bool`, `float`, `null`, `false`, `true`, `never`, `callable`, `iterable`, `resource`, `object`) are excluded since they have no user-navigable declaration.
 
@@ -228,12 +228,12 @@ of a function or method call. Detection uses a **two-tier** strategy:
 During `update_ast`, every call expression in the file is recorded as a
 `CallSite` in the `SymbolMap`. Each entry stores:
 
-| Field | Purpose |
-|---|---|
-| `args_start` | Byte offset immediately after the opening `(` |
-| `args_end` | Byte offset of the closing `)` |
+| Field             | Purpose                                                  |
+| ----------------- | -------------------------------------------------------- |
+| `args_start`      | Byte offset immediately after the opening `(`            |
+| `args_end`        | Byte offset of the closing `)`                           |
 | `call_expression` | The call target in `resolve_callable` format (see below) |
-| `comma_offsets` | Byte offsets of each top-level comma separator |
+| `comma_offsets`   | Byte offsets of each top-level comma separator           |
 
 Call sites are emitted for all five AST call kinds: `Call::Function`,
 `Call::Method`, `Call::NullSafeMethod`, `Call::StaticMethod`, and
@@ -773,7 +773,7 @@ behaviour. The rationale:
 This is distinct from narrowing via early return, `unset()`, or
 `instanceof` guards. Those reflect deliberate developer intent to
 eliminate types, so the narrowed-out members are correctly hidden. Union
-completion is about types the developer has *not yet* separated.
+completion is about types the developer has _not yet_ separated.
 
 Members that are only available on a subset of the union already show the
 originating class in the `detail` field (e.g. "Class: AdminUser"), which
@@ -788,19 +788,19 @@ When the user types a class name outside of a member-access chain (`->`, `::`), 
 
 `detect_class_name_context()` in `class_completion.rs` walks backward from the cursor through whitespace and comma-separated identifier lists to find the keyword that governs the completion position. It recognises eleven contexts:
 
-| Context | Trigger | What is shown |
-|---|---|---|
-| `Any` | Bare identifier (e.g. `$x = DateT\|`) | All class-likes, constants, and functions |
-| `New` | `new \|` | Concrete (non-abstract) classes only |
-| `ExtendsClass` | `class A extends \|` | Non-final classes (abstract is OK) |
-| `ExtendsInterface` | `interface B extends \|` | Interfaces only |
-| `Implements` | `class C implements \|` | Interfaces only |
-| `TraitUse` | `class D { use \|` | Traits only |
-| `Instanceof` | `$x instanceof \|` | Classes, interfaces, enums (not traits) |
-| `UseImport` | `use \|` (top level) | All class-likes + `function`/`const` keyword hints |
-| `UseFunction` | `use function \|` | Functions only |
-| `UseConst` | `use const \|` | Constants only |
-| `NamespaceDeclaration` | `namespace \|` | Namespace names only |
+| Context                | Trigger                               | What is shown                                      |
+| ---------------------- | ------------------------------------- | -------------------------------------------------- |
+| `Any`                  | Bare identifier (e.g. `$x = DateT\|`) | All class-likes, constants, and functions          |
+| `New`                  | `new \|`                              | Concrete (non-abstract) classes only               |
+| `ExtendsClass`         | `class A extends \|`                  | Non-final classes (abstract is OK)                 |
+| `ExtendsInterface`     | `interface B extends \|`              | Interfaces only                                    |
+| `Implements`           | `class C implements \|`               | Interfaces only                                    |
+| `TraitUse`             | `class D { use \|`                    | Traits only                                        |
+| `Instanceof`           | `$x instanceof \|`                    | Classes, interfaces, enums (not traits)            |
+| `UseImport`            | `use \|` (top level)                  | All class-likes + `function`/`const` keyword hints |
+| `UseFunction`          | `use function \|`                     | Functions only                                     |
+| `UseConst`             | `use const \|`                        | Constants only                                     |
+| `NamespaceDeclaration` | `namespace \|`                        | Namespace names only                               |
 
 Comma-separated lists are handled by walking past `Identifier,` sequences so that `implements Foo, Bar, \|` still resolves to `Implements`. Multi-line declarations work the same way because the backward walk skips all whitespace including newlines.
 
@@ -822,15 +822,29 @@ Comma-separated lists are handled by walking past `Identifier,` sequences so tha
 
 ### Class Name Sources and Priority
 
-`build_class_name_completions` collects candidates from five sources in priority order. Earlier sources get better `sort_text` prefixes so the editor ranks them higher. Deduplication is by FQN (`seen_fqns` set).
+`build_class_name_completions` collects candidates from five sources. Deduplication is by FQN (`seen_fqns` set). All candidates are ranked by a five-dimension `sort_text` key:
 
-1. **Use-imported classes** (sort prefix `0_`). The file's `use` map entries. Highest priority because the developer has explicitly imported these names.
-2. **Same-namespace classes** (sort prefix `1_`). Classes from the `ast_map` whose file declares the same namespace as the cursor file. These are available without a `use` statement.
-3. **Class index** (sort prefix `2_`). Classes discovered during parsing of opened files (`class_index`).
-4. **Composer classmap** (sort prefix `3_`). Classes from `vendor/composer/autoload_classmap.php`.
-5. **PHP stubs** (sort prefix `4_`). Built-in classes from the embedded phpstorm-stubs.
+```
+{match_quality}{source_tier}{affinity}{gap}{demote}_{short_name_lower}
+```
 
-The result set is capped at 100 items. When truncated, `is_incomplete` is set to `true` so the editor re-requests completions as the user types more characters. Items are sorted by `sort_text` before truncation so higher-priority sources survive.
+**Match quality** (highest weight). Compares the typed prefix against the short name: `a` = exact match, `b` = starts-with (or empty prefix), `c` = substring only. An exact match always ranks above every prefix match, regardless of source or affinity.
+
+**Source tier**. Three tiers based on how the class relates to the current file:
+
+| Tier | Source                                         | Meaning                                     |
+| ---- | ---------------------------------------------- | ------------------------------------------- |
+| `0`  | Use-imported classes                           | Developer explicitly imported this name     |
+| `1`  | Same-namespace classes (from `ast_map`)        | PHP auto-resolves without a `use` statement |
+| `2`  | Everything else (class index, classmap, stubs) | Requires a `use` import                     |
+
+**Import affinity**. A four-digit inverted score derived from the file's namespace declaration and existing `use` imports. Namespaces that appear frequently in the file's imports score higher, pushing related classes above unrelated ones within the same tier. The score sums occurrence counts across all ancestor prefixes of the candidate's namespace.
+
+**Name-length gap**. A three-digit distance between the short name length and the typed prefix length (`short_name.len() - prefix.len()`). Smaller gaps sort first. This sits after affinity so namespace proximity remains the stronger signal, but it breaks ties within the same affinity group. The effect: typing `"Pro"` ranks `Product` (gap 4) above `ProductFilterTerm` (gap 14) when both live in the same namespace. This smooths the visual transition as a prefix match narrows toward an exact match. Without it, there is a visible "snap" when a candidate suddenly jumps to the top upon becoming an exact match.
+
+**Heuristic demotion**. `0` = normal, `1` = demoted by naming-convention heuristics (see below). Demotion sits after match quality in the key, so a demoted exact match still ranks above every non-demoted prefix match.
+
+The result set is capped at 300 items. When truncated, `is_incomplete` is set to `true` so the editor re-requests completions as the user types more characters. Items are sorted by `sort_text` before truncation so higher-priority items survive.
 
 ### Kind Filtering
 
@@ -882,13 +896,12 @@ The scan handles PHP 8.2 `readonly` classes (`final readonly class Foo`) by stri
 
 ### Naming-Convention Heuristics
 
-When a class is not loaded and not a stub (typically a classmap or class_index entry whose file has not been opened), the LSP has no kind information. Rather than guess, it uses naming conventions to adjust sort order:
+When a class is not loaded and not a stub (typically a classmap or class_index entry whose file has not been opened), the LSP has no kind information. Rather than guess, it uses naming conventions to adjust sort order via the demotion flag in `sort_text`:
 
-- Names ending in `Interface` are demoted in `ExtendsClass` and `New`.
-- Names ending in `Trait` are demoted in `Implements`, `ExtendsInterface`, and `New`.
-- Names starting with `Abstract` are demoted in `New`.
+- Names ending in `Interface` or starting with `I[A-Z]` are demoted in `ExtendsClass` and `New`.
+- Names starting with `Abstract` or `Base[A-Z]` are demoted in `Implements`, `ExtendsInterface`, `TraitUse`, and `New`.
 
-Demotion means a worse sort prefix (`9_` instead of the source's normal prefix), pushing the item to the bottom of the list. The item is never removed, because naming conventions are not reliable enough to exclude candidates entirely.
+Demotion sets the fifth dimension of the sort key to `1`, pushing the item below non-demoted items within the same match quality, tier, affinity, and gap group. The item is never removed, because naming conventions are not reliable enough to exclude candidates entirely. A demoted exact match still ranks above every non-demoted prefix match, since match quality is the primary dimension.
 
 ## Memory Overhead
 
