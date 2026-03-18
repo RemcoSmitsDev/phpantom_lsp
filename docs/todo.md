@@ -21,15 +21,14 @@ within the same impact tier.
 
 ## Sprint 4 — Refactoring toolkit
 
-| #   | Item                                                                              | Impact | Effort |
-| --- | --------------------------------------------------------------------------------- | ------ | ------ |
-|     | Clear [refactoring gate](todo/refactor.md)                                        | —      | —      |
-| A1  | [Extract method](todo/actions.md#a1-extract-method)                               | High   | High   |
-| A2  | [Extract variable](todo/actions.md#a2-extract-variable)                           | Medium | Medium |
-| A4  | [Inline variable](todo/actions.md#a4-inline-variable)                             | Medium | Medium |
-| A5  | [Change visibility](todo/actions.md#a5-change-visibility)                         | Medium | Low    |
-| A6  | [Generate constructor](todo/actions.md#a6-generate-constructor)                   | Medium | Medium |
-| A7  | [Promote constructor parameter](todo/actions.md#a7-promote-constructor-parameter) | Medium | Low    |
+| #   | Item                                                                               | Impact | Effort |
+| --- | ---------------------------------------------------------------------------------- | ------ | ------ |
+| R1  | [Extract cursor-context AST helper](todo/refactor.md#r1-cursor-context-ast-helper) | —      | Low    |
+| A1  | [Extract method](todo/actions.md#a1-extract-method)                                | High   | High   |
+| A2  | [Extract variable](todo/actions.md#a2-extract-variable)                            | Medium | Medium |
+| A4  | [Inline variable](todo/actions.md#a4-inline-variable)                              | Medium | Medium |
+| A6  | [Generate constructor](todo/actions.md#a6-generate-constructor)                    | Medium | Medium |
+| A7  | [Promote constructor parameter](todo/actions.md#a7-promote-constructor-parameter)  | Medium | Low    |
 
 ## Sprint 5 — Polish for office adoption
 

@@ -15,6 +15,7 @@ Constant) all depend on. It provides forward-pass variable usage
 tracking with byte offsets across function scopes.
 
 ## A1. Simplify with null coalescing / null-safe operator
+
 **Impact: Medium · Effort: Medium**
 
 Offer code actions to simplify common nullable patterns:
@@ -43,6 +44,7 @@ if-statement patterns are a follow-up.
 ---
 
 ## A11. ScopeCollector infrastructure
+
 **Impact: Medium · Effort: Medium**
 
 A lightweight forward-pass AST walker that collects every variable
@@ -112,14 +114,15 @@ once and produces a `ScopeMap` containing:
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
+| Feature                                 | What it contributes                                           |
+| --------------------------------------- | ------------------------------------------------------------- |
 | Find References (see `lsp-features.md`) | Variable usage tracking across a scope — overlapping analysis |
-| Implement missing methods (shipped) | Validates the code action + `WorkspaceEdit` plumbing |
+| Implement missing methods (shipped)     | Validates the code action + `WorkspaceEdit` plumbing          |
 
 ---
 
 ## A2. Extract Function refactoring
+
 **Impact: Low-Medium · Effort: High**
 
 Select a range of statements inside a method/function and extract them into a
@@ -143,16 +146,17 @@ class, not a standalone function.
 
 ### Prerequisites (build these first)
 
-| Feature | What it contributes |
-|---|---|
-| ScopeCollector (A11) | Variable read/write tracking with byte offsets, range partitioning |
-| Hover | "Resolve type at arbitrary position" — needed to type params |
+| Feature                                  | What it contributes                                                                       |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| ScopeCollector (A11)                     | Variable read/write tracking with byte offsets, range partitioning                        |
+| Hover                                    | "Resolve type at arbitrary position" — needed to type params                              |
 | Document Symbols (see `lsp-features.md`) | AST range → symbol mapping — needed to find enclosing function and valid insertion points |
-| Implement missing methods (shipped) | Builds the code action + `WorkspaceEdit` plumbing |
+| Implement missing methods (shipped)      | Builds the code action + `WorkspaceEdit` plumbing                                         |
 
 ---
 
 ## A3. Switch → match conversion
+
 **Impact: Low · Effort: Medium**
 
 Offer a code action to convert a `switch` statement to a `match`
@@ -191,6 +195,7 @@ but bounded in scope.
 ---
 
 ## A4. Inline Variable
+
 **Impact: Medium · Effort: Medium**
 
 Replace every occurrence of a variable with its right-hand-side
@@ -251,13 +256,14 @@ Before offering the action, verify:
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
+| Feature              | What it contributes                            |
+| -------------------- | ---------------------------------------------- |
 | ScopeCollector (A11) | Variable read/write tracking with byte offsets |
 
 ---
 
 ## A5. Extract Variable
+
 **Impact: Medium · Effort: Medium**
 
 Select an expression and extract it into a new local variable assigned
@@ -321,13 +327,14 @@ insert before the `if` statement, not inside the condition.
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
+| Feature              | What it contributes                                             |
+| -------------------- | --------------------------------------------------------------- |
 | ScopeCollector (A11) | Enclosing scope detection and variable name collision avoidance |
 
 ---
 
 ## A6. Inline Function/Method
+
 **Impact: Medium · Effort: High**
 
 Replace a function or method call with the body of the called function,
@@ -420,14 +427,15 @@ When the callee has multiple statements:
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
-| Go-to-Definition | Resolves call site to the callee's definition location and source |
-| ScopeCollector (A11) | Variable collision detection at the call site |
+| Feature              | What it contributes                                               |
+| -------------------- | ----------------------------------------------------------------- |
+| Go-to-Definition     | Resolves call site to the callee's definition location and source |
+| ScopeCollector (A11) | Variable collision detection at the call site                     |
 
 ---
 
 ## A7. Extract Constant
+
 **Impact: Medium · Effort: Medium**
 
 Select a literal value (string, integer, float, boolean) inside a class
@@ -495,13 +503,14 @@ for literals.
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
+| Feature              | What it contributes                                        |
+| -------------------- | ---------------------------------------------------------- |
 | ScopeCollector (A11) | Class body traversal and constant name collision detection |
 
 ---
 
 ## A8. Update Docblock to Match Signature
+
 **Impact: Medium · Effort: Medium**
 
 When a function or method signature changes (parameters added, removed,
@@ -566,62 +575,15 @@ This code action regenerates or patches the `@param`, `@return`, and
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
-| Docblock tag parsing (`docblock/tags.rs`) | Extracts existing `@param`/`@return` tags with positions |
-| Parser (`parser/functions.rs`) | Extracts parameter names, types, and return type from the signature |
-
----
-
-## A9. Change Visibility
-**Impact: Low-Medium · Effort: Low**
-
-Change the visibility of a method, property, constant, or class from the
-cursor position. Offers all applicable alternatives as separate code
-actions.
-
-### Behaviour
-
-- **Trigger:** Cursor is on (or inside) a method, property, constant, or
-  promoted constructor parameter that has an explicit visibility modifier.
-- **Code action kind:** `refactor.rewrite`.
-- **Offered actions:** One action per alternative visibility. For a
-  `public` method, offer "Make protected" and "Make private". For a
-  `private` property, offer "Make protected" and "Make public".
-
-### What can be changed
-
-- Methods: `public` ↔ `protected` ↔ `private`.
-- Properties (including promoted constructor parameters): same.
-- Constants: `public` ↔ `protected` ↔ `private` (PHP 8.1+).
-- Constructor visibility promotion: `public function __construct(private string $name)` —
-  change `private` to `protected` or `public`.
-
-### Scope
-
-This is a single-file edit. It does **not** update call sites or
-subclass overrides in other files. If a user makes a public method
-private and there are external callers, they'll see errors from
-diagnostics or their static analyser. Cross-file visibility propagation
-is a possible follow-up but not required for the initial implementation.
-
-### Implementation
-
-- Find the visibility keyword token for the member under the cursor.
-- Determine the current visibility.
-- For each alternative visibility, create a code action whose
-  `WorkspaceEdit` replaces the visibility keyword token with the new one.
-- Handle the edge case of implicit public visibility (no keyword present)
-  by inserting the keyword before the `function`/property token.
-
-### Prerequisites
-
-None beyond basic AST navigation. This is one of the simplest possible
-code actions.
+| Feature                                   | What it contributes                                                 |
+| ----------------------------------------- | ------------------------------------------------------------------- |
+| Docblock tag parsing (`docblock/tags.rs`) | Extracts existing `@param`/`@return` tags with positions            |
+| Parser (`parser/functions.rs`)            | Extracts parameter names, types, and return type from the signature |
 
 ---
 
 ## A10. Generate Interface from Class
+
 **Impact: Low-Medium · Effort: Medium**
 
 Extract an interface from an existing class. The new interface contains
@@ -685,7 +647,159 @@ interface file path is derived from the namespace.
 
 ### Prerequisites
 
-| Feature | What it contributes |
-|---|---|
-| Parser (`parser/classes.rs`) | Extracts public method signatures with full type information |
+| Feature                             | What it contributes                                                               |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| Parser (`parser/classes.rs`)        | Extracts public method signatures with full type information                      |
 | Implement missing methods (shipped) | Shared infrastructure for generating method stubs and `implements` clause editing |
+
+---
+
+## A6. Generate Constructor
+
+**Impact: Medium · Effort: Medium**
+
+When a class has properties but no constructor, offer a code action to
+generate a constructor that accepts each property as a parameter and
+assigns it.
+
+### Behaviour
+
+- **Trigger:** Cursor is anywhere inside a class body that has at least
+  one non-static property and no existing `__construct` method.
+- **Code action kind:** `refactor.rewrite`.
+- **Result:** A `__construct` method is inserted as the first method in
+  the class body. Each non-static property becomes a parameter with a
+  matching type hint (taken from the property's type declaration or
+  `@var` docblock tag). The body assigns each parameter to the
+  corresponding property: `$this->name = $name;`.
+
+### What gets included
+
+- All non-static, non-readonly properties, in declaration order.
+- Properties with a native type declaration get a matching parameter
+  type hint. Nullable properties (`?Foo`, `Foo|null`) produce a
+  nullable parameter.
+- Properties with only a `@var` docblock type (no native hint) get the
+  docblock type as the parameter type hint if it is a single,
+  non-compound type; otherwise the parameter is untyped.
+- Properties that already have a default value in their declaration get
+  a matching default value on the parameter (e.g.
+  `public string $status = 'active'` → `string $status = 'active'`).
+- `readonly` properties are excluded — they cannot be assigned in a
+  constructor body after PHP 8.1 (use constructor promotion for those;
+  see A7).
+- Static properties are excluded.
+
+### Insertion point
+
+Insert the constructor as the first method in the class body, after any
+property declarations, at the same indentation level as the other
+members. Detect indentation from the existing class body.
+
+### Implementation
+
+- Use the shared cursor-context helper (see refactor.md) to find the
+  class the cursor is inside. Confirm there is no existing
+  `__construct` method — if one exists, do not offer the action.
+- Walk the class members to collect qualifying properties in declaration
+  order.
+- Build the parameter list and assignment body from the collected
+  properties.
+- Find the insertion offset: the byte offset of the closing `}` of the
+  last property declaration, or the opening `{` of the class body if
+  there are no properties before any existing methods.
+- Build a `WorkspaceEdit` that inserts the generated constructor text at
+  the insertion offset.
+
+### Edge cases
+
+- **No qualifying properties:** Do not offer the action if there are no
+  non-static, non-readonly properties to generate parameters for.
+- **Class already has a constructor:** Do not offer the action.
+- **Abstract class:** Offer the action — abstract classes can have
+  constructors.
+- **Union types:** Preserve union type hints as-is on the parameter
+  (e.g. `int|string $id`).
+
+### Prerequisites
+
+| Feature                                       | What it contributes                                        |
+| --------------------------------------------- | ---------------------------------------------------------- |
+| Cursor-context AST helper (R1 in refactor.md) | Locating the enclosing class and its members at the cursor |
+| `detect_class_indent` (implement_methods.rs)  | Detecting the indentation style to use in generated code   |
+
+---
+
+## A7. Promote Constructor Parameter
+
+**Impact: Medium · Effort: Low**
+
+Convert a regular constructor parameter + property assignment pair into
+a single constructor-promoted property.
+
+### Behaviour
+
+- **Trigger:** Cursor is on a constructor parameter that has a
+  corresponding `$this->name = $name;` assignment in the constructor
+  body, and a matching property declaration in the class body.
+- **Code action kind:** `refactor.rewrite`.
+- **Result:** The property declaration is removed, the assignment
+  statement is removed, and the parameter gains a visibility modifier
+  (`public`, `protected`, or `private` — matching the original
+  property's visibility, defaulting to `public` if undetectable).
+
+### What qualifies
+
+A parameter qualifies for promotion when all of the following hold:
+
+1. It is a parameter of `__construct`.
+2. A property exists in the class with the same name.
+3. The constructor body contains exactly one assignment of the form
+   `$this->name = $name;` for that parameter (no more, no less — if
+   the parameter is used for anything else in the body, promotion would
+   change semantics).
+4. The property is not `static`.
+5. The property is not already promoted.
+
+### Scope
+
+Single-file edit only. Does not affect call sites (promotion is
+transparent to callers).
+
+### Implementation
+
+- Use the shared cursor-context helper (see refactor.md) to confirm the
+  cursor is on a `__construct` parameter.
+- Walk the class members to find the matching property declaration and
+  record its visibility and byte span.
+- Walk the constructor body to find the matching assignment statement
+  and record its byte span (full statement including leading whitespace
+  and trailing newline).
+- Verify that the parameter is not used in any other way in the
+  constructor body (simple scan: if `$paramName` appears more than once
+  in the constructor body, reject).
+- Build a `WorkspaceEdit` with three edits:
+  1. Delete the property declaration.
+  2. Delete the assignment statement.
+  3. Insert the visibility modifier before the parameter's type hint in
+     the parameter list (e.g. `string $name` → `private string $name`).
+
+### Edge cases
+
+- **Parameter used elsewhere in constructor body:** Do not offer the
+  action (inlining would change semantics or leave the body broken).
+- **Property has a docblock:** Drop it — promoted properties can have
+  docblocks on the parameter itself, but the property-level docblock
+  is typically just `@var` which becomes redundant. The user can add
+  one manually if needed.
+- **Property has a default value:** Carry it over to the promoted
+  parameter default (e.g. `public string $status = 'active'`).
+- **Readonly property:** Promote as `public readonly string $name` (or
+  whatever visibility the original property had). PHP 8.1+ supports
+  `readonly` on promoted parameters.
+
+### Prerequisites
+
+| Feature                                       | What it contributes                                    |
+| --------------------------------------------- | ------------------------------------------------------ |
+| Cursor-context AST helper (R1 in refactor.md) | Locating the enclosing class and constructor parameter |
