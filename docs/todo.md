@@ -140,11 +140,8 @@ unlikely to move the needle for most users.
 | X4  | Full background indexing (`strategy = "full"`)                           | Medium     | High        |
 | X6  | Disk cache (evaluate later)                                              | Medium     | High        |
 |     | **[Bug Fixes](todo/bugs.md)**                                            |            |             |
-| B2  | Orphan PHPStan processes on server shutdown                              | High       | Low         |
-| B5  | Implementation error diagnostic skips enums                              | Medium     | Low         |
-| B7  | Inlay hints: wrong parameter name with mixed named/positional args       | Medium     | Medium      |
-| B10 | PHPStan cache written after file close causes stale diagnostics          | Low-Medium | Low         |
-| B1  | Native type hints not considered in virtual property specificity ranking | Low-Medium | Medium      |
+| B11 | [Diagnostic deduplication drops distinct diagnostics on same range](todo/bugs.md#b11--diagnostic-deduplication-drops-distinct-diagnostics-on-the-same-range) | Medium | Low |
+| B12 | [PHPStan cache pruning uses length-only comparison](todo/bugs.md#b12--phpstan-cache-pruning-uses-length-only-comparison) | Low | Low |
 |     | **[Inline Completion](todo/inline-completion.md)**                       |            |             |
 | N1  | Template engine (type-aware snippets)                                    | Medium     | High        |
 | N2  | N-gram prediction from PHP corpus                                        | Medium     | Very High   |
