@@ -612,13 +612,12 @@ impl Backend {
             };
 
             // ── Step 6: cache results and re-publish ────────────────
-            {
-                let mut cache = self.phpstan_last_diags.lock();
-                cache.insert(uri.clone(), phpstan_diags);
-            }
-
-            // Re-deliver diagnostics for this file so the editor sees
-            // the fresh PHPStan results merged with native diagnostics.
+            // Read the file content and verify the file is still open
+            // *before* writing to the cache.  If the file was closed
+            // while PHPStan was running, `clear_diagnostics_for_file`
+            // already purged the cache entry — writing it back would
+            // leave stale diagnostics that resurface on the next
+            // `did_open`.
             let content = {
                 let files = self.open_files.read();
                 match files.get(&uri) {
@@ -626,6 +625,14 @@ impl Backend {
                     None => continue,
                 }
             };
+
+            {
+                let mut cache = self.phpstan_last_diags.lock();
+                cache.insert(uri.clone(), phpstan_diags);
+            }
+
+            // Re-deliver diagnostics for this file so the editor sees
+            // the fresh PHPStan results merged with native diagnostics.
             self.publish_diagnostics_for_file(&uri, &content).await;
         }
     }

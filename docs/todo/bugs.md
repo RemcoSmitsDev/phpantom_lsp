@@ -33,24 +33,6 @@ parameters in order.
 
 ---
 
-## B10. PHPStan cache written after file close causes stale diagnostics on reopen
-
-**Impact: Low-Medium · Effort: Low**
-
-If PHPStan is running for a file when the user closes it,
-`clear_diagnostics_for_file` clears the cache first, then the
-PHPStan worker finishes and writes its results back into
-`phpstan_last_diags`. The next `did_open` merges these stale
-diagnostics.
-
-**Fix:** After the PHPStan worker writes results, check that the
-file is still in `open_files` before caching. Alternatively, tag
-cached results with a version counter and discard stale entries.
-
-**File:** `src/diagnostics/mod.rs` (PHPStan worker, around L593-596).
-
----
-
 ## B1. Native type hints not considered in virtual property specificity ranking
 
 **Impact: Low-Medium · Effort: Medium**
