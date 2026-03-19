@@ -632,6 +632,14 @@ impl Backend {
         &self.open_files
     }
 
+    /// Borrow the PHPStan diagnostics cache (used by integration tests
+    /// to inject PHPStan diagnostics without running PHPStan).
+    pub fn phpstan_last_diags(
+        &self,
+    ) -> &Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>> {
+        &self.phpstan_last_diags
+    }
+
     /// Return the configured PHP version.
     pub fn php_version(&self) -> types::PhpVersion {
         *self.php_version.lock()

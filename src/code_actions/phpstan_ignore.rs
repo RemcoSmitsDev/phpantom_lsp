@@ -54,6 +54,10 @@ impl Backend {
         // ── Add @phpstan-ignore ─────────────────────────────────────────
         // For each PHPStan diagnostic overlapping the request range that
         // has a usable identifier, offer to add an ignore comment.
+        // Group diagnostics by (line, identifier) so that multiple
+        // diagnostics with the same identifier on the same line produce
+        // a single code action with all of them attached.
+        let mut ignore_groups: HashMap<(u32, String), Vec<Diagnostic>> = HashMap::new();
         for diag in &phpstan_diags {
             if !ranges_overlap(&diag.range, &params.range) {
                 continue;
@@ -75,12 +79,19 @@ impl Backend {
             }
 
             let line = diag.range.start.line;
-            let line_text = match content.lines().nth(line as usize) {
+            ignore_groups
+                .entry((line, identifier.to_string()))
+                .or_default()
+                .push(diag.clone());
+        }
+
+        for ((line, identifier), diags) in &ignore_groups {
+            let line_text = match content.lines().nth(*line as usize) {
                 Some(l) => l,
                 None => continue,
             };
 
-            let edit = build_add_ignore_edit(content, line, line_text, identifier);
+            let edit = build_add_ignore_edit(content, *line, line_text, identifier);
 
             let mut changes = HashMap::new();
             changes.insert(doc_uri.clone(), vec![edit]);
@@ -88,7 +99,7 @@ impl Backend {
             out.push(CodeActionOrCommand::CodeAction(CodeAction {
                 title: format!("Ignore PHPStan error ({})", identifier),
                 kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: Some(vec![diag.clone()]),
+                diagnostics: Some(diags.clone()),
                 edit: Some(WorkspaceEdit {
                     changes: Some(changes),
                     document_changes: None,

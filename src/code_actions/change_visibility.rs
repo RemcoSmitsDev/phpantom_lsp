@@ -165,6 +165,20 @@ fn find_in_members<'a>(
         }
         match member {
             ClassLikeMember::Method(method) => {
+                // Only offer the action when the cursor is on the
+                // signature (modifiers, name, parameters, return type),
+                // not inside the method body.
+                let body_start = method.body.span().start.offset;
+                if cursor >= body_start {
+                    // Cursor is inside the body — check promoted
+                    // constructor parameters (they are part of the
+                    // signature) but not the method-level visibility.
+                    if let Some(hit) = find_promoted_param_visibility(method, cursor) {
+                        return Some(hit);
+                    }
+                    continue;
+                }
+
                 // Check promoted constructor parameters first.
                 if let Some(hit) = find_promoted_param_visibility(method, cursor) {
                     return Some(hit);
@@ -256,6 +270,47 @@ mod tests {
         let php = "<?php\nclass Foo {\n    public function bar() {}\n}";
         let pos = php.find("public function").unwrap() as u32;
         let hit = find_vis(php, pos + 2).unwrap();
+        assert_eq!(hit.current, "public");
+    }
+
+    #[test]
+    fn no_visibility_inside_method_body() {
+        let php = "<?php\nclass Foo {\n    public function bar() {\n        $x = 1;\n    }\n}";
+        // Place cursor on `$x = 1;` inside the method body.
+        let pos = php.find("$x = 1").unwrap() as u32;
+        let hit = find_vis(php, pos);
+        assert!(
+            hit.is_none(),
+            "should not offer visibility change inside method body"
+        );
+    }
+
+    #[test]
+    fn no_visibility_on_method_opening_brace() {
+        let php = "<?php\nclass Foo {\n    public function bar() {\n        $x = 1;\n    }\n}";
+        // Place cursor on the opening brace of the method body.
+        let pos = php.find("{\n        $x").unwrap() as u32;
+        let hit = find_vis(php, pos);
+        assert!(
+            hit.is_none(),
+            "should not offer visibility change on method body brace"
+        );
+    }
+
+    #[test]
+    fn finds_visibility_on_method_name() {
+        let php = "<?php\nclass Foo {\n    public function bar() {\n        $x = 1;\n    }\n}";
+        let pos = php.find("bar").unwrap() as u32;
+        let hit = find_vis(php, pos).unwrap();
+        assert_eq!(hit.current, "public");
+    }
+
+    #[test]
+    fn finds_visibility_on_method_return_type() {
+        let php =
+            "<?php\nclass Foo {\n    public function bar(): void {\n        $x = 1;\n    }\n}";
+        let pos = php.find("void").unwrap() as u32;
+        let hit = find_vis(php, pos).unwrap();
         assert_eq!(hit.current, "public");
     }
 

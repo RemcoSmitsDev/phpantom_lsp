@@ -17,6 +17,15 @@
 //! - **PHPStan ignore** — when the cursor is on a line with a PHPStan
 //!   error, offer to add `@phpstan-ignore <identifier>`.  When PHPStan
 //!   reports an unnecessary ignore, offer to remove it.
+//! - **Add @throws** — when PHPStan reports a
+//!   `missingType.checkedException` error, offer to add a `@throws`
+//!   tag to the enclosing function/method docblock and import the
+//!   exception class if needed.
+//! - **Remove @throws** — when PHPStan reports `throws.unusedType`
+//!   (a `@throws` tag for a type that is never thrown) or
+//!   `throws.notThrowable` (a `@throws` tag for a type that is not
+//!   a subtype of `Throwable`), offer to remove the offending
+//!   `@throws` line from the docblock.
 //! - **Change visibility** — when the cursor is on a method, property,
 //!   constant, or promoted constructor parameter with an explicit
 //!   visibility modifier, offer to change it to each alternative
@@ -27,10 +36,12 @@
 //!   stale ones, reorder, fix contradicted types, remove redundant
 //!   `@return void`).
 
+mod add_throws;
 mod change_visibility;
 pub(crate) mod implement_methods;
 mod import_class;
 mod phpstan_ignore;
+mod remove_throws;
 mod remove_unused_import;
 mod replace_deprecated;
 mod update_docblock;
@@ -65,6 +76,12 @@ impl Backend {
 
         // ── PHPStan ignore / remove unnecessary ignore ──────────────────
         self.collect_phpstan_ignore_actions(uri, content, params, &mut actions);
+
+        // ── Add @throws for checked exceptions ──────────────────────────
+        self.collect_add_throws_actions(uri, content, params, &mut actions);
+
+        // ── Remove invalid/unused @throws ───────────────────────────────
+        self.collect_remove_throws_actions(uri, content, params, &mut actions);
 
         // ── Change visibility ───────────────────────────────────────────
         self.collect_change_visibility_actions(uri, content, params, &mut actions);

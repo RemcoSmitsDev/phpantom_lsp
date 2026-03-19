@@ -151,6 +151,16 @@ impl Backend {
 
     /// Build a merged diagnostic set from fresh fast diagnostics,
     /// cached slow diagnostics, and cached PHPStan diagnostics.
+    ///
+    /// Stale PHPStan diagnostics are eagerly pruned when the current
+    /// file content no longer matches the condition that triggered
+    /// them.  This gives instant visual feedback after applying a
+    /// code action without waiting for the next PHPStan run:
+    ///
+    /// - `throws.*` diagnostics are pruned when the `@throws` tag
+    ///   they reference has been added or removed.
+    /// - Any PHPStan diagnostic is pruned when its line now contains
+    ///   a `@phpstan-ignore` comment that covers the identifier.
     fn merge_fast_with_cached(&self, uri_str: &str, fast: &[Diagnostic]) -> Vec<Diagnostic> {
         let mut merged = fast.to_vec();
         {
@@ -160,14 +170,187 @@ impl Backend {
             }
         }
         {
-            let cache = self.phpstan_last_diags.lock();
+            let content: Option<Arc<String>> = self.open_files.read().get(uri_str).cloned();
+            let mut cache = self.phpstan_last_diags.lock();
             if let Some(prev_phpstan) = cache.get(uri_str) {
-                merged.extend(prev_phpstan.iter().cloned());
+                let filtered: Vec<Diagnostic> = prev_phpstan
+                    .iter()
+                    .filter(|d| {
+                        if let Some(ref text) = content {
+                            !is_stale_phpstan_diagnostic(d, text)
+                        } else {
+                            true
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if filtered.len() != prev_phpstan.len() {
+                    cache.insert(uri_str.to_string(), filtered.clone());
+                }
+                merged.extend(filtered);
             }
         }
         deduplicate_diagnostics(&mut merged);
         merged
     }
+}
+
+/// Check whether a cached PHPStan diagnostic is stale given the current
+/// file content.
+///
+/// A diagnostic is stale when the user has already fixed the underlying
+/// issue (via a code action or manual edit) but PHPStan hasn't re-run
+/// yet to clear it:
+///
+/// - `throws.unusedType` / `throws.notThrowable`: the `@throws` tag
+///   was removed — stale if the type no longer appears after `@throws`.
+/// - `missingType.checkedException`: the `@throws` tag was added —
+///   stale if the exception short name now appears after `@throws`.
+/// - **Any identifier**: the line now contains a `@phpstan-ignore`
+///   comment that covers the diagnostic's identifier.
+fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
+    let identifier = match &diag.code {
+        Some(NumberOrString::String(s)) => s.as_str(),
+        _ => return false,
+    };
+
+    // ── @phpstan-ignore covers this diagnostic ──────────────────────
+    // If the line where the diagnostic appears now has a
+    // `@phpstan-ignore` comment listing this identifier, the user
+    // already suppressed it and the diagnostic is stale.
+    if !identifier.is_empty()
+        && identifier != "phpstan"
+        && !identifier.starts_with("ignore.unmatched")
+        && line_has_ignore_for(content, diag.range.start.line, identifier)
+    {
+        return true;
+    }
+
+    // ── @throws-specific checks ─────────────────────────────────────
+    match identifier {
+        "throws.unusedType" | "throws.notThrowable" => {
+            // The diagnostic references a type in a @throws tag.
+            // If that type no longer appears after `@throws` in the
+            // content, the tag was removed and the diagnostic is stale.
+            let type_name = extract_throws_diag_type(&diag.message, identifier);
+            match type_name {
+                Some(t) => {
+                    let short = t.rsplit('\\').next().unwrap_or(&t);
+                    !content_has_throws_tag(content, short)
+                }
+                None => false,
+            }
+        }
+        "missingType.checkedException" => {
+            // The diagnostic says a @throws tag is missing.  If the
+            // exception short name now appears after `@throws`, the
+            // user added it and the diagnostic is stale.
+            let fqn = extract_checked_exception_fqn(&diag.message);
+            match fqn {
+                Some(f) => {
+                    let short = f.rsplit('\\').next().unwrap_or(&f);
+                    content_has_throws_tag(content, short)
+                }
+                None => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Extract the type name from a `throws.unusedType` or
+/// `throws.notThrowable` message.
+fn extract_throws_diag_type(message: &str, identifier: &str) -> Option<String> {
+    if identifier == "throws.unusedType" {
+        let start = message.find(" has ")? + 5;
+        let rest = &message[start..];
+        let end = rest.find(" in PHPDoc @throws tag")?;
+        Some(rest[..end].trim().to_string())
+    } else {
+        let start = message.find("@throws with type ")? + 18;
+        let rest = &message[start..];
+        let end = rest.find(" is not subtype")?;
+        Some(rest[..end].trim().to_string())
+    }
+}
+
+/// Extract the exception FQN from a `missingType.checkedException` message.
+fn extract_checked_exception_fqn(message: &str) -> Option<String> {
+    let marker = "throws checked exception ";
+    let start = message.find(marker)? + marker.len();
+    let rest = &message[start..];
+    let end = rest.find(" but")?;
+    let fqn = rest[..end].trim().trim_start_matches('\\');
+    if fqn.is_empty() {
+        return None;
+    }
+    Some(fqn.to_string())
+}
+
+/// Check whether the diagnostic's line (or the line before it) has a
+/// `@phpstan-ignore` comment that lists the given identifier.
+///
+/// PHPStan ignore comments can appear:
+/// - On the same line as the code: `$x = foo(); // @phpstan-ignore id`
+/// - On the line before: `// @phpstan-ignore id`
+///
+/// Only the per-identifier form (`@phpstan-ignore id1, id2`) is
+/// checked.  The blanket `@phpstan-ignore-line` and
+/// `@phpstan-ignore-next-line` variants are **not** treated as a
+/// match — our code action only produces per-identifier ignores, so
+/// we should not eagerly clear diagnostics that happen to sit on a
+/// line with a blanket suppression the user added independently.
+fn line_has_ignore_for(content: &str, diag_line: u32, identifier: &str) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let line_idx = diag_line as usize;
+
+    // Check the diagnostic line itself and the line before it.
+    for idx in [line_idx, line_idx.wrapping_sub(1)] {
+        if idx >= lines.len() {
+            continue;
+        }
+        let line = lines[idx];
+        if let Some(ignore_pos) = line.find("@phpstan-ignore") {
+            let after = &line[ignore_pos + "@phpstan-ignore".len()..];
+            // `@phpstan-ignore-line` and `@phpstan-ignore-next-line`
+            // suppress everything — we can't attribute them to any
+            // single identifier, so skip them.
+            if after.starts_with("-line") || after.starts_with("-next-line") {
+                continue;
+            }
+            // Parse the comma-separated identifier list.
+            let ids_text = after.trim_start();
+            // Stop at `*/`, ` (reason)`, or end of string.
+            let ids_end = ids_text
+                .find("*/")
+                .or_else(|| ids_text.find(" ("))
+                .unwrap_or(ids_text.len());
+            let ids = &ids_text[..ids_end];
+            if ids.split(',').any(|id| id.trim() == identifier) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check whether the content contains `@throws <short_name>` (case-insensitive).
+fn content_has_throws_tag(content: &str, short_name: &str) -> bool {
+    let lower = short_name.to_lowercase();
+    for line in content.lines() {
+        let trimmed = line.trim().trim_start_matches('*').trim();
+        if let Some(rest) = trimmed.strip_prefix("@throws") {
+            let rest = rest.trim_start();
+            if let Some(tag_type) = rest.split_whitespace().next() {
+                let tag_short = tag_type.trim_start_matches('\\');
+                let tag_short = tag_short.rsplit('\\').next().unwrap_or(tag_short);
+                if tag_short.to_lowercase() == lower {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// How long to wait after the last keystroke before publishing diagnostics.
@@ -1232,5 +1415,260 @@ mod tests {
         let mut diags = vec![fast, slow, phpstan];
         deduplicate_diagnostics(&mut diags);
         assert_eq!(diags.len(), 1);
+    }
+
+    // ── is_stale_phpstan_diagnostic ─────────────────────────────────
+
+    /// Helper: build a PHPStan-style full-line diagnostic.
+    fn make_phpstan_diag(line: u32, code: &str, message: &str) -> Diagnostic {
+        Diagnostic {
+            range: make_range(line, 0, line, 200),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String(code.to_string())),
+            source: Some("PHPStan".to_string()),
+            message: message.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stale_throws_unused_type_when_tag_removed() {
+        let content = "<?php\nclass Foo {\n    public function bar(): void {}\n}\n";
+        let diag = make_phpstan_diag(
+            2,
+            "throws.unusedType",
+            "Method App\\Foo::bar() has App\\Exceptions\\FooException in PHPDoc @throws tag but it's not thrown.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&diag, content),
+            "should be stale when @throws FooException no longer in file"
+        );
+    }
+
+    #[test]
+    fn not_stale_throws_unused_type_when_tag_still_present() {
+        let content = "<?php\nclass Foo {\n    /**\n     * @throws FooException\n     */\n    public function bar(): void {}\n}\n";
+        let diag = make_phpstan_diag(
+            5,
+            "throws.unusedType",
+            "Method App\\Foo::bar() has App\\Exceptions\\FooException in PHPDoc @throws tag but it's not thrown.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "should NOT be stale when @throws FooException is still in the file"
+        );
+    }
+
+    #[test]
+    fn other_diag_on_same_line_not_affected_by_throws_removal() {
+        // After removing @throws Decimal, the file no longer has the tag.
+        // A throws.unusedType diagnostic for Decimal should be stale,
+        // but a different diagnostic (e.g. return.type) on the same
+        // line must NOT be stale.
+        let content = "<?php\nclass Foo {\n    public function bar(): void {}\n}\n";
+        let throws_diag = make_phpstan_diag(
+            2,
+            "throws.unusedType",
+            "Method App\\Foo::bar() has Decimal in PHPDoc @throws tag but it's not thrown.",
+        );
+        let other_diag = make_phpstan_diag(
+            2,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&throws_diag, content),
+            "throws.unusedType for Decimal should be stale"
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&other_diag, content),
+            "return.type on the same line must NOT be stale"
+        );
+    }
+
+    #[test]
+    fn only_matching_throws_type_is_stale() {
+        // File still has @throws BarException but not FooException.
+        let content = "<?php\nclass Foo {\n    /**\n     * @throws BarException\n     */\n    public function bar(): void {}\n}\n";
+        let foo_diag = make_phpstan_diag(
+            5,
+            "throws.unusedType",
+            "Method App\\Foo::bar() has App\\Exceptions\\FooException in PHPDoc @throws tag but it's not thrown.",
+        );
+        let bar_diag = make_phpstan_diag(
+            5,
+            "throws.unusedType",
+            "Method App\\Foo::bar() has App\\Exceptions\\BarException in PHPDoc @throws tag but it's not thrown.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&foo_diag, content),
+            "FooException diagnostic should be stale (tag removed)"
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&bar_diag, content),
+            "BarException diagnostic should NOT be stale (tag still present)"
+        );
+    }
+
+    #[test]
+    fn stale_missing_checked_exception_when_tag_added() {
+        let content = "<?php\nclass Foo {\n    /**\n     * @throws FooException\n     */\n    public function bar(): void {}\n}\n";
+        let diag = make_phpstan_diag(
+            5,
+            "missingType.checkedException",
+            "Method App\\Foo::bar() throws checked exception App\\Exceptions\\FooException but it's missing from the PHPDoc @throws tag.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&diag, content),
+            "should be stale when @throws FooException was added"
+        );
+    }
+
+    #[test]
+    fn not_stale_missing_checked_exception_when_tag_absent() {
+        let content = "<?php\nclass Foo {\n    /**\n     * Summary.\n     */\n    public function bar(): void {}\n}\n";
+        let diag = make_phpstan_diag(
+            5,
+            "missingType.checkedException",
+            "Method App\\Foo::bar() throws checked exception App\\Exceptions\\FooException but it's missing from the PHPDoc @throws tag.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "should NOT be stale when @throws FooException is still missing"
+        );
+    }
+
+    #[test]
+    fn stale_when_phpstan_ignore_covers_identifier() {
+        let content = "<?php\nclass Foo {\n    public function bar(): void {} // @phpstan-ignore return.type\n}\n";
+        let diag = make_phpstan_diag(
+            2,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&diag, content),
+            "should be stale when @phpstan-ignore lists the identifier"
+        );
+    }
+
+    #[test]
+    fn not_stale_when_phpstan_ignore_covers_different_identifier() {
+        let content = "<?php\nclass Foo {\n    public function bar(): void {} // @phpstan-ignore argument.type\n}\n";
+        let diag = make_phpstan_diag(
+            2,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "should NOT be stale when @phpstan-ignore lists a different identifier"
+        );
+    }
+
+    #[test]
+    fn not_stale_for_phpstan_ignore_line_blanket() {
+        // @phpstan-ignore-line suppresses everything, but we don't
+        // eagerly prune for it — only per-identifier ignores count.
+        let content =
+            "<?php\nclass Foo {\n    public function bar(): void {} // @phpstan-ignore-line\n}\n";
+        let diag = make_phpstan_diag(
+            2,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "should NOT be stale for blanket @phpstan-ignore-line"
+        );
+    }
+
+    #[test]
+    fn not_stale_for_phpstan_ignore_next_line_blanket() {
+        let content = "<?php\nclass Foo {\n    // @phpstan-ignore-next-line\n    public function bar(): void {}\n}\n";
+        let diag = make_phpstan_diag(
+            3,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "should NOT be stale for blanket @phpstan-ignore-next-line"
+        );
+    }
+
+    #[test]
+    fn stale_when_phpstan_ignore_on_previous_line() {
+        let content = "<?php\nclass Foo {\n    // @phpstan-ignore return.type\n    public function bar(): void {}\n}\n";
+        let diag = make_phpstan_diag(
+            3,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&diag, content),
+            "should be stale when @phpstan-ignore on previous line lists the identifier"
+        );
+    }
+
+    #[test]
+    fn stale_phpstan_ignore_with_multiple_ids() {
+        let content = "<?php\nclass Foo {\n    public function bar(): void {} // @phpstan-ignore return.type, argument.type\n}\n";
+        let return_diag = make_phpstan_diag(
+            2,
+            "return.type",
+            "Method App\\Foo::bar() should return string but returns void.",
+        );
+        let arg_diag = make_phpstan_diag(
+            2,
+            "argument.type",
+            "Parameter #1 $x expects string, int given.",
+        );
+        let other_diag = make_phpstan_diag(2, "method.notFound", "Call to undefined method.");
+        assert!(
+            is_stale_phpstan_diagnostic(&return_diag, content),
+            "return.type should be stale (listed in ignore)"
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&arg_diag, content),
+            "argument.type should be stale (listed in ignore)"
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&other_diag, content),
+            "method.notFound should NOT be stale (not listed)"
+        );
+    }
+
+    #[test]
+    fn diag_with_no_code_is_never_stale() {
+        let content = "<?php\n// @phpstan-ignore return.type\nfoo();";
+        let diag = Diagnostic {
+            range: make_range(1, 0, 1, 200),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            source: Some("PHPStan".to_string()),
+            message: "Some error.".to_string(),
+            ..Default::default()
+        };
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "diagnostic without a code should never be considered stale"
+        );
+    }
+
+    #[test]
+    fn ignore_unmatched_diag_is_never_stale_via_ignore_check() {
+        // ignore.unmatched diagnostics should not be pruned by the
+        // @phpstan-ignore check (they ARE the ignore comment).
+        let content = "<?php\n$x = 1; // @phpstan-ignore ignore.unmatchedIdentifier\n";
+        let diag = make_phpstan_diag(
+            1,
+            "ignore.unmatchedIdentifier",
+            "No error with identifier foo is reported on line 2.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "ignore.unmatched* diagnostics must not be pruned by the ignore check"
+        );
     }
 }

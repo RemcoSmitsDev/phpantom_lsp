@@ -465,7 +465,7 @@ class Foo {
 }
 
 #[test]
-fn action_available_with_cursor_inside_method_body() {
+fn no_action_with_cursor_inside_method_body() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let content = r#"<?php
@@ -477,11 +477,11 @@ class Foo {
 "#;
     backend.update_ast(uri, content);
 
-    // Cursor inside the method body.
+    // Cursor inside the method body — should NOT offer visibility change.
     let actions = get_code_actions(&backend, uri, content, 3, 10);
     let vis_actions = find_visibility_actions(&actions);
 
-    assert_eq!(vis_actions.len(), 2);
+    assert_eq!(vis_actions.len(), 0);
 }
 
 // ── Static method ───────────────────────────────────────────────────────────

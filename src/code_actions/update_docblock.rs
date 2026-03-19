@@ -183,16 +183,19 @@ fn find_function_with_docblock<'a>(
     None
 }
 
-/// Check whether the cursor is inside the AST node span or inside the
-/// docblock trivia that immediately precedes it.
-fn cursor_in_node_or_docblock(
+/// Check whether the cursor is on the function/method signature or inside
+/// the docblock trivia that immediately precedes it, but **not** inside
+/// the body.  The cursor must be in [`node_start`, `body_start`) or
+/// inside the preceding docblock.
+fn cursor_on_signature_or_docblock(
     cursor: u32,
     node_start: u32,
-    node_end: u32,
+    body_start: u32,
     trivia: &[Trivia<'_>],
     content: &str,
 ) -> bool {
-    if cursor >= node_start && cursor <= node_end {
+    // Cursor is on the signature (before the body).
+    if cursor >= node_start && cursor < body_start {
         return true;
     }
     // Check if the cursor is inside the docblock that belongs to this node.
@@ -263,10 +266,11 @@ fn find_in_statement_ud<'a>(
         }
         Statement::Function(func) => {
             let span = func.span();
-            if cursor_in_node_or_docblock(
+            let body_start = func.body.span().start.offset;
+            if cursor_on_signature_or_docblock(
                 cursor,
                 span.start.offset,
-                span.end.offset,
+                body_start,
                 trivia,
                 content,
             ) {
@@ -317,10 +321,11 @@ fn find_in_class_members<'a>(
     for member in members {
         if let ClassLikeMember::Method(method) = member {
             let span = method.span();
-            if cursor_in_node_or_docblock(
+            let body_start = method.body.span().start.offset;
+            if cursor_on_signature_or_docblock(
                 cursor,
                 span.start.offset,
-                span.end.offset,
+                body_start,
                 trivia,
                 content,
             ) {
@@ -623,13 +628,29 @@ fn check_needs_update(
 
     let sig_param_names: Vec<String> = info.sig_params.iter().map(|p| p.name.clone()).collect();
 
-    // Check for missing, extra, or reordered params.
-    if doc_param_names.len() != sig_param_names.len() {
-        return true;
-    }
+    // When the docblock already has at least one @param tag the user has
+    // opted-in to documenting parameters, so every signature param is
+    // relevant.  When the docblock has *zero* @param tags we only consider
+    // params that need enrichment (matching generate-docblock behaviour).
+    let has_any_doc_params = !doc_param_names.is_empty();
 
-    for (doc_name, sig_name) in doc_param_names.iter().zip(sig_param_names.iter()) {
-        if *doc_name != sig_name.as_str() {
+    if has_any_doc_params {
+        // Check for missing, extra, or reordered params.
+        if doc_param_names.len() != sig_param_names.len() {
+            return true;
+        }
+        for (doc_name, sig_name) in doc_param_names.iter().zip(sig_param_names.iter()) {
+            if *doc_name != sig_name.as_str() {
+                return true;
+            }
+        }
+    } else {
+        // No @param tags at all — only flag if a param needs enrichment.
+        let needs_enrichment = info
+            .sig_params
+            .iter()
+            .any(|sp| enrichment_plain(&sp.type_hint, class_loader).is_some());
+        if needs_enrichment {
             return true;
         }
     }
@@ -833,13 +854,15 @@ fn build_updated_docblock(
     let param_entries: Vec<(String, String, String)> = info
         .sig_params
         .iter()
-        .map(|sig| {
+        .filter_map(|sig| {
             // Try to preserve the existing description for this param.
             let existing = info.doc_params.iter().find(|dp| {
                 let n = dp.name.as_str();
                 let n = n.strip_prefix("...").unwrap_or(n);
                 n == sig.name
             });
+
+            let has_any_doc_params = !info.doc_params.is_empty();
 
             let type_str = if let Some(existing) = existing {
                 // If the existing type is a refinement, keep it.
@@ -871,10 +894,15 @@ fn build_updated_docblock(
                 } else {
                     existing.type_str.clone()
                 }
-            } else {
-                // New param — use enrichment or fall back to raw hint / mixed.
+            } else if has_any_doc_params {
+                // The docblock already documents some params, so add this
+                // missing one — use enrichment or fall back to raw hint / mixed.
                 enrichment_plain(&sig.type_hint, class_loader)
                     .unwrap_or_else(|| sig.type_hint.clone().unwrap_or_else(|| "mixed".to_string()))
+            } else {
+                // No @param tags at all — only add a tag when the native
+                // type needs enrichment, matching generate-docblock behaviour.
+                enrichment_plain(&sig.type_hint, class_loader)?
             };
 
             let description = existing.map(|e| e.description.clone()).unwrap_or_default();
@@ -882,7 +910,7 @@ fn build_updated_docblock(
             let name_prefix = if sig.is_variadic { "..." } else { "" };
             let full_name = format!("{}{}", name_prefix, sig.name);
 
-            (type_str, full_name, description)
+            Some((type_str, full_name, description))
         })
         .collect();
 
@@ -1992,5 +2020,206 @@ class Foo {
         assert_eq!(info.doc_params.len(), 1);
         assert_eq!(info.doc_params[0].name, "$a");
         assert_eq!(info.doc_params[0].description, "First param");
+    }
+
+    #[test]
+    fn no_update_for_empty_docblock_with_fully_typed_params() {
+        // When generate-docblock produces `/** */` (no @param tags) because
+        // the native types are sufficient, update-docblock should NOT offer
+        // to add redundant @param tags.
+        let php = r#"<?php
+class Foo {
+    /**
+     *
+     */
+    public function stepIntro(CustomerRequest $request): View {}
+}
+"#;
+        let pos = php.find("function stepIntro").unwrap() as u32;
+        let info = find_info(php, pos).unwrap();
+        let cl = no_class_loader();
+        assert!(
+            !check_needs_update(&info, php, &cl),
+            "should not suggest adding @param for a fully-typed non-templated class param"
+        );
+    }
+
+    #[test]
+    fn no_update_for_empty_docblock_with_scalar_params() {
+        let php = r#"<?php
+class Foo {
+    /**
+     *
+     */
+    public function bar(string $a, int $b, bool $c): void {}
+}
+"#;
+        let pos = php.find("function bar").unwrap() as u32;
+        let info = find_info(php, pos).unwrap();
+        let cl = no_class_loader();
+        assert!(
+            !check_needs_update(&info, php, &cl),
+            "should not suggest adding @param for scalar-typed params"
+        );
+    }
+
+    #[test]
+    fn update_for_empty_docblock_with_untyped_param() {
+        // When a param has no native type, enrichment produces `mixed`,
+        // so the update should be offered.
+        let php = r#"<?php
+class Foo {
+    /**
+     *
+     */
+    public function bar($untyped): void {}
+}
+"#;
+        let pos = php.find("function bar").unwrap() as u32;
+        let info = find_info(php, pos).unwrap();
+        let cl = no_class_loader();
+        assert!(
+            check_needs_update(&info, php, &cl),
+            "should suggest adding @param for an untyped param"
+        );
+    }
+
+    #[test]
+    fn update_for_empty_docblock_with_array_param() {
+        // `array` is enrichable (stays `array` but signals it needs a shape
+        // or value-type annotation), so the update should be offered.
+        let php = r#"<?php
+class Foo {
+    /**
+     *
+     */
+    public function bar(array $items): void {}
+}
+"#;
+        let pos = php.find("function bar").unwrap() as u32;
+        let info = find_info(php, pos).unwrap();
+        let cl = no_class_loader();
+        assert!(
+            check_needs_update(&info, php, &cl),
+            "should suggest adding @param for an array param"
+        );
+    }
+
+    #[test]
+    fn no_info_inside_method_body() {
+        let php = r#"<?php
+class Foo {
+    /**
+     * @param string $a
+     */
+    public function bar(string $a, int $b): void {
+        $x = 1;
+    }
+}
+"#;
+        // Place cursor on `$x = 1;` inside the method body.
+        let pos = php.find("$x = 1").unwrap() as u32;
+        let info = find_info(php, pos);
+        assert!(
+            info.is_none(),
+            "should not offer update docblock inside method body"
+        );
+    }
+
+    #[test]
+    fn no_info_on_method_opening_brace() {
+        let php = r#"<?php
+class Foo {
+    /**
+     * @param string $a
+     */
+    public function bar(string $a, int $b): void {
+        $x = 1;
+    }
+}
+"#;
+        // Place cursor on the opening brace of the method body.
+        let pos = php.find("{\n        $x").unwrap() as u32;
+        let info = find_info(php, pos);
+        assert!(
+            info.is_none(),
+            "should not offer update docblock on method body brace"
+        );
+    }
+
+    #[test]
+    fn finds_info_on_method_name() {
+        let php = r#"<?php
+class Foo {
+    /**
+     * @param string $a
+     */
+    public function bar(string $a, int $b): void {
+        $x = 1;
+    }
+}
+"#;
+        let pos = php.find("bar").unwrap() as u32;
+        let info = find_info(php, pos);
+        assert!(
+            info.is_some(),
+            "should find info when cursor is on method name"
+        );
+    }
+
+    #[test]
+    fn finds_info_on_method_return_type() {
+        let php = r#"<?php
+class Foo {
+    /**
+     * @param string $a
+     */
+    public function bar(string $a, int $b): void {
+        $x = 1;
+    }
+}
+"#;
+        let pos = php.find("void").unwrap() as u32;
+        let info = find_info(php, pos);
+        assert!(
+            info.is_some(),
+            "should find info when cursor is on return type hint"
+        );
+    }
+
+    #[test]
+    fn no_info_inside_standalone_function_body() {
+        let php = r#"<?php
+/**
+ * @param string $a
+ */
+function foo(string $a, int $b): void {
+    $x = 1;
+}
+"#;
+        let pos = php.find("$x = 1").unwrap() as u32;
+        let info = find_info(php, pos);
+        assert!(
+            info.is_none(),
+            "should not offer update docblock inside standalone function body"
+        );
+    }
+
+    #[test]
+    fn finds_info_on_standalone_function_signature() {
+        let php = r#"<?php
+/**
+ * @param string $a
+ */
+function foo(string $a, int $b): void {
+    $x = 1;
+}
+"#;
+        let pos = php.find("function foo").unwrap() as u32;
+        let info = find_info(php, pos);
+        assert!(
+            info.is_some(),
+            "should find info when cursor is on standalone function signature"
+        );
     }
 }

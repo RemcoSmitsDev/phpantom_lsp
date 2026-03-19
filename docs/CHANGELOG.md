@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Change visibility.** The code action no longer appears when the cursor is inside a method body. It now only triggers on the method signature (modifiers, name, parameters, return type).
+- **Update docblock.** The code action no longer appears when the cursor is inside a function or method body. It now only triggers on the signature or the preceding docblock.
+- **Update docblock.** No longer suggests adding redundant `@param` tags when the docblock has no `@param` tags and all parameters already have sufficient native type hints. This matches the generate-docblock behaviour, which intentionally omits `@param` for fully-typed non-templated parameters.
+
 ### Added
 
+- **Add @throws.** New code action triggered by PHPStan's `missingType.checkedException` diagnostic. When PHPStan reports that a method or function throws a checked exception not documented in `@throws`, the quick-fix inserts a `@throws ShortName` tag into the existing docblock (or creates a new docblock) and adds a `use` import for the exception class when needed. Handles methods, standalone functions, and property hooks. Skips the action when the exception is already documented, already imported, or in the same namespace.
+- **Remove @throws.** New code action triggered by PHPStan's `throws.unusedType` (a `@throws` tag for a type that is never thrown) and `throws.notThrowable` (a `@throws` tag for a type that is not a subtype of `Throwable`). The quick-fix removes the offending `@throws` line from the docblock, cleans up orphaned blank separator lines, and removes the entire docblock when it would be empty after removal. Handles FQN, short-name, and leading-backslash variants, as well as single-line docblocks.
+- **Instant feedback for @throws actions.** PHPStan `throws.*` diagnostics are eagerly pruned from the cache when the file content changes and the condition that triggered them no longer holds. After applying an "Add @throws" or "Remove @throws" code action, the diagnostic disappears on the next keystroke without waiting for the next PHPStan run.
 - **Semantic Tokens.** Type-aware syntax highlighting that goes beyond what a TextMate grammar can achieve. Classes, interfaces, enums, traits, methods, properties, parameters, variables, functions, constants, and template parameters all get distinct token types. Modifiers convey declaration sites, static access, readonly, deprecated, and abstract status.
 - **Inlay hints.** Parameter name and by-reference indicators appear at call sites (`textDocument/inlayHint`). Hints are suppressed when the argument already makes the parameter obvious: variable names matching the parameter, property accesses with a matching trailing identifier, string literals whose content matches, well-known single-parameter functions like `count` and `strlen`, and spread arguments. Named arguments never receive a redundant hint. Mixed positional and named argument ordering is handled correctly.
 - **PHPStan diagnostics.** PHPStan errors appear inline as you edit, using PHPStan's editor mode (`--tmp-file` / `--instead-of`). Auto-detects `vendor/bin/phpstan` or `$PATH`. Runs in a dedicated background worker with a 2-second debounce and at most one process at a time, so native diagnostics are never blocked. Configurable via `[phpstan]` in `.phpantom.toml` (`command`, `memory-limit`, `timeout`). "Ignore PHPStan error" and "Remove unnecessary @phpstan-ignore" code actions manage inline ignore comments.

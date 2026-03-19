@@ -526,20 +526,22 @@ fn adds_variadic_prefix_for_new_param() {
 class Foo {
     /**
      * Summary.
+     *
+     * @param string $a The first param
      */
     public function bar(string $a, int ...$rest): void {}
 }
 "#;
     backend.update_ast(uri, content);
 
-    let actions = get_code_actions(&backend, uri, content, 5, 20);
+    let actions = get_code_actions(&backend, uri, content, 7, 20);
     let action =
         find_update_docblock_action(&actions).expect("should offer Update docblock action");
 
     let new_text = extract_edit_text(action);
     assert!(
         contains_param(&new_text, "string", "$a"),
-        "should add $a param: {}",
+        "should keep $a param: {}",
         new_text
     );
     assert!(
@@ -783,7 +785,7 @@ class Foo {
 // ── Empty docblock with just summary ────────────────────────────────────────
 
 #[test]
-fn adds_params_to_summary_only_docblock() {
+fn no_action_for_summary_only_docblock_with_typed_params() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let content = r#"<?php
@@ -796,6 +798,32 @@ class Foo {
 "#;
     backend.update_ast(uri, content);
 
+    // The docblock has zero @param tags and the native type is sufficient,
+    // so no update should be offered (matches generate-docblock behaviour).
+    let actions = get_code_actions(&backend, uri, content, 5, 20);
+    let action = find_update_docblock_action(&actions);
+    assert!(
+        action.is_none(),
+        "should NOT offer Update docblock for summary-only docblock with fully typed params"
+    );
+}
+
+#[test]
+fn adds_params_to_summary_only_docblock_with_untyped_param() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Foo {
+    /**
+     * Process the input.
+     */
+    public function process($input): string {}
+}
+"#;
+    backend.update_ast(uri, content);
+
+    // The param has no native type, so enrichment produces `mixed` and
+    // the update should be offered.
     let actions = get_code_actions(&backend, uri, content, 5, 20);
     let action =
         find_update_docblock_action(&actions).expect("should offer Update docblock action");
@@ -807,8 +835,8 @@ class Foo {
         new_text
     );
     assert!(
-        new_text.contains("@param string $input"),
-        "should add param: {}",
+        new_text.contains("@param mixed $input"),
+        "should add param with mixed type: {}",
         new_text
     );
 }
