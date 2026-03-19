@@ -123,13 +123,15 @@ impl Backend {
         let function_loader = self.function_loader(&ctx);
 
         // Determine if anything needs updating.
-        let needs_update = check_needs_update(&info, content, &class_loader, Some(&function_loader));
+        let needs_update =
+            check_needs_update(&info, content, &class_loader, Some(&function_loader));
         if !needs_update {
             return;
         }
 
         // Build the replacement docblock.
-        let new_docblock = build_updated_docblock(&info, content, &class_loader, Some(&function_loader));
+        let new_docblock =
+            build_updated_docblock(&info, content, &class_loader, Some(&function_loader));
         if new_docblock == info.docblock_text {
             return;
         }
@@ -712,7 +714,14 @@ fn check_needs_update(
     }
 
     // Check for missing @throws tags.
-    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, info.docblock_position, Some(&ThrowsContext { class_loader, function_loader }));
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
+        content,
+        info.docblock_position,
+        Some(&ThrowsContext {
+            class_loader,
+            function_loader,
+        }),
+    );
     let existing_lower: Vec<String> = info
         .doc_throws
         .iter()
@@ -944,7 +953,14 @@ fn build_updated_docblock(
     }
 
     // Add missing @throws tags.
-    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, info.docblock_position, Some(&ThrowsContext { class_loader, function_loader }));
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
+        content,
+        info.docblock_position,
+        Some(&ThrowsContext {
+            class_loader,
+            function_loader,
+        }),
+    );
     let existing_throws_lower: Vec<String> = info
         .doc_throws
         .iter()
@@ -1884,7 +1900,12 @@ class Foo {
             "Should find function info when cursor is inside the docblock"
         );
         let cl = no_class_loader();
-        assert!(check_needs_update(&info.unwrap(), php, &cl, no_function_loader()));
+        assert!(check_needs_update(
+            &info.unwrap(),
+            php,
+            &cl,
+            no_function_loader()
+        ));
     }
 
     #[test]

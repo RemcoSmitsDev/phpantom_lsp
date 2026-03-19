@@ -582,13 +582,12 @@ impl Backend {
 
                     Some(make_hover(lines.join("\n\n")))
                 } else {
-                    let display = if is_this { "$this" } else { keyword };
-                    Some(make_hover(format!("```php\n<?php\n{}\n```", display)))
+                    None
                 }
             }
 
             SymbolKind::ConstantReference { name } => {
-                // Look up the constant value from global_defines or stubs.
+                // Look up the constant from global_defines or stubs.
                 // If not found, check the autoload constant index
                 // (populated by the `find_symbols` byte-level scan for
                 // both non-Composer and Composer projects) and lazily
@@ -596,60 +595,73 @@ impl Backend {
                 // resort, try lazily parsing known autoload files for
                 // constants the byte-level scanner missed (e.g. inside
                 // `if (!defined(...))` guards).
-                let value_text = self
+                //
+                // We track existence separately from the value: a
+                // constant may exist with an unknown value (e.g.
+                // `define('X', $dynamic)`), which still deserves a
+                // hover.  But a completely unknown name gets `None`.
+                let lookup = self
                     .global_defines
                     .read()
                     .get(name.as_str())
-                    .and_then(|info| info.value.clone())
-                    .or_else(|| {
-                        let path = self
-                            .autoload_constant_index
+                    .map(|info| info.value.clone());
+
+                let lookup = lookup.or_else(|| {
+                    let path = self
+                        .autoload_constant_index
+                        .read()
+                        .get(name.as_str())
+                        .cloned();
+                    if let Some(path) = path
+                        && let Ok(content) = std::fs::read_to_string(&path)
+                    {
+                        let file_uri = crate::util::path_to_uri(&path);
+                        self.update_ast(&file_uri, &content);
+                        return self
+                            .global_defines
                             .read()
                             .get(name.as_str())
-                            .cloned();
-                        if let Some(path) = path
-                            && let Ok(content) = std::fs::read_to_string(&path)
-                        {
-                            let file_uri = crate::util::path_to_uri(&path);
-                            self.update_ast(&file_uri, &content);
-                            return self
+                            .map(|info| info.value.clone());
+                    }
+                    None
+                });
+
+                let lookup = lookup.or_else(|| {
+                    // Last-resort: lazily parse known autoload files
+                    // for constants missed by the byte-level scanner.
+                    let paths = self.autoload_file_paths.read().clone();
+                    for path in &paths {
+                        let uri = crate::util::path_to_uri(path);
+                        if self.ast_map.read().contains_key(&uri) {
+                            continue;
+                        }
+                        if let Ok(content) = std::fs::read_to_string(path) {
+                            self.update_ast(&uri, &content);
+                            if let Some(entry) = self
                                 .global_defines
                                 .read()
                                 .get(name.as_str())
-                                .and_then(|info| info.value.clone());
-                        }
-                        None
-                    })
-                    .or_else(|| {
-                        // Last-resort: lazily parse known autoload files
-                        // for constants missed by the byte-level scanner.
-                        let paths = self.autoload_file_paths.read().clone();
-                        for path in &paths {
-                            let uri = crate::util::path_to_uri(path);
-                            if self.ast_map.read().contains_key(&uri) {
-                                continue;
-                            }
-                            if let Ok(content) = std::fs::read_to_string(path) {
-                                self.update_ast(&uri, &content);
-                                let val = self
-                                    .global_defines
-                                    .read()
-                                    .get(name.as_str())
-                                    .and_then(|info| info.value.clone());
-                                if val.is_some() {
-                                    return val;
-                                }
+                                .map(|info| info.value.clone())
+                            {
+                                return Some(entry);
                             }
                         }
-                        None
-                    });
+                    }
+                    None
+                });
 
-                let code = if let Some(ref val) = value_text {
-                    format!("```php\n<?php\nconst {} = {};\n```", name, val)
-                } else {
-                    format!("```php\n<?php\nconst {};\n```", name)
-                };
-                Some(make_hover(code))
+                // `lookup` is `Some(Some(val))` when the constant
+                // exists with a known value, `Some(None)` when it
+                // exists but the value is unknown, and `None` when
+                // the constant was not found at all.
+                match lookup {
+                    Some(Some(val)) => Some(make_hover(format!(
+                        "```php\n<?php\nconst {} = {};\n```",
+                        name, val
+                    ))),
+                    Some(None) => Some(make_hover(format!("```php\n<?php\nconst {};\n```", name))),
+                    None => None,
+                }
             }
         }
     }
@@ -845,10 +857,7 @@ impl Backend {
             let resolved_see = self.resolve_see_refs(&func.see_refs, uri, content);
             Some(hover_for_function(&func, Some(&resolved_see)))
         } else {
-            Some(make_hover(format!(
-                "```php\n<?php\nfunction {}();\n```",
-                name
-            )))
+            None
         }
     }
 

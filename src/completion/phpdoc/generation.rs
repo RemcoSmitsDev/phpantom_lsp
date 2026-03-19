@@ -49,9 +49,9 @@ use super::context::{DocblockContext, SymbolInfo};
 use crate::completion::resolver::FunctionLoaderFn;
 use crate::completion::source::comment_position::position_to_byte_offset;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
-use crate::types::FunctionInfo;
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
 use crate::types::ClassInfo;
+use crate::types::FunctionInfo;
 
 /// Detect whether the cursor is immediately after a `/**` trigger and,
 /// if so, generate a full docblock completion item.
@@ -98,8 +98,15 @@ pub fn try_generate_docblock(
     }
 
     // Collect additional text edits (e.g. use imports for @throws).
-    let additional_edits =
-        build_throws_import_edits(content, position, use_map, file_namespace, &context, class_loader, function_loader);
+    let additional_edits = build_throws_import_edits(
+        content,
+        position,
+        use_map,
+        file_namespace,
+        &context,
+        class_loader,
+        function_loader,
+    );
 
     let item = CompletionItem {
         label: "/** PHPDoc Block */".to_string(),
@@ -1210,8 +1217,15 @@ fn build_function_snippet(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> String {
-    let throws_ctx = ThrowsContext { class_loader, function_loader };
-    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&throws_ctx));
+    let throws_ctx = ThrowsContext {
+        class_loader,
+        function_loader,
+    };
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
+        content,
+        position,
+        Some(&throws_ctx),
+    );
 
     let mut tab_stop = 1u32;
 
@@ -1305,8 +1319,15 @@ fn build_function_plain(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> String {
-    let throws_ctx = ThrowsContext { class_loader, function_loader };
-    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&throws_ctx));
+    let throws_ctx = ThrowsContext {
+        class_loader,
+        function_loader,
+    };
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
+        content,
+        position,
+        Some(&throws_ctx),
+    );
 
     // Collect @param tags that need enrichment.
     let mut param_tags: Vec<(String, String)> = Vec::new();
@@ -1711,8 +1732,15 @@ fn build_throws_import_edits(
         return Vec::new();
     }
 
-    let throws_ctx = ThrowsContext { class_loader, function_loader };
-    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&throws_ctx));
+    let throws_ctx = ThrowsContext {
+        class_loader,
+        function_loader,
+    };
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(
+        content,
+        position,
+        Some(&throws_ctx),
+    );
     if uncaught.is_empty() {
         return Vec::new();
     }

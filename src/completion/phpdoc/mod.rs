@@ -550,7 +550,14 @@ pub fn build_phpdoc_completions(
                 )
             {
                 let uncaught = if let Some(cl) = smart.class_loader {
-                    throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&ThrowsContext { class_loader: cl, function_loader: smart.function_loader }))
+                    throws_analysis::find_uncaught_throw_types_with_context(
+                        content,
+                        position,
+                        Some(&ThrowsContext {
+                            class_loader: cl,
+                            function_loader: smart.function_loader,
+                        }),
+                    )
                 } else {
                     throws_analysis::find_uncaught_throw_types(content, position)
                 };

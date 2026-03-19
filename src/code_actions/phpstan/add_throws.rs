@@ -439,7 +439,6 @@ fn insert_throws_into_existing_docblock(
         insert_text.push_str(&format!("{} *\n", indent));
     }
     insert_text.push_str(&format!("{} * @throws {}\n", indent, short_name));
-    insert_text.push_str(indent);
 
     // Find where the `*/` line starts (including leading whitespace).
     let close_line_start = doc[..close_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
@@ -667,6 +666,54 @@ mod tests {
     }
 
     #[test]
+    fn multiline_insert_does_not_double_indent_closing_tag() {
+        // Simulate applying the edit: insert text at the `*/` line start.
+        // The insert must NOT include trailing indent that would double up
+        // with the existing `     */` line.
+        let php = "<?php\nclass Foo {\n    /**\n     * Summary.\n     */\n    public function bar(): void {\n        throw new \\RuntimeException();\n    }\n}\n";
+        let info = find_enclosing_docblock(php, 6).unwrap();
+        let edit = build_throws_edit(php, &info, "RuntimeException");
+
+        // Apply the edit to the source text.
+        let start = byte_offset_to_lsp(php, 0); // unused, we apply manually
+        let _ = start;
+        let insert_offset = {
+            let mut off = 0usize;
+            for (i, line) in php.lines().enumerate() {
+                if i == edit.range.start.line as usize {
+                    off += edit.range.start.character as usize;
+                    break;
+                }
+                off += line.len() + 1;
+            }
+            off
+        };
+        let end_offset = {
+            let mut off = 0usize;
+            for (i, line) in php.lines().enumerate() {
+                if i == edit.range.end.line as usize {
+                    off += edit.range.end.character as usize;
+                    break;
+                }
+                off += line.len() + 1;
+            }
+            off
+        };
+        let mut result = String::new();
+        result.push_str(&php[..insert_offset]);
+        result.push_str(&edit.new_text);
+        result.push_str(&php[end_offset..]);
+
+        // The `*/` line should have exactly 4 spaces of indent (matching `/**`).
+        let close_line = result.lines().find(|l| l.trim() == "*/").unwrap();
+        assert_eq!(
+            close_line, "     */",
+            "closing */ should be aligned with the docblock (5 chars: 4 spaces + space before */).\nFull result:\n{}",
+            result
+        );
+    }
+
+    #[test]
     fn inserts_throws_into_single_line_docblock() {
         let php = "<?php\nclass Foo {\n    /** Summary. */\n    public function bar(): void {\n        throw new \\RuntimeException();\n    }\n}\n";
         let info = find_enclosing_docblock(php, 4).unwrap();
@@ -698,6 +745,12 @@ mod tests {
             "should contain @throws: {:?}",
             edit.new_text
         );
+        // Every line of the new docblock should start with the same indent
+        // as the method signature (4 spaces).
+        assert_eq!(
+            edit.new_text, "    /**\n     * @throws RuntimeException\n     */\n",
+            "new docblock should be aligned with the method"
+        );
     }
 
     // ── Docblock with existing @throws ──────────────────────────────
@@ -726,6 +779,70 @@ mod tests {
             edit.new_text.contains("@throws RuntimeException"),
             "should add @throws: {:?}",
             edit.new_text
+        );
+    }
+
+    #[test]
+    fn inserts_throws_after_return_aligned() {
+        // Reproduce the exact scenario: existing docblock with @return,
+        // insert @throws.  The `*/` must not get double-indented.
+        let php = concat!(
+            "<?php\nclass Foo {\n",
+            "    /**\n",
+            "     * @return Response\n",
+            "     */\n",
+            "    public function clientside(): Response {\n",
+            "        throw new \\RuntimeException();\n",
+            "    }\n",
+            "}\n",
+        );
+        let info = find_enclosing_docblock(php, 6).unwrap();
+        let edit = build_throws_edit(php, &info, "RuntimeException");
+
+        // Apply the edit to the source text.
+        let insert_offset = {
+            let mut off = 0usize;
+            for (i, line) in php.lines().enumerate() {
+                if i == edit.range.start.line as usize {
+                    off += edit.range.start.character as usize;
+                    break;
+                }
+                off += line.len() + 1;
+            }
+            off
+        };
+        let end_offset = {
+            let mut off = 0usize;
+            for (i, line) in php.lines().enumerate() {
+                if i == edit.range.end.line as usize {
+                    off += edit.range.end.character as usize;
+                    break;
+                }
+                off += line.len() + 1;
+            }
+            off
+        };
+        let mut result = String::new();
+        result.push_str(&php[..insert_offset]);
+        result.push_str(&edit.new_text);
+        result.push_str(&php[end_offset..]);
+
+        let expected = concat!(
+            "<?php\nclass Foo {\n",
+            "    /**\n",
+            "     * @return Response\n",
+            "     *\n",
+            "     * @throws RuntimeException\n",
+            "     */\n",
+            "    public function clientside(): Response {\n",
+            "        throw new \\RuntimeException();\n",
+            "    }\n",
+            "}\n",
+        );
+        assert_eq!(
+            result, expected,
+            "inserted @throws must not double-indent the closing */.\nGot:\n{}",
+            result
         );
     }
 

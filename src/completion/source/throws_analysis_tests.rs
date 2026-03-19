@@ -632,18 +632,24 @@ fn test_has_use_import_alias() {
 fn test_parse_param_type_map_basic() {
     let sig = "handle(BusinessCentralService $service): void";
     let map = parse_param_type_map(sig);
-    assert_eq!(map, vec![("$service".to_string(), "BusinessCentralService".to_string())]);
+    assert_eq!(
+        map,
+        vec![("$service".to_string(), "BusinessCentralService".to_string())]
+    );
 }
 
 #[test]
 fn test_parse_param_type_map_multiple_params() {
     let sig = "handle(BusinessCentralService $service, int $count, string $name): void";
     let map = parse_param_type_map(sig);
-    assert_eq!(map, vec![
-        ("$service".to_string(), "BusinessCentralService".to_string()),
-        ("$count".to_string(), "int".to_string()),
-        ("$name".to_string(), "string".to_string()),
-    ]);
+    assert_eq!(
+        map,
+        vec![
+            ("$service".to_string(), "BusinessCentralService".to_string()),
+            ("$count".to_string(), "int".to_string()),
+            ("$name".to_string(), "string".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -657,9 +663,13 @@ fn test_parse_param_type_map_nullable() {
 fn test_parse_param_type_map_fqn() {
     let sig = r"handle(\App\Services\BusinessCentralService $service): void";
     let map = parse_param_type_map(sig);
-    assert_eq!(map, vec![
-        ("$service".to_string(), "App\\Services\\BusinessCentralService".to_string()),
-    ]);
+    assert_eq!(
+        map,
+        vec![(
+            "$service".to_string(),
+            "App\\Services\\BusinessCentralService".to_string()
+        ),]
+    );
 }
 
 #[test]
@@ -673,10 +683,13 @@ fn test_parse_param_type_map_no_type() {
 fn test_parse_param_type_map_with_defaults() {
     let sig = "handle(string $name = 'foo', int $count = 0): void";
     let map = parse_param_type_map(sig);
-    assert_eq!(map, vec![
-        ("$name".to_string(), "string".to_string()),
-        ("$count".to_string(), "int".to_string()),
-    ]);
+    assert_eq!(
+        map,
+        vec![
+            ("$name".to_string(), "string".to_string()),
+            ("$count".to_string(), "int".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -796,12 +809,15 @@ fn test_find_cross_file_propagated_throws_basic() {
 
     let bc_class = make_class_with_throws(
         "BusinessCentralService",
-        vec![("sendDataToBusinessCentral", vec![
-            "BusinessCentralException",
-            "ConvertException",
-            "RuntimeException",
-            "RandomException",
-        ])],
+        vec![(
+            "sendDataToBusinessCentral",
+            vec![
+                "BusinessCentralException",
+                "ConvertException",
+                "RuntimeException",
+                "RandomException",
+            ],
+        )],
     );
 
     let class_loader = |name: &str| -> Option<Arc<ClassInfo>> {
@@ -812,15 +828,21 @@ fn test_find_cross_file_propagated_throws_basic() {
         }
     };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     let names: Vec<&str> = results.iter().map(|t| t.type_name.as_str()).collect();
-    assert_eq!(names, vec![
-        "BusinessCentralException",
-        "ConvertException",
-        "RuntimeException",
-        "RandomException",
-    ]);
+    assert_eq!(
+        names,
+        vec![
+            "BusinessCentralException",
+            "ConvertException",
+            "RuntimeException",
+            "RandomException",
+        ]
+    );
 }
 
 #[test]
@@ -831,9 +853,15 @@ fn test_find_cross_file_propagated_throws_skips_this() {
 
     let class_loader = |_name: &str| -> Option<Arc<ClassInfo>> { None };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
-    assert!(results.is_empty(), "$this-> calls should be handled by find_propagated_throws, not here");
+    assert!(
+        results.is_empty(),
+        "$this-> calls should be handled by find_propagated_throws, not here"
+    );
 }
 
 #[test]
@@ -844,7 +872,10 @@ fn test_find_cross_file_propagated_throws_unknown_variable() {
 
     let class_loader = |_name: &str| -> Option<Arc<ClassInfo>> { None };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     assert!(results.is_empty());
 }
@@ -857,17 +888,20 @@ fn test_find_cross_file_propagated_throws_property_access_ignored() {
 
     let class_loader = |_name: &str| -> Option<Arc<ClassInfo>> { None };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
-    assert!(results.is_empty(), "Property accesses should not be treated as method calls");
+    assert!(
+        results.is_empty(),
+        "Property accesses should not be treated as method calls"
+    );
 }
 
 #[test]
 fn test_find_cross_file_propagated_throws_multiple_calls() {
-    let body = concat!(
-        "$service->methodA();\n",
-        "$service->methodB();\n",
-    );
+    let body = concat!("$service->methodA();\n", "$service->methodB();\n",);
     let signature = "handle(MyService $service): void";
     let file_content = "";
 
@@ -887,7 +921,10 @@ fn test_find_cross_file_propagated_throws_multiple_calls() {
         }
     };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     let names: Vec<&str> = results.iter().map(|t| t.type_name.as_str()).collect();
     assert_eq!(names, vec!["IOException", "NetworkException"]);
@@ -895,17 +932,11 @@ fn test_find_cross_file_propagated_throws_multiple_calls() {
 
 #[test]
 fn test_find_cross_file_propagated_throws_deduplicates_calls() {
-    let body = concat!(
-        "$service->doStuff();\n",
-        "$service->doStuff();\n",
-    );
+    let body = concat!("$service->doStuff();\n", "$service->doStuff();\n",);
     let signature = "handle(MyService $service): void";
     let file_content = "";
 
-    let svc_class = make_class_with_throws(
-        "MyService",
-        vec![("doStuff", vec!["SomeException"])],
-    );
+    let svc_class = make_class_with_throws("MyService", vec![("doStuff", vec!["SomeException"])]);
 
     let class_loader = |name: &str| -> Option<Arc<ClassInfo>> {
         if name == "MyService" {
@@ -915,10 +946,17 @@ fn test_find_cross_file_propagated_throws_deduplicates_calls() {
         }
     };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     let names: Vec<&str> = results.iter().map(|t| t.type_name.as_str()).collect();
-    assert_eq!(names, vec!["SomeException"], "Duplicate calls should only produce throws once");
+    assert_eq!(
+        names,
+        vec!["SomeException"],
+        "Duplicate calls should only produce throws once"
+    );
 }
 
 #[test]
@@ -927,10 +965,7 @@ fn test_find_cross_file_propagated_throws_method_without_throws() {
     let signature = "handle(MyService $service): void";
     let file_content = "";
 
-    let svc_class = make_class_with_throws(
-        "MyService",
-        vec![("safeMethod", vec![])],
-    );
+    let svc_class = make_class_with_throws("MyService", vec![("safeMethod", vec![])]);
 
     let class_loader = |name: &str| -> Option<Arc<ClassInfo>> {
         if name == "MyService" {
@@ -940,7 +975,10 @@ fn test_find_cross_file_propagated_throws_method_without_throws() {
         }
     };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     assert!(results.is_empty());
 }
@@ -964,7 +1002,10 @@ fn test_find_cross_file_propagated_throws_static_method_call() {
         }
     };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     let names: Vec<&str> = results.iter().map(|t| t.type_name.as_str()).collect();
     assert_eq!(names, vec!["ValidationException"]);
@@ -978,9 +1019,15 @@ fn test_find_cross_file_propagated_throws_static_skips_self() {
 
     let class_loader = |_name: &str| -> Option<Arc<ClassInfo>> { None };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
-    assert!(results.is_empty(), "self:: should be handled by same-file propagation");
+    assert!(
+        results.is_empty(),
+        "self:: should be handled by same-file propagation"
+    );
 }
 
 #[test]
@@ -1046,7 +1093,10 @@ fn test_find_cross_file_propagated_throws_new_constructor() {
         }
     };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     let names: Vec<&str> = results.iter().map(|t| t.type_name.as_str()).collect();
     assert_eq!(names, vec!["ConnectionException"]);
@@ -1064,9 +1114,15 @@ fn test_find_cross_file_propagated_throws_skips_php_keywords() {
 
     let class_loader = |_name: &str| -> Option<Arc<ClassInfo>> { None };
 
-    let ctx = ThrowsContext { class_loader: &class_loader, function_loader: None };
+    let ctx = ThrowsContext {
+        class_loader: &class_loader,
+        function_loader: None,
+    };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
-    assert!(results.is_empty(), "PHP keywords should not be treated as function calls");
+    assert!(
+        results.is_empty(),
+        "PHP keywords should not be treated as function calls"
+    );
 }
 
 #[test]
@@ -1080,10 +1136,7 @@ fn test_find_cross_file_propagated_throws_mixed_patterns() {
     let signature = "handle(MyService $service): void";
     let file_content = "";
 
-    let svc_class = make_class_with_throws(
-        "MyService",
-        vec![("sendData", vec!["SendException"])],
-    );
+    let svc_class = make_class_with_throws("MyService", vec![("sendData", vec!["SendException"])]);
     let bc_class = make_class_with_throws(
         "BusinessCentralService",
         vec![("validate", vec!["ValidationException"])],
@@ -1136,10 +1189,26 @@ fn test_find_cross_file_propagated_throws_mixed_patterns() {
     };
     let results = find_cross_file_propagated_throws(body, signature, file_content, &ctx);
     let names: Vec<&str> = results.iter().map(|t| t.type_name.as_str()).collect();
-    assert!(names.contains(&"SendException"), "Should propagate from $service->sendData(), got: {:?}", names);
-    assert!(names.contains(&"ValidationException"), "Should propagate from BusinessCentralService::validate(), got: {:?}", names);
-    assert!(names.contains(&"ConnectionException"), "Should propagate from new HttpClient(), got: {:?}", names);
-    assert!(names.contains(&"HelperException"), "Should propagate from helperFunction(), got: {:?}", names);
+    assert!(
+        names.contains(&"SendException"),
+        "Should propagate from $service->sendData(), got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"ValidationException"),
+        "Should propagate from BusinessCentralService::validate(), got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"ConnectionException"),
+        "Should propagate from new HttpClient(), got: {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"HelperException"),
+        "Should propagate from helperFunction(), got: {:?}",
+        names
+    );
 }
 
 #[test]
@@ -1176,7 +1245,14 @@ fn test_find_uncaught_with_class_loader_catches_cross_file() {
         }
     };
 
-    let uncaught = find_uncaught_throw_types_with_context(content, pos, Some(&ThrowsContext { class_loader: &class_loader, function_loader: None }));
+    let uncaught = find_uncaught_throw_types_with_context(
+        content,
+        pos,
+        Some(&ThrowsContext {
+            class_loader: &class_loader,
+            function_loader: None,
+        }),
+    );
     // RuntimeException is caught, but ConvertException is not.
     assert!(
         !uncaught.iter().any(|t| t == "RuntimeException"),

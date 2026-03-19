@@ -314,6 +314,16 @@ class FooController {
         "should add use import:\n{}",
         result
     );
+    // The generated docblock must be aligned with the method signature.
+    // Each docblock line should start with exactly the same indentation
+    // as `public function bar`.
+    let expected_fragment =
+        "    /**\n     * @throws BarException\n     */\n    public function bar(): void {";
+    assert!(
+        result.contains(expected_fragment),
+        "docblock should be aligned with the method signature:\n{}",
+        result
+    );
 }
 
 // ── Standalone function ─────────────────────────────────────────────────────

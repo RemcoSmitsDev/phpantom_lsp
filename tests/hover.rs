@@ -2100,7 +2100,7 @@ processUsers([]);
 // ─── Unresolved fallback hover format ───────────────────────────────────────
 
 #[test]
-fn hover_unresolved_function_shows_php_tag() {
+fn hover_unresolved_function_returns_none() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let content = r#"<?php
@@ -2116,15 +2116,30 @@ unknownFunction();
             character: 5,
         },
     );
-    // If hover is returned for an unknown function, it should use the new format
-    if let Some(h) = hover {
-        let text = hover_text(&h);
-        assert!(
-            text.contains("<?php"),
-            "should contain <?php marker for unresolved function: {}",
-            text
-        );
-    }
+    assert!(
+        hover.is_none(),
+        "hover on unknown function should return None"
+    );
+}
+
+#[test]
+fn hover_unresolved_class_returns_none() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+new IAmNotReal();
+"#;
+
+    backend.update_ast(uri, content);
+    let hover = backend.handle_hover(
+        uri,
+        content,
+        Position {
+            line: 1,
+            character: 6,
+        },
+    );
+    assert!(hover.is_none(), "hover on unknown class should return None");
 }
 
 // ─── @param description tests ───────────────────────────────────────────────

@@ -226,30 +226,36 @@ fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
         return true;
     }
 
+    let diag_line = diag.range.start.line as usize;
+
     // ── @throws-specific checks ─────────────────────────────────────
     match identifier {
         "throws.unusedType" | "throws.notThrowable" => {
             // The diagnostic references a type in a @throws tag.
             // If that type no longer appears after `@throws` in the
-            // content, the tag was removed and the diagnostic is stale.
+            // enclosing docblock, the tag was removed and the
+            // diagnostic is stale.
             let type_name = extract_throws_diag_type(&diag.message, identifier);
             match type_name {
                 Some(t) => {
                     let short = t.rsplit('\\').next().unwrap_or(&t);
-                    !content_has_throws_tag(content, short)
+                    let scope = enclosing_docblock_text(content, diag_line);
+                    !scope_has_throws_tag(&scope, short)
                 }
                 None => false,
             }
         }
         "missingType.checkedException" => {
             // The diagnostic says a @throws tag is missing.  If the
-            // exception short name now appears after `@throws`, the
-            // user added it and the diagnostic is stale.
+            // exception short name now appears after `@throws` in the
+            // enclosing docblock, the user added it and the diagnostic
+            // is stale.
             let fqn = extract_checked_exception_fqn(&diag.message);
             match fqn {
                 Some(f) => {
                     let short = f.rsplit('\\').next().unwrap_or(&f);
-                    content_has_throws_tag(content, short)
+                    let scope = enclosing_docblock_text(content, diag_line);
+                    scope_has_throws_tag(&scope, short)
                 }
                 None => false,
             }
@@ -334,10 +340,131 @@ fn line_has_ignore_for(content: &str, diag_line: u32, identifier: &str) -> bool 
     false
 }
 
-/// Check whether the content contains `@throws <short_name>` (case-insensitive).
-fn content_has_throws_tag(content: &str, short_name: &str) -> bool {
+/// Find the docblock text for the function/method enclosing `diag_line`.
+///
+/// Searches backward from `diag_line` to find the nearest `function`
+/// keyword (which may be on the diagnostic line itself, e.g. on the
+/// signature, or on a preceding line when the diagnostic is inside the
+/// body or in the docblock above).  Then looks for a preceding
+/// `/** ... */` block.  Returns the raw docblock text (from `/**` to
+/// `*/` inclusive) if found, or an empty string if no docblock exists.
+fn enclosing_docblock_text(content: &str, diag_line: usize) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    if diag_line >= lines.len() {
+        return String::new();
+    }
+
+    // Scan backward from `diag_line` looking for a line that contains
+    // the `function` keyword.  This handles three cases:
+    //   1. Diagnostic inside the function body → walks up to the
+    //      signature line.
+    //   2. Diagnostic on the signature line → matches immediately.
+    //   3. Diagnostic on the docblock above → walks down would be
+    //      needed, but PHPStan diagnostics land on the signature or
+    //      body, not the docblock lines.  If we reach the docblock
+    //      line we still need to find the function below it.  As a
+    //      pragmatic fallback we also scan forward a few lines.
+    let mut func_line: Option<usize> = None;
+    for idx in (0..=diag_line).rev() {
+        if line_has_function_keyword(lines[idx]) {
+            func_line = Some(idx);
+            break;
+        }
+    }
+
+    // Fallback: if the diagnostic is on a docblock line above the
+    // function, scan forward a few lines to find the signature.
+    if func_line.is_none() {
+        let start = diag_line + 1;
+        let limit = (diag_line + 10).min(lines.len());
+        for (i, line) in lines[start..limit].iter().enumerate() {
+            if line_has_function_keyword(line) {
+                func_line = Some(start + i);
+                break;
+            }
+        }
+    }
+
+    let func_line = match func_line {
+        Some(l) => l,
+        None => return String::new(),
+    };
+
+    // Compute the byte offset of the `function` keyword on that line.
+    let line_byte_start: usize = lines.iter().take(func_line).map(|l| l.len() + 1).sum();
+    let func_kw_rel = match lines[func_line].find("function") {
+        Some(p) => p,
+        None => return String::new(),
+    };
+    let func_kw_pos = line_byte_start + func_kw_rel;
+
+    // Look for a `/** ... */` block before the function keyword
+    // (skipping modifiers and whitespace).
+    let before_func = &content[..func_kw_pos];
+    let trimmed = before_func.trim_end();
+
+    // Strip trailing modifier keywords.
+    let modifiers = [
+        "public",
+        "protected",
+        "private",
+        "static",
+        "abstract",
+        "final",
+        "readonly",
+    ];
+    let mut result = trimmed;
+    loop {
+        let t = result.trim_end();
+        let mut found = false;
+        for kw in &modifiers {
+            if let Some(prefix) = t.strip_suffix(kw)
+                && (prefix.is_empty()
+                    || prefix
+                        .as_bytes()
+                        .last()
+                        .is_some_and(|&b| !b.is_ascii_alphanumeric() && b != b'_'))
+            {
+                result = prefix;
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            break;
+        }
+    }
+
+    let after_mods = result.trim_end();
+    if after_mods.ends_with("*/")
+        && let Some(open) = after_mods.rfind("/**")
+    {
+        return after_mods[open..].to_string();
+    }
+
+    String::new()
+}
+
+/// Check whether `line` contains the `function` keyword (not part of
+/// a larger identifier like `myfunction`).
+fn line_has_function_keyword(line: &str) -> bool {
+    let Some(pos) = line.find("function") else {
+        return false;
+    };
+    let before_ok = pos == 0 || line.as_bytes()[pos - 1].is_ascii_whitespace();
+    let after_pos = pos + "function".len();
+    let after_ok = after_pos >= line.len() || {
+        let b = line.as_bytes()[after_pos];
+        !b.is_ascii_alphanumeric() && b != b'_'
+    };
+    before_ok && after_ok
+}
+
+/// Check whether `scope` (typically a single docblock) contains
+/// `@throws <short_name>` (case-insensitive).
+fn scope_has_throws_tag(scope: &str, short_name: &str) -> bool {
     let lower = short_name.to_lowercase();
-    for line in content.lines() {
+    for line in scope.lines() {
         let trimmed = line.trim().trim_start_matches('*').trim();
         if let Some(rest) = trimmed.strip_prefix("@throws") {
             let rest = rest.trim_start();
@@ -453,11 +580,7 @@ impl Backend {
                 .filter(|d| full.iter().any(|f| f.range == d.range))
                 .collect();
             let mut cache = self.phpstan_last_diags.lock();
-            if let Some(cached) = cache.get(uri_str)
-                && pruned.len() != cached.len()
-            {
-                cache.insert(uri_str.to_string(), pruned);
-            }
+            cache.insert(uri_str.to_string(), pruned);
         }
 
         if pull_mode {
@@ -1669,6 +1792,160 @@ mod tests {
         assert!(
             !is_stale_phpstan_diagnostic(&diag, content),
             "ignore.unmatched* diagnostics must not be pruned by the ignore check"
+        );
+    }
+
+    // ── B16: scoped docblock checks ─────────────────────────────────
+
+    #[test]
+    fn not_stale_when_throws_tag_is_on_different_function() {
+        // Another function has @throws FooException, but the
+        // diagnostic is on `baz()` which has no such tag.  The
+        // old whole-file search would incorrectly mark this stale.
+        let content = concat!(
+            "<?php\nclass Foo {\n",
+            "    /**\n",
+            "     * @throws FooException\n",
+            "     */\n",
+            "    public function bar(): void {\n",
+            "        throw new FooException();\n",
+            "    }\n",
+            "    public function baz(): void {\n",
+            "        throw new FooException();\n", // line 9
+            "    }\n",
+            "}\n",
+        );
+        let diag = make_phpstan_diag(
+            9,
+            "missingType.checkedException",
+            "Method App\\Foo::baz() throws checked exception App\\Exceptions\\FooException but it's missing from the PHPDoc @throws tag.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&diag, content),
+            "should NOT be stale: @throws FooException is on bar(), not baz()"
+        );
+    }
+
+    #[test]
+    fn stale_when_throws_tag_is_on_same_function() {
+        // The diagnostic is on `baz()` and its own docblock has
+        // @throws FooException — should be stale.
+        let content = concat!(
+            "<?php\nclass Foo {\n",
+            "    public function bar(): void {}\n",
+            "    /**\n",
+            "     * @throws FooException\n",
+            "     */\n",
+            "    public function baz(): void {\n",
+            "        throw new FooException();\n", // line 7
+            "    }\n",
+            "}\n",
+        );
+        let diag = make_phpstan_diag(
+            7,
+            "missingType.checkedException",
+            "Method App\\Foo::baz() throws checked exception App\\Exceptions\\FooException but it's missing from the PHPDoc @throws tag.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&diag, content),
+            "should be stale: @throws FooException is on baz()'s own docblock"
+        );
+    }
+
+    #[test]
+    fn unused_throws_not_stale_when_different_function_has_same_tag() {
+        // bar() still has @throws FooException.  A throws.unusedType
+        // diagnostic on bar() should NOT be stale just because baz()
+        // also has the tag (the old whole-file scan would keep it
+        // non-stale regardless, but this tests the scoped version).
+        //
+        // Conversely, removing the tag from baz() should make baz()'s
+        // diagnostic stale without affecting bar().
+        let content = concat!(
+            "<?php\nclass Foo {\n",
+            "    /**\n",
+            "     * @throws FooException\n",
+            "     */\n",
+            "    public function bar(): void {\n", // line 5
+            "    }\n",
+            "    public function baz(): void {\n", // line 7
+            "    }\n",
+            "}\n",
+        );
+        // bar()'s diagnostic — its own docblock still has the tag.
+        let bar_diag = make_phpstan_diag(
+            5,
+            "throws.unusedType",
+            "Method App\\Foo::bar() has App\\Exceptions\\FooException in PHPDoc @throws tag but it's not thrown.",
+        );
+        assert!(
+            !is_stale_phpstan_diagnostic(&bar_diag, content),
+            "bar()'s throws.unusedType should NOT be stale (tag still present on bar())"
+        );
+
+        // baz()'s diagnostic — its docblock does NOT have the tag.
+        let baz_diag = make_phpstan_diag(
+            7,
+            "throws.unusedType",
+            "Method App\\Foo::baz() has App\\Exceptions\\FooException in PHPDoc @throws tag but it's not thrown.",
+        );
+        assert!(
+            is_stale_phpstan_diagnostic(&baz_diag, content),
+            "baz()'s throws.unusedType should be stale (tag removed from baz())"
+        );
+    }
+
+    #[test]
+    fn enclosing_docblock_text_finds_correct_docblock() {
+        let content = concat!(
+            "<?php\nclass Foo {\n",
+            "    /**\n",
+            "     * @throws BarException\n",
+            "     */\n",
+            "    public function bar(): void {\n",
+            "        // line 6\n",
+            "    }\n",
+            "    /**\n",
+            "     * @throws BazException\n",
+            "     */\n",
+            "    public function baz(): void {\n",
+            "        // line 12\n",
+            "    }\n",
+            "}\n",
+        );
+        let bar_doc = enclosing_docblock_text(content, 6);
+        assert!(
+            bar_doc.contains("BarException"),
+            "bar()'s docblock should mention BarException, got: {}",
+            bar_doc
+        );
+        assert!(
+            !bar_doc.contains("BazException"),
+            "bar()'s docblock should NOT mention BazException, got: {}",
+            bar_doc
+        );
+
+        let baz_doc = enclosing_docblock_text(content, 12);
+        assert!(
+            baz_doc.contains("BazException"),
+            "baz()'s docblock should mention BazException, got: {}",
+            baz_doc
+        );
+        assert!(
+            !baz_doc.contains("BarException"),
+            "baz()'s docblock should NOT mention BarException, got: {}",
+            baz_doc
+        );
+    }
+
+    #[test]
+    fn enclosing_docblock_text_returns_empty_when_no_docblock() {
+        let content = "<?php\nfunction foo(): void {\n    // line 2\n}\n";
+        let doc = enclosing_docblock_text(content, 2);
+        assert!(
+            doc.is_empty(),
+            "should return empty when no docblock exists, got: {}",
+            doc
         );
     }
 }

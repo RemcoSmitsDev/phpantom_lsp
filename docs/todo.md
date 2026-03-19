@@ -23,10 +23,6 @@ within the same impact tier.
 
 | #   | Item                                                                                                              | Impact | Effort |
 | --- | ----------------------------------------------------------------------------------------------------------------- | ------ | ------ |
-| B13 | [Stop showing dummy symbols in hover](todo/bugs.md#b13--hover-shows-dummy-symbols)                                | Medium | Low    |
-| B14 | [Add @throws action inserts misaligned docblock](todo/bugs.md#b14--add-throws-action-inserts-misaligned-docblock) | Medium | Low    |
-| B15 | [Completion after `->()` should not insert parentheses](todo/bugs.md#b15--completion-after---should-not-insert-parentheses) | Medium | Low    |
-| B16 | [PHPStan stale-diagnostic clearing is overly aggressive](todo/bugs.md#b16--phpstan-stale-diagnostic-clearing-is-overly-aggressive) | Medium | Medium |
 |     | **Release 0.6.0**                                                                                                 |        |        |
 
 ## Sprint 4 — Refactoring toolkit
@@ -163,7 +159,6 @@ unlikely to move the needle for most users.
 | X6  | Disk cache (evaluate later)                                                                                                                                  | Medium     | High        |
 |     | **[Bug Fixes](todo/bugs.md)**                                                                                                                                |            |             |
 | B11 | [Diagnostic deduplication drops distinct diagnostics on same range](todo/bugs.md#b11--diagnostic-deduplication-drops-distinct-diagnostics-on-the-same-range) | Medium     | Low         |
-| B12 | [PHPStan cache pruning uses length-only comparison](todo/bugs.md#b12--phpstan-cache-pruning-uses-length-only-comparison)                                     | Low        | Low         |
 | B13 | [Argument count diagnostic flags too many arguments by default](todo/bugs.md#b13-argument-count-diagnostic-flags-too-many-arguments-by-default)              | High       | Low         |
 |     | **[Inline Completion](todo/inline-completion.md)**                                                                                                           |            |             |
 | N1  | Template engine (type-aware snippets)                                                                                                                        | Medium     | High        |

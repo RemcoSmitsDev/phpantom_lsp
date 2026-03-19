@@ -295,10 +295,7 @@ fn find_throw_variable_types(body: &str, catches: &[CatchInfo]) -> Vec<ThrowInfo
 ///
 /// Returns a [`ThrowInfo`] for each propagated throw, with the byte
 /// offset set to the call site so that catch-block filtering works.
-pub(crate) fn find_propagated_throws(
-    body: &str,
-    file_content: &str,
-) -> Vec<ThrowInfo> {
+pub(crate) fn find_propagated_throws(body: &str, file_content: &str) -> Vec<ThrowInfo> {
     let mut results = Vec::new();
     let mut seen_methods = std::collections::HashSet::new();
     let patterns: &[&str] = &["$this->", "self::", "static::"];
@@ -1259,9 +1256,7 @@ fn parse_param_type_map(signature: &str) -> Vec<(String, String)> {
         }
 
         // Clean the type: strip leading `?` for nullable, strip leading `\`.
-        let cleaned_type = type_token
-            .trim_start_matches('?')
-            .trim_start_matches('\\');
+        let cleaned_type = type_token.trim_start_matches('?').trim_start_matches('\\');
 
         if !cleaned_type.is_empty() {
             result.push((var_name.to_string(), cleaned_type.to_string()));
@@ -1332,10 +1327,8 @@ fn find_cross_file_propagated_throws(
                     let call_key = format!("new:{}", clean);
                     if seen_calls.insert(call_key) {
                         if let Some(class_info) = class_loader(clean) {
-                            if let Some(ctor) = class_info
-                                .methods
-                                .iter()
-                                .find(|m| m.name == "__construct")
+                            if let Some(ctor) =
+                                class_info.methods.iter().find(|m| m.name == "__construct")
                             {
                                 for exc_type in &ctor.throws {
                                     results.push(ThrowInfo {
@@ -1406,7 +1399,13 @@ fn find_cross_file_propagated_throws(
             };
 
             // Load the class and find the method's @throws tags.
-            collect_method_throws(class_loader, class_name, method_name, var_start, &mut results);
+            collect_method_throws(
+                class_loader,
+                class_name,
+                method_name,
+                var_start,
+                &mut results,
+            );
 
             continue;
         }
@@ -1436,8 +1435,7 @@ fn find_cross_file_propagated_throws(
                 if !method_name.is_empty() && after_method.starts_with('(') {
                     // Skip self::/static::/parent:: — handled by same-file propagation.
                     let ident_lower = ident.to_lowercase();
-                    if ident_lower != "self" && ident_lower != "static" && ident_lower != "parent"
-                    {
+                    if ident_lower != "self" && ident_lower != "static" && ident_lower != "parent" {
                         let clean_class = ident.trim_start_matches('\\');
                         let call_key = format!("{}::{}", clean_class, method_name);
                         if seen_calls.insert(call_key) {
@@ -1477,8 +1475,7 @@ fn find_cross_file_propagated_throws(
                         }
                         // Also check: it might be a same-file function with @throws
                         // in its docblock (text-search fallback).
-                        let same_file_throws =
-                            find_method_throws_tags(file_content, clean_name);
+                        let same_file_throws = find_method_throws_tags(file_content, clean_name);
                         for t in same_file_throws {
                             results.push(ThrowInfo {
                                 type_name: t,

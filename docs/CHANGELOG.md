@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Change visibility.** The code action no longer appears when the cursor is inside a method body. It now only triggers on the method signature (modifiers, name, parameters, return type).
 - **Update docblock.** The code action no longer appears when the cursor is inside a function or method body. It now only triggers on the signature or the preceding docblock.
 - **Update docblock.** No longer suggests adding redundant `@param` tags when the docblock has no `@param` tags and all parameters already have sufficient native type hints. This matches the generate-docblock behaviour, which intentionally omits `@param` for fully-typed non-templated parameters.
+- **PHPStan diagnostics.** PHPStan cache pruning after deduplication now unconditionally writes the pruned set back, fixing a theoretically possible stale-entry reappearance when pruning changed diagnostics without changing the count.
 
 ### Added
 
@@ -54,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Hover.** Hovering over unresolved function calls, unknown constants, or unresolvable `self`/`static`/`parent`/`$this` keywords no longer shows a bare placeholder. If the symbol cannot be found, no hover is shown.
+- **Add @throws.** The code action no longer double-indents the closing `*/` when inserting a `@throws` tag into an existing multi-line docblock.
+- **PHPStan stale-diagnostic clearing.** The `@throws`-based staleness check now scopes to the enclosing function's docblock instead of searching the entire file. A `@throws` tag on a different function no longer causes an unrelated diagnostic to be incorrectly cleared.
 - **Closure and arrow function variable scope.** Variable name completion now correctly respects PHP scoping rules for anonymous functions and arrow functions. Parameters of a closure are visible inside its body, `use`-captured variables appear alongside them, and `$this` is available when the closure is defined in an instance method. Outer method locals that were not captured do not leak in. Arrow function parameters are now visible inside the arrow body while the enclosing scope's variables remain accessible, matching PHP's implicit capture behaviour.
 - **Namespace alias completion.** Typing a class name through a namespace alias (e.g. `OA\Re` with `use OpenApi\Attributes as OA`) now correctly suggests classes under the aliased namespace such as `OA\Response` and `OA\RequestBody`. Previously only unrelated classes matched because the alias was not expanded before prefix matching.
 - **Virtual property merging.** Native type hints are now considered when determining virtual property specificity. Previously only docblock types were compared, causing properties with native PHP type declarations (e.g., `public string $name`) to be incorrectly overridden by less specific virtual properties.

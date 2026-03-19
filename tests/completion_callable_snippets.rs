@@ -808,3 +808,99 @@ async fn test_snippet_throw_new_context() {
         );
     }
 }
+
+// ─── B15: suppress parentheses when `(` already follows cursor ──────────────
+
+/// When completing `$obj->|()`, the parentheses already exist after the
+/// cursor.  The completion item should insert just the method name (plain
+/// text) instead of a snippet with `()`, which would produce `method()()`.
+#[tokio::test]
+async fn test_snippet_suppressed_when_parens_follow_cursor() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///snip_paren_follows.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Gadget {\n",
+        "    public function doStuff(): void {}\n",
+        "    public function run(): void {}\n",
+        "}\n",
+        "$g = new Gadget();\n",
+        "$g->()\n",
+    );
+
+    // Cursor is right after `->`, before `()`.
+    let items = complete_at(&backend, &uri, text, 6, 4).await;
+    let item = find_method(&items, "doStuff").expect("Should find doStuff");
+
+    // Insert text should be the plain method name without `()`.
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("doStuff"),
+        "should insert plain name when parens already follow"
+    );
+    // Format should NOT be snippet (or should be absent).
+    assert!(
+        item.insert_text_format != Some(InsertTextFormat::SNIPPET),
+        "should not use snippet format when parens already follow"
+    );
+}
+
+/// Same suppression should work when the user has partially typed the
+/// method name: `$obj->doSt|()`.
+#[tokio::test]
+async fn test_snippet_suppressed_when_parens_follow_partial_identifier() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///snip_paren_partial.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Widget {\n",
+        "    public function calculate(int $x): int { return $x; }\n",
+        "}\n",
+        "$w = new Widget();\n",
+        "$w->calc()\n",
+    );
+
+    // Cursor after `calc`, before `()`.
+    let items = complete_at(&backend, &uri, text, 5, 8).await;
+    let item = find_method(&items, "calculate").expect("Should find calculate");
+
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("calculate"),
+        "should insert plain name when parens follow partial identifier"
+    );
+    assert!(
+        item.insert_text_format != Some(InsertTextFormat::SNIPPET),
+        "should not use snippet format when parens follow partial identifier"
+    );
+}
+
+/// When there are no parentheses after the cursor, snippets should still
+/// include `()` as usual.
+#[tokio::test]
+async fn test_snippet_preserved_when_no_parens_follow() {
+    let backend = create_test_backend();
+    let uri = Url::parse("file:///snip_no_paren.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Gizmo {\n",
+        "    public function doStuff(): void {}\n",
+        "}\n",
+        "$g = new Gizmo();\n",
+        "$g->\n",
+    );
+
+    let items = complete_at(&backend, &uri, text, 5, 4).await;
+    let item = find_method(&items, "doStuff").expect("Should find doStuff");
+
+    assert_eq!(
+        item.insert_text.as_deref(),
+        Some("doStuff()$0"),
+        "should include parens when none follow the cursor"
+    );
+    assert_eq!(
+        item.insert_text_format,
+        Some(InsertTextFormat::SNIPPET),
+        "should use snippet format when no parens follow"
+    );
+}
