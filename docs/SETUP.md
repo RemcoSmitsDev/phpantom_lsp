@@ -21,11 +21,128 @@ cargo build --release
 # Binary is at target/release/phpantom_lsp
 ```
 
-## Project Requirements
+## Editor Setup
+
+PHPantom communicates over stdin/stdout using the standard [Language Server Protocol](https://microsoft.github.io/language-server-protocol/). Any editor with LSP support can use it. Point the client at the `phpantom_lsp` binary with `php` as the file type. No special initialization options are required.
+
+<details>
+<summary><b>Zed</b></summary>
+
+A Zed extension is included in the `zed-extension/` directory:
+
+1. Open Zed
+2. Open the Extensions panel
+3. Click **Install Dev Extension**
+4. Select the `zed-extension/` directory
+
+The extension automatically downloads the correct pre-built binary from GitHub releases for your platform. If you'd prefer to use a locally built binary, ensure `phpantom_lsp` is on your `PATH` and the extension will use it instead.
+
+To make PHPantom the default PHP language server, add to your Zed `settings.json`:
+
+```json
+{
+  "languages": {
+    "PHP": {
+      "language_servers": ["phpantom_lsp", "!intelephense", "!phpactor", "!phptools", "..."]
+    }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Neovim</b></summary>
+
+```lua
+vim.lsp.config['phpantom'] = {
+  cmd = { '/path/to/phpantom_lsp' },
+  filetypes = { 'php' },
+  root_markers = { 'composer.json', '.git' },
+}
+vim.lsp.enable('phpantom')
+```
+
+</details>
+
+<details>
+<summary><b>VS Code</b></summary>
+
+1. **Install a generic LSP client extension**
+
+   * Recommended: [Generic LSP Client (v2)](https://marketplace.visualstudio.com/items?itemName=zsol.vscode-glspc)
+   * Install via VS Code Marketplace:
+
+     ```vscode-extensions
+     zsol.vscode-glspc
+     ```
+
+2. **Download PHPantom LSP binary**
+
+   * Get it from [GitHub Releases](https://github.com/AJenbo/phpantom_lsp/releases/latest)
+   * Extract the binary and place it in a preferred location
+
+3. **Configure the extension**
+
+   * Open VS Code settings for Generic LSP Client (v2)
+   * Set the path to your PHPantom binary
+   * Add the Language ID: `php`
+   * Restart VS Code
+
+</details>
+
+<details>
+<summary><b>PHPStorm</b></summary>
+
+1. **Download PHPantom LSP binary**
+
+   * Get it from [GitHub Releases](https://github.com/AJenbo/phpantom_lsp/releases/latest)
+   * Extract the binary to a preferred location
+
+2. **Install and configure LSP plugin**
+
+   * Go to **Editor → Plugins** and install [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij)
+   * Restart PHPStorm
+   * Navigate to **Languages & Frameworks → Language Servers**
+   * Click **+** to add a new server
+
+     * Name: `PHPantom`
+     * Command: path to your PHPantom binary
+     * Mapping: set `PHP` on both the **Language** tab and the **File Type** tab (the dialogs are identical). Setting both ensures PHPStorm activates the server reliably.
+
+<img width="779" height="645" alt="PHPStorm new language server dialog" src="https://github.com/user-attachments/assets/2da88e68-d012-476e-82e7-977dbfcd9653" />
+
+<img width="779" height="645" alt="PHPStorm language server mapping dialog" src="https://github.com/user-attachments/assets/62358f9e-973c-487d-ac17-098d7dab007e" />
+
+</details>
+
+<details>
+<summary><b>Sublime Text</b></summary>
+
+> [!NOTE]
+> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
+
+With [LSP for Sublime Text](https://github.com/sublimelsp/LSP):
+
+```json
+{
+  "clients": {
+    "phpantom": {
+      "enabled": true,
+      "command": ["/path/to/phpantom_lsp"],
+      "selector": "source.php"
+    }
+  }
+}
+```
+
+</details>
+
+## Project Configuration
 
 PHPantom works best with Composer projects. It reads `composer.json` to discover autoload directories and vendor packages, so completions and go-to-definition only surface classes that your autoloader can actually load. Projects without `composer.json` fall back to scanning every PHP file in the workspace.
 
-## Configuration
+### `.phpantom.toml`
 
 PHPantom supports an optional per-project configuration file for settings like PHP version overrides and diagnostic toggles.
 
@@ -71,8 +188,6 @@ The `strategy` setting controls this behaviour:
 
 Most projects should leave this at the default. Change it to `"self"` if your project loads classes outside of Composer (custom autoloaders, `require_once`, legacy inclusion patterns). Be aware that `"self"` will also surface vendor-internal classes and potential duplicates that Composer's autoloader would never load.
 
-## Troubleshooting
-
 ### Classes from other files are not found
 
 PHPantom resolves cross-file classes through Composer's autoloading rules (PSR-4 mappings and the generated classmap). If a class exists in your project but PHPantom reports it as unknown, the most common causes are:
@@ -82,119 +197,3 @@ PHPantom resolves cross-file classes through Composer's autoloading rules (PSR-4
 2. **Composer's classmap is stale.** Run `composer dump-autoload` to regenerate it. PHPantom reads the classmap at startup.
 
 3. **The class is in a directory not covered by `autoload` or `autoload-dev`.** Check that your `composer.json` PSR-4 mappings cover the directory where the class lives.
-
-### Too many classes in completion lists
-
-If you're seeing vendor-internal classes, duplicate framework classes (common in monorepos), or other noise, your indexing strategy may be too broad. The default `"composer"` strategy only surfaces classes that Composer's autoloader can load, which filters out this noise. If you previously set `strategy = "self"`, consider switching back to `"composer"`.
-
-## Editor Setup
-
-PHPantom communicates over stdin/stdout using the standard [Language Server Protocol](https://microsoft.github.io/language-server-protocol/). Any editor with LSP support can use it. Point the client at the `phpantom_lsp` binary with `php` as the file type. No special initialization options are required.
-
----
-
-### Zed
-
-A Zed extension is included in the `zed-extension/` directory:
-
-1. Open Zed
-2. Open the Extensions panel
-3. Click **Install Dev Extension**
-4. Select the `zed-extension/` directory
-
-The extension automatically downloads the correct pre-built binary from GitHub releases for your platform. If you'd prefer to use a locally built binary, ensure `phpantom_lsp` is on your `PATH` and the extension will use it instead.
-
-To make PHPantom the default PHP language server, add to your Zed `settings.json`:
-
-```json
-{
-  "languages": {
-    "PHP": {
-      "language_servers": ["phpantom_lsp", "!intelephense", "!phpactor", "!phptools", "..."]
-    }
-  }
-}
-```
-
----
-
-### Neovim
-
-```lua
-vim.lsp.config['phpantom'] = {
-  cmd = { '/path/to/phpantom_lsp' },
-  filetypes = { 'php' },
-  root_markers = { 'composer.json', '.git' },
-}
-vim.lsp.enable('phpantom')
-```
-
----
-
-### VS Code
-
-1. **Install a generic LSP client extension**
-
-   * Recommended: [Generic LSP Client (v2)](https://marketplace.visualstudio.com/items?itemName=zsol.vscode-glspc)
-   * Install via VS Code Marketplace:
-
-     ```vscode-extensions
-     zsol.vscode-glspc
-     ```
-
-2. **Download PHPantom LSP binary**
-
-   * Get it from [GitHub Releases](https://github.com/AJenbo/phpantom_lsp/releases/latest)
-   * Extract the binary and place it in a preferred location
-
-3. **Configure the extension**
-
-   * Open VS Code settings for Generic LSP Client (v2)
-   * Set the path to your PHPantom binary
-   * Add the Language ID: `php`
-   * Restart VS Code
-
----
-
-### PHPStorm
-
-1. **Download PHPantom LSP binary**
-
-   * Get it from [GitHub Releases](https://github.com/AJenbo/phpantom_lsp/releases/latest)
-   * Extract the binary to a preferred location
-
-2. **Install and configure LSP plugin**
-
-   * Go to **Editor → Plugins** and install [LSP4IJ](https://plugins.jetbrains.com/plugin/23257-lsp4ij)
-   * Restart PHPStorm
-   * Navigate to **Languages & Frameworks → Language Servers**
-   * Click **+** to add a new server
-
-     * Name: `PHPantom`
-     * Command: path to your PHPantom binary
-     * Mapping: add a new Language and set it to `PHP`
-
-<img width="779" height="645" alt="Screenshot From 2026-02-21 00-28-37" src="https://github.com/user-attachments/assets/2da88e68-d012-476e-82e7-977dbfcd9653" />
-
-<img width="779" height="645" alt="Screenshot From 2026-02-21 00-32-24" src="https://github.com/user-attachments/assets/62358f9e-973c-487d-ac17-098d7dab007e" />
-
----
-
-### Sublime Text
-
-> [!NOTE]
-> This configuration is untested. If you get it working (or run into issues), please [open an issue](../../issues).
-
-With [LSP for Sublime Text](https://github.com/sublimelsp/LSP):
-
-```json
-{
-  "clients": {
-    "phpantom": {
-      "enabled": true,
-      "command": ["/path/to/phpantom_lsp"],
-      "selector": "source.php"
-    }
-  }
-}
-```
