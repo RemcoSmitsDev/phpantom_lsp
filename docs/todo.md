@@ -101,6 +101,17 @@ unlikely to move the needle for most users.
 |     | **[Code Actions](todo/actions.md)**                                                                                                                          |            |             |
 | A3  | Switch → match conversion                                                                                                                                    | Low        | Medium      |
 | A10 | Generate interface from class                                                                                                                                | Low-Medium | Medium      |
+|     | **[PHPStan Code Actions](todo/phpstan-actions.md)**                                                                                                          |            |             |
+| P1  | `new.static` — add `final` or `@phpstan-consistent-constructor`                                                                                              | Medium     | Low         |
+| P2  | `method.missingOverride` — add `#[Override]`                                                                                                                 | Medium     | Low         |
+| P3  | `method.override` / `property.override` — remove `#[Override]`                                                                                               | Medium     | Low         |
+| P6  | `return.type` — update return type to match actual returns                                                                                                   | Medium     | Medium      |
+| P7  | `return.phpDocType` — fix `@return` to match native type                                                                                                     | Medium     | Low         |
+| P8  | `parameter.phpDocType` — fix `@param` to match native type                                                                                                   | Medium     | Low         |
+| P10 | `return.unusedType` — remove unused type from return union                                                                                                   | Medium     | Medium      |
+| P11 | `method.visibility` / `property.visibility` — fix overriding visibility                                                                                      | Medium     | Low         |
+| P13 | `property.notFound` — declare missing property (same-class)                                                                                                  | Medium     | Medium      |
+| P17 | `missingType.iterableValue` — add `@return` with inferred element type                                                                                       | Medium     | High        |
 |     | **[LSP Features](todo/lsp-features.md)**                                                                                                                     |            |             |
 | F3  | Incremental text sync                                                                                                                                        | Low-Medium | Medium      |
 |     | **[Signature Help](todo/signature-help.md)**                                                                                                                 |            |             |
