@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use tower_lsp::lsp_types::*;
 
-use crate::completion::source::throws_analysis;
+use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
 use crate::types::ClassInfo;
 
@@ -49,6 +49,12 @@ use crate::types::ClassInfo;
 /// Used by [`SmartContext`] and other enrichment code to look up
 /// `@template` parameters and other class metadata.
 pub type ClassLoaderFn<'a> = &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>;
+
+/// Callback that resolves a function name to its [`FunctionInfo`].
+///
+/// Used by [`SmartContext`] for cross-file `@throws` propagation from
+/// standalone function calls.
+pub type FunctionLoaderFn<'a> = &'a dyn Fn(&str) -> Option<crate::types::FunctionInfo>;
 
 // Re-export comment-position helpers so existing consumers (tests,
 // handler, catch_completion) that import from `phpdoc::` keep working.
@@ -460,6 +466,11 @@ pub struct SmartContext<'a> {
     /// Callback that resolves a class name to its [`ClassInfo`], used
     /// to look up `@template` parameters for type enrichment.
     pub class_loader: Option<ClassLoaderFn<'a>>,
+
+    /// Callback that resolves a function name to its [`FunctionInfo`],
+    /// used for cross-file `@throws` propagation from standalone
+    /// function calls.
+    pub function_loader: Option<FunctionLoaderFn<'a>>,
 }
 
 impl SmartContext<'_> {
@@ -467,6 +478,7 @@ impl SmartContext<'_> {
     pub const EMPTY: SmartContext<'static> = SmartContext {
         inferred_inline_var_type: None,
         class_loader: None,
+        function_loader: None,
     };
 }
 
@@ -537,7 +549,11 @@ pub fn build_phpdoc_completions(
                     DocblockContext::FunctionOrMethod | DocblockContext::Unknown
                 )
             {
-                let uncaught = throws_analysis::find_uncaught_throw_types(content, position);
+                let uncaught = if let Some(cl) = smart.class_loader {
+                    throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&ThrowsContext { class_loader: cl, function_loader: smart.function_loader }))
+                } else {
+                    throws_analysis::find_uncaught_throw_types(content, position)
+                };
                 let existing_throws = find_existing_throws_tags(content, position);
 
                 // Filter out already-documented throws

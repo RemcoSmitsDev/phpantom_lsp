@@ -209,6 +209,56 @@ pub fn extract_mixin_tags(docblock: &str) -> Vec<String> {
     results
 }
 
+/// Extract all `@throws` tags from a method-level docblock.
+///
+/// PHPDoc `@throws` tags declare which exceptions a method may throw.
+/// The format is:
+///
+///   - `@throws ExceptionType`
+///   - `@throws \Fully\Qualified\ExceptionType`
+///   - `@throws ExceptionType Some description text`
+///
+/// Returns a list of cleaned type name strings (leading `\` stripped).
+pub fn extract_throws_tags(docblock: &str) -> Vec<String> {
+    let inner = docblock
+        .trim()
+        .strip_prefix("/**")
+        .unwrap_or(docblock)
+        .strip_suffix("*/")
+        .unwrap_or(docblock);
+
+    let mut results = Vec::new();
+
+    for line in inner.lines() {
+        let trimmed = line.trim().trim_start_matches('*').trim();
+
+        let rest = if let Some(r) = trimmed.strip_prefix("@throws") {
+            r
+        } else {
+            continue;
+        };
+
+        // The tag must be followed by whitespace.
+        let rest = rest.trim_start();
+        if rest.is_empty() {
+            continue;
+        }
+
+        // The type name is the first whitespace-delimited token.
+        let type_name = match rest.split_whitespace().next() {
+            Some(name) => name,
+            None => continue,
+        };
+
+        let cleaned = type_name.trim_start_matches('\\');
+        if !cleaned.is_empty() {
+            results.push(cleaned.to_string());
+        }
+    }
+
+    results
+}
+
 /// Extract `@phpstan-assert` / `@psalm-assert` type assertion annotations.
 ///
 /// Supports all three variants:

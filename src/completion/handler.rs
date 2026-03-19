@@ -200,12 +200,14 @@ impl Backend {
             // Must run before the docblock-interior checks below.
             {
                 let class_loader = self.class_loader(&ctx);
+                let function_loader = self.function_loader(&ctx);
                 if let Some(response) = crate::completion::phpdoc::generation::try_generate_docblock(
                     &content,
                     position,
                     &ctx.use_map,
                     &ctx.namespace,
                     &class_loader,
+                    Some(&function_loader),
                 ) {
                     return Ok(Some(response));
                 }
@@ -368,6 +370,7 @@ impl Backend {
         let smart = crate::completion::phpdoc::SmartContext {
             inferred_inline_var_type: inferred_var_type.as_deref(),
             class_loader: Some(&class_loader),
+            function_loader: Some(&function_loader),
         };
         let items = crate::completion::phpdoc::build_phpdoc_completions(
             content,

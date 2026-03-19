@@ -2246,6 +2246,7 @@ fn smart_var_property_with_templates_has_snippet_tab_stops() {
     let smart = SmartContext {
         inferred_inline_var_type: None,
         class_loader: Some(&class_loader),
+        function_loader: None,
     };
 
     let items = build_phpdoc_completions(
@@ -2309,6 +2310,7 @@ fn smart_var_property_with_templates_and_prefix_has_snippet_tab_stops() {
     let smart = SmartContext {
         inferred_inline_var_type: None,
         class_loader: Some(&class_loader),
+        function_loader: None,
     };
 
     let items = build_phpdoc_completions(
@@ -2413,6 +2415,7 @@ fn smart_var_property_class_without_templates_no_snippet_format() {
     let smart = SmartContext {
         inferred_inline_var_type: None,
         class_loader: Some(&class_loader),
+        function_loader: None,
     };
 
     let items = build_phpdoc_completions(
@@ -2470,6 +2473,7 @@ fn smart_var_constant_with_templates_has_snippet_tab_stops() {
     let smart = SmartContext {
         inferred_inline_var_type: None,
         class_loader: Some(&class_loader),
+        function_loader: None,
     };
 
     // Use Constant context — should behave the same as Property.

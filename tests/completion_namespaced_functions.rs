@@ -87,6 +87,7 @@ fn register_namespaced_function(
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    throws: vec![],
                 },
             ),
         );
@@ -118,6 +119,7 @@ fn register_global_function(backend: &phpantom_lsp::Backend, name: &str, uri: &s
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    throws: vec![],
                 },
             ),
         );
@@ -874,6 +876,7 @@ async fn test_use_function_namespaced_detail_shows_signature() {
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    throws: vec![],
                 },
             ),
         );
@@ -967,6 +970,7 @@ async fn test_deprecated_namespaced_function() {
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    throws: vec![],
                 },
             ),
         );

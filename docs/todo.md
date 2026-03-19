@@ -21,9 +21,13 @@ within the same impact tier.
 
 ## Sprint 3 — Bug fixes
 
-| #   | Item                                              | Impact | Effort |
-| --- | ------------------------------------------------- | ------ | ------ |
-| B13 | [Stop showing dummy symbols in hover](todo/bugs.md#b13--hover-shows-dummy-symbols) | Medium | Low    |
+| #   | Item                                                                                                              | Impact | Effort |
+| --- | ----------------------------------------------------------------------------------------------------------------- | ------ | ------ |
+| B13 | [Stop showing dummy symbols in hover](todo/bugs.md#b13--hover-shows-dummy-symbols)                                | Medium | Low    |
+| B14 | [Add @throws action inserts misaligned docblock](todo/bugs.md#b14--add-throws-action-inserts-misaligned-docblock) | Medium | Low    |
+| B15 | [Completion after `->()` should not insert parentheses](todo/bugs.md#b15--completion-after---should-not-insert-parentheses) | Medium | Low    |
+| B16 | [PHPStan stale-diagnostic clearing is overly aggressive](todo/bugs.md#b16--phpstan-stale-diagnostic-clearing-is-overly-aggressive) | Medium | Medium |
+|     | **Release 0.6.0**                                                                                                 |        |        |
 
 ## Sprint 4 — Refactoring toolkit
 
@@ -35,6 +39,7 @@ within the same impact tier.
 | A4  | [Inline variable](todo/actions.md#a4-inline-variable)                              | Medium | Medium |
 | A6  | [Generate constructor](todo/actions.md#a6-generate-constructor)                    | Medium | Medium |
 | A7  | [Promote constructor parameter](todo/actions.md#a7-promote-constructor-parameter)  | Medium | Low    |
+|     | **Release 0.7.0**                                                                  |        |        |
 
 ## Sprint 5 — Polish for office adoption
 
@@ -48,6 +53,7 @@ within the same impact tier.
 | D1  | [Unknown class diagnostic](todo/diagnostics.md#d1-unknown-class-diagnostic)   | Medium      | Medium |
 | D3  | [Unknown method / property diagnostic](todo/diagnostics.md#d3-unknown-member) | Medium      | Medium |
 | D4  | [Unused variable warning](todo/diagnostics.md#d4-unused-variable)             | Medium      | Medium |
+|     | **Release 0.8.0**                                                             |             |        |
 
 ## Sprint 6 — Type intelligence depth
 

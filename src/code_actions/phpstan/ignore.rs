@@ -78,6 +78,14 @@ impl Backend {
                 continue;
             }
 
+            // Skip non-ignorable errors — PHPStan will not honour an
+            // `@phpstan-ignore` comment for these (e.g. visibility
+            // overrides).  The `ignorable` flag is stored in
+            // `Diagnostic.data` by `parse_phpstan_message()`.
+            if !is_ignorable(diag) {
+                continue;
+            }
+
             let line = diag.range.start.line;
             ignore_groups
                 .entry((line, identifier.to_string()))
@@ -516,6 +524,21 @@ fn parse_unmatched_line(message: &str) -> Option<u32> {
     Some(line_1based.saturating_sub(1))
 }
 
+/// Check whether a PHPStan diagnostic is ignorable.
+///
+/// Returns `true` when the diagnostic can be suppressed with a
+/// `@phpstan-ignore` comment.  Defaults to `true` when the `data`
+/// field is absent (e.g. diagnostics from older PHPStan versions).
+fn is_ignorable(diag: &Diagnostic) -> bool {
+    match &diag.data {
+        Some(data) => data
+            .get("ignorable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        None => true,
+    }
+}
+
 /// Check whether two LSP ranges overlap (share at least one character
 /// position).
 fn ranges_overlap(a: &Range, b: &Range) -> bool {
@@ -528,8 +551,10 @@ fn ranges_overlap(a: &Range, b: &Range) -> bool {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::bool_assert_comparison)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // ── parse_unmatched_identifier ──────────────────────────────────
 
@@ -789,6 +814,55 @@ mod tests {
             },
         };
         assert!(!ranges_overlap(&a, &b));
+    }
+
+    // ── is_ignorable ────────────────────────────────────────────────
+
+    fn make_diag_with_data(data: Option<serde_json::Value>) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: u32::MAX,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("method.visibility".to_string())),
+            code_description: None,
+            source: Some("phpstan".to_string()),
+            message: "some error".to_string(),
+            related_information: None,
+            tags: None,
+            data,
+        }
+    }
+
+    #[test]
+    fn ignorable_true_when_data_says_true() {
+        let diag = make_diag_with_data(Some(json!({ "ignorable": true })));
+        assert_eq!(is_ignorable(&diag), true);
+    }
+
+    #[test]
+    fn ignorable_false_when_data_says_false() {
+        let diag = make_diag_with_data(Some(json!({ "ignorable": false })));
+        assert_eq!(is_ignorable(&diag), false);
+    }
+
+    #[test]
+    fn ignorable_defaults_true_when_data_is_none() {
+        let diag = make_diag_with_data(None);
+        assert_eq!(is_ignorable(&diag), true);
+    }
+
+    #[test]
+    fn ignorable_defaults_true_when_field_missing() {
+        let diag = make_diag_with_data(Some(json!({})));
+        assert_eq!(is_ignorable(&diag), true);
     }
 
     #[test]

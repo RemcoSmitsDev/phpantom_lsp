@@ -710,6 +710,7 @@ impl LanguageServer for Backend {
 
         let ctx = self.file_context(&uri);
         let class_loader = self.class_loader(&ctx);
+        let function_loader = self.function_loader(&ctx);
 
         let edits = crate::completion::phpdoc::generation::try_generate_docblock_on_enter(
             &content,
@@ -717,6 +718,7 @@ impl LanguageServer for Backend {
             &ctx.use_map,
             &ctx.namespace,
             &class_loader,
+            Some(&function_loader),
         );
 
         Ok(edits)

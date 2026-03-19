@@ -23,7 +23,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::Backend;
 use crate::completion::phpdoc::generation::enrichment_plain;
-use crate::completion::source::throws_analysis;
+use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::docblock::is_compatible_refinement;
 use crate::docblock::type_strings::split_type_token;
 use crate::types::ClassInfo;
@@ -117,18 +117,19 @@ impl Backend {
             None => return,
         };
 
-        // Build a class loader for type enrichment.
+        // Build a class loader and function loader for type enrichment.
         let ctx = self.file_context(uri);
         let class_loader = self.class_loader(&ctx);
+        let function_loader = self.function_loader(&ctx);
 
         // Determine if anything needs updating.
-        let needs_update = check_needs_update(&info, content, &class_loader);
+        let needs_update = check_needs_update(&info, content, &class_loader, Some(&function_loader));
         if !needs_update {
             return;
         }
 
         // Build the replacement docblock.
-        let new_docblock = build_updated_docblock(&info, content, &class_loader);
+        let new_docblock = build_updated_docblock(&info, content, &class_loader, Some(&function_loader));
         if new_docblock == info.docblock_text {
             return;
         }
@@ -615,6 +616,7 @@ fn check_needs_update(
     info: &FunctionWithDocblock,
     content: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<crate::types::FunctionInfo>>,
 ) -> bool {
     // Build a map of existing doc param names.
     let doc_param_names: Vec<&str> = info
@@ -710,7 +712,7 @@ fn check_needs_update(
     }
 
     // Check for missing @throws tags.
-    let uncaught = throws_analysis::find_uncaught_throw_types(content, info.docblock_position);
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, info.docblock_position, Some(&ThrowsContext { class_loader, function_loader }));
     let existing_lower: Vec<String> = info
         .doc_throws
         .iter()
@@ -819,6 +821,7 @@ fn build_updated_docblock(
     info: &FunctionWithDocblock,
     content: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<crate::types::FunctionInfo>>,
 ) -> String {
     let indent = &info.indent;
 
@@ -941,7 +944,7 @@ fn build_updated_docblock(
     }
 
     // Add missing @throws tags.
-    let uncaught = throws_analysis::find_uncaught_throw_types(content, info.docblock_position);
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, info.docblock_position, Some(&ThrowsContext { class_loader, function_loader }));
     let existing_throws_lower: Vec<String> = info
         .doc_throws
         .iter()
@@ -1356,6 +1359,11 @@ mod tests {
         |_| None
     }
 
+    /// No function loader (for unit tests).
+    fn no_function_loader() -> Option<&'static dyn Fn(&str) -> Option<crate::types::FunctionInfo>> {
+        None
+    }
+
     #[test]
     fn detects_missing_param() {
         let php = r#"<?php
@@ -1371,7 +1379,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1388,7 +1396,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1405,7 +1413,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1422,7 +1430,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(!check_needs_update(&info, php, &cl));
+        assert!(!check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1438,7 +1446,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1454,7 +1462,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(!check_needs_update(&info, php, &cl));
+        assert!(!check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1470,7 +1478,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1486,7 +1494,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1513,7 +1521,7 @@ function bar(string $a, int $b, bool $c): void {}
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1531,7 +1539,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             updated.contains("The first param"),
             "Should preserve description: {}",
@@ -1563,7 +1571,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             !updated.contains("$old"),
             "Should remove old param: {}",
@@ -1586,7 +1594,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             updated.contains("@return int Some description"),
             "Should update return type: {}",
@@ -1609,7 +1617,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             !updated.contains("@return"),
             "Should remove @return void: {}",
@@ -1631,7 +1639,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         // Variadic params should match — no update needed.
-        assert!(!check_needs_update(&info, php, &cl));
+        assert!(!check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1648,7 +1656,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         // array<int, string> refines array — no contradiction.
-        assert!(!check_needs_update(&info, php, &cl));
+        assert!(!check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1668,7 +1676,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             updated.contains("@template T"),
             "Should preserve @template: {}",
@@ -1715,7 +1723,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        assert!(check_needs_update(&info, php, &cl));
+        assert!(check_needs_update(&info, php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1731,7 +1739,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         // All $names should be aligned at the same column.
         assert!(
             updated.contains("@param string $a"),
@@ -1766,7 +1774,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         // Should NOT have a blank line between /** and the first @param.
         let lines: Vec<&str> = updated.lines().collect();
         assert_eq!(
@@ -1795,7 +1803,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             updated.contains("(Closure(): mixed)"),
             "Should enrich Closure: {}",
@@ -1825,7 +1833,7 @@ class Foo {
         let pos = php.find("function bar").unwrap() as u32;
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
-        let updated = build_updated_docblock(&info, php, &cl);
+        let updated = build_updated_docblock(&info, php, &cl, no_function_loader());
         assert!(
             updated.contains("@throws RuntimeException"),
             "Should add missing @throws: {}",
@@ -1853,7 +1861,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            !check_needs_update(&info, php, &cl),
+            !check_needs_update(&info, php, &cl, no_function_loader()),
             "Should not need update when throws already documented"
         );
     }
@@ -1876,7 +1884,7 @@ class Foo {
             "Should find function info when cursor is inside the docblock"
         );
         let cl = no_class_loader();
-        assert!(check_needs_update(&info.unwrap(), php, &cl));
+        assert!(check_needs_update(&info.unwrap(), php, &cl, no_function_loader()));
     }
 
     #[test]
@@ -1990,7 +1998,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &cl),
+            check_needs_update(&info, php, &cl, no_function_loader()),
             "should need update to add `mixed` type to @param $name"
         );
         // The param must still be recognised (not duplicated).
@@ -2014,7 +2022,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &cl),
+            check_needs_update(&info, php, &cl, no_function_loader()),
             "should need update because $b is missing"
         );
         assert_eq!(info.doc_params.len(), 1);
@@ -2039,7 +2047,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            !check_needs_update(&info, php, &cl),
+            !check_needs_update(&info, php, &cl, no_function_loader()),
             "should not suggest adding @param for a fully-typed non-templated class param"
         );
     }
@@ -2058,7 +2066,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            !check_needs_update(&info, php, &cl),
+            !check_needs_update(&info, php, &cl, no_function_loader()),
             "should not suggest adding @param for scalar-typed params"
         );
     }
@@ -2079,7 +2087,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &cl),
+            check_needs_update(&info, php, &cl, no_function_loader()),
             "should suggest adding @param for an untyped param"
         );
     }
@@ -2100,7 +2108,7 @@ class Foo {
         let info = find_info(php, pos).unwrap();
         let cl = no_class_loader();
         assert!(
-            check_needs_update(&info, php, &cl),
+            check_needs_update(&info, php, &cl, no_function_loader()),
             "should suggest adding @param for an array param"
         );
     }

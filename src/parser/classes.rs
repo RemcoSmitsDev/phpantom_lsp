@@ -1854,6 +1854,13 @@ impl Backend {
                         .map(docblock::extract_type_assertions)
                         .unwrap_or_default();
 
+                    // Extract `@throws` tags so that cross-file throws
+                    // propagation can look up which exceptions a method
+                    // declares without needing access to the source text.
+                    let throws = method_docblock_text
+                        .map(docblock::extract_throws_tags)
+                        .unwrap_or_default();
+
                     methods.push(MethodInfo {
                         name,
                         name_offset,
@@ -1876,6 +1883,7 @@ impl Backend {
                         is_abstract: method.is_abstract(),
                         is_virtual: false,
                         type_assertions,
+                        throws,
                     });
                 }
                 ClassLikeMember::Property(property) => {

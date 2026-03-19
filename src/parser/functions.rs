@@ -81,6 +81,7 @@ impl Backend {
                         see_refs,
                         func_template_params,
                         func_template_bindings,
+                        throws,
                     ) = if let Some(ctx) = doc_ctx {
                         let docblock_text =
                             docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, func);
@@ -154,6 +155,10 @@ impl Backend {
                             .map(docblock::extract_see_references)
                             .unwrap_or_default();
 
+                        let throws = docblock_text
+                            .map(docblock::extract_throws_tags)
+                            .unwrap_or_default();
+
                         (
                             effective,
                             conditional,
@@ -166,6 +171,7 @@ impl Backend {
                             see_refs,
                             tpl_params,
                             tpl_bindings,
+                            throws,
                         )
                     } else {
                         // No docblock context available — attribute argument
@@ -180,6 +186,7 @@ impl Backend {
                             None,
                             None,
                             None,
+                            Vec::new(),
                             Vec::new(),
                             Vec::new(),
                             Vec::new(),
@@ -263,6 +270,7 @@ impl Backend {
                         deprecated_replacement,
                         template_params: func_template_params,
                         template_bindings: func_template_bindings,
+                        throws,
                     });
                 }
                 Statement::Namespace(namespace) => {

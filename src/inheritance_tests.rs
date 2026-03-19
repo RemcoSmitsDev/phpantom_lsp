@@ -293,6 +293,7 @@ fn test_apply_substitution_to_method_modifies_return_and_params() {
         is_abstract: false,
         is_virtual: false,
         type_assertions: Vec::new(),
+        throws: Vec::new(),
     };
 
     apply_substitution_to_method(&mut method, &subs);

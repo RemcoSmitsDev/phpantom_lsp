@@ -24,11 +24,34 @@
 //! use the full `ThrowInfo` struct.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tower_lsp::lsp_types::Position;
 
 use super::comment_position::position_to_byte_offset;
+use crate::types::{ClassInfo, FunctionInfo};
 use crate::util::short_name;
+
+/// Bundles the loaders needed for cross-file throws resolution.
+///
+/// When provided to [`find_uncaught_throw_types_with_context`], every call
+/// in the function body is inspected:
+///
+/// - `$variable->method()` — the variable's type is resolved from the
+///   function's parameter list, the class is loaded, and the method's
+///   `@throws` tags are propagated.
+/// - `ClassName::staticMethod()` — the class is loaded directly and the
+///   method's `@throws` tags are propagated.
+/// - `functionName()` — the function is loaded and its `@throws` tags
+///   are propagated.
+/// - `new ClassName(…)` — the class is loaded and the constructor's
+///   `@throws` tags are propagated.
+pub(crate) struct ThrowsContext<'a> {
+    /// Resolves a class name to its [`ClassInfo`].
+    pub class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    /// Resolves a function name to its [`FunctionInfo`].
+    pub function_loader: Option<&'a dyn Fn(&str) -> Option<FunctionInfo>>,
+}
 
 /// Information about a `throw` statement (or throw-expression) found in
 /// a block of PHP source code.
@@ -272,7 +295,10 @@ fn find_throw_variable_types(body: &str, catches: &[CatchInfo]) -> Vec<ThrowInfo
 ///
 /// Returns a [`ThrowInfo`] for each propagated throw, with the byte
 /// offset set to the call site so that catch-block filtering works.
-pub(crate) fn find_propagated_throws(body: &str, file_content: &str) -> Vec<ThrowInfo> {
+pub(crate) fn find_propagated_throws(
+    body: &str,
+    file_content: &str,
+) -> Vec<ThrowInfo> {
     let mut results = Vec::new();
     let mut seen_methods = std::collections::HashSet::new();
     let patterns: &[&str] = &["$this->", "self::", "static::"];
@@ -978,18 +1004,45 @@ fn parse_catch_types(paren_content: &str) -> (Vec<String>, Option<String>) {
 /// Determine which exception types in a function body are **not** caught
 /// by an enclosing `try/catch` block.
 ///
-/// Detects six patterns:
+/// Detects six patterns (same-file only):
 /// 1. `throw new ExceptionType(…)` (direct instantiation)
 /// 2. `throw $this->method()` / `throw self::method()` / `throw static::method()`
 ///    (the method's return type is the thrown exception type)
 /// 3. `throw functionName()` (bare function call, return type is thrown)
 /// 4. `$this->method()` / `self::method()` calls where the called method's
-///    docblock declares `@throws ExceptionType` (propagated throws)
+///    docblock declares `@throws ExceptionType` (propagated throws, same file)
 /// 5. Inline `/** @throws ExceptionType */` annotations in the function body
 /// 6. `throw $variable` (resolved through enclosing catch clause variable)
 ///
 /// Returns a deduplicated list of short exception type names.
+///
+/// This variant does **not** perform cross-file resolution.
+/// Use [`find_uncaught_throw_types_with_context`] with a [`ThrowsContext`]
+/// to enable it.
 pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Vec<String> {
+    find_uncaught_throw_types_with_context(content, position, None)
+}
+
+/// Like [`find_uncaught_throw_types`] but with an optional [`ThrowsContext`]
+/// for cross-file throws propagation.
+///
+/// When a context is provided, **every** call in the function body is
+/// inspected for cross-file `@throws` tags:
+///
+/// - `$variable->method()` — the variable's type is resolved from the
+///   function's parameter list, the class is loaded, and the method's
+///   `@throws` tags are propagated.
+/// - `ClassName::staticMethod()` — the class is loaded directly and the
+///   method's `@throws` tags are propagated.
+/// - `functionName()` — the function is loaded and its `@throws` tags
+///   are propagated.
+/// - `new ClassName(…)` — the class is loaded and the constructor's
+///   `@throws` tags are propagated.
+pub(crate) fn find_uncaught_throw_types_with_context(
+    content: &str,
+    position: Position,
+    ctx: Option<&ThrowsContext<'_>>,
+) -> Vec<String> {
     let body = match extract_function_body(content, position) {
         Some(b) => b,
         None => return Vec::new(),
@@ -1000,6 +1053,14 @@ pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Ve
     let propagated = find_propagated_throws(&body, content);
     let catches = find_catch_blocks(&body);
     let throw_vars = find_throw_variable_types(&body, &catches);
+
+    // Cross-file propagated throws from all call patterns.
+    let cross_file_propagated = if let Some(throws_ctx) = ctx {
+        let signature = extract_function_signature(content, position);
+        find_cross_file_propagated_throws(&body, &signature, content, throws_ctx)
+    } else {
+        Vec::new()
+    };
 
     let mut uncaught: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1042,7 +1103,7 @@ pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Ve
         }
     }
 
-    // 3. Propagated @throws from called methods
+    // 3. Propagated @throws from called methods (same-file text search)
     for prop in &propagated {
         let sn = short_name(prop.type_name.trim_start_matches('\\'));
         if !sn.is_empty() && !is_caught_by(&catches, prop.offset, sn) && seen.insert(sn.to_string())
@@ -1069,7 +1130,433 @@ pub(crate) fn find_uncaught_throw_types(content: &str, position: Position) -> Ve
         }
     }
 
+    // 6. Cross-file propagated @throws from all call patterns
+    for prop in &cross_file_propagated {
+        let sn = short_name(prop.type_name.trim_start_matches('\\'));
+        if !sn.is_empty() && !is_caught_by(&catches, prop.offset, sn) && seen.insert(sn.to_string())
+        {
+            uncaught.push(sn.to_string());
+        }
+    }
+
     uncaught
+}
+
+/// Extract the function/method signature (the text between `function` and `{`)
+/// from the content at the given position.
+///
+/// Returns the raw signature string, e.g.
+/// `"handle(BusinessCentralService $service): void"`.
+fn extract_function_signature(content: &str, position: Position) -> String {
+    let byte_offset = position_to_byte_offset(content, position);
+    let after_cursor = &content[byte_offset.min(content.len())..];
+
+    let after_docblock = if let Some(close_pos) = after_cursor.find("*/") {
+        &after_cursor[close_pos + 2..]
+    } else {
+        after_cursor
+    };
+
+    // Find the `function` keyword.
+    let lower = after_docblock.to_lowercase();
+    let func_pos = match lower.find("function") {
+        Some(p) => p,
+        None => return String::new(),
+    };
+
+    let after_func = &after_docblock[func_pos + 8..]; // skip "function"
+
+    // Everything up to the opening brace is the signature.
+    match after_func.find('{') {
+        Some(brace) => after_func[..brace].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Parse a function signature to build a map of `$variable_name -> TypeName`.
+///
+/// Given a signature like `"handle(BusinessCentralService $service, int $count): void"`,
+/// returns `[("$service", "BusinessCentralService"), ("$count", "int")]`.
+fn parse_param_type_map(signature: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+
+    // Extract the text inside the outermost parentheses.
+    let open = match signature.find('(') {
+        Some(p) => p,
+        None => return result,
+    };
+    let close = match signature.rfind(')') {
+        Some(p) => p,
+        None => return result,
+    };
+    if close <= open {
+        return result;
+    }
+
+    let params_text = &signature[open + 1..close];
+
+    // Split on commas, respecting nested parentheses/generics.
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = params_text.as_bytes();
+    let mut segments = Vec::new();
+
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'<' | b'[' | b'{' => depth += 1,
+            b')' | b'>' | b']' | b'}' => depth -= 1,
+            b',' if depth == 0 => {
+                segments.push(&params_text[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    segments.push(&params_text[start..]);
+
+    for segment in segments {
+        let trimmed = segment.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Each parameter segment looks like:
+        //   [?]TypeName [&][$]varName [= default]
+        // We need to find the last `$name` token and the type before it.
+        // Skip promoted property modifiers (public/protected/private/readonly).
+        let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+
+        // Find the variable name (starts with `$`, possibly prefixed with `&` or `...`).
+        let var_idx = tokens.iter().position(|t| {
+            let t = t.trim_start_matches('&').trim_start_matches("...");
+            t.starts_with('$')
+        });
+
+        let var_idx = match var_idx {
+            Some(i) => i,
+            None => continue,
+        };
+
+        if var_idx == 0 {
+            // No type before the variable name.
+            continue;
+        }
+
+        let var_name = tokens[var_idx]
+            .trim_start_matches('&')
+            .trim_start_matches("...");
+
+        // The type is immediately before the variable. Skip modifiers.
+        let type_idx = var_idx - 1;
+        let type_token = tokens[type_idx];
+
+        // Skip PHP modifiers that aren't types.
+        if matches!(
+            type_token.to_lowercase().as_str(),
+            "public" | "protected" | "private" | "readonly"
+        ) {
+            continue;
+        }
+
+        // Clean the type: strip leading `?` for nullable, strip leading `\`.
+        let cleaned_type = type_token
+            .trim_start_matches('?')
+            .trim_start_matches('\\');
+
+        if !cleaned_type.is_empty() {
+            result.push((var_name.to_string(), cleaned_type.to_string()));
+        }
+    }
+
+    result
+}
+
+/// Find `@throws` annotations from all call patterns in the function body
+/// by resolving types via the class and function loaders.
+///
+/// Handles:
+/// - `$variable->method()` — resolves variable type from function params
+/// - `ClassName::staticMethod()` — loads the class directly
+/// - `functionName()` — loads the function directly
+/// - `new ClassName(…)` — loads the class and checks the constructor
+fn find_cross_file_propagated_throws(
+    body: &str,
+    signature: &str,
+    file_content: &str,
+    ctx: &ThrowsContext<'_>,
+) -> Vec<ThrowInfo> {
+    let param_map = parse_param_type_map(signature);
+    let class_loader = ctx.class_loader;
+
+    let mut results = Vec::new();
+    let mut seen_calls = std::collections::HashSet::new();
+
+    let bytes = body.as_bytes();
+    let len = bytes.len();
+    let mut pos = 0;
+
+    while pos < len {
+        // Skip strings.
+        if bytes[pos] == b'\'' || bytes[pos] == b'"' {
+            pos = skip_string_forward(bytes, pos);
+            continue;
+        }
+        // Skip line comments.
+        if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'/' {
+            pos = skip_line_comment(bytes, pos);
+            continue;
+        }
+        // Skip block comments.
+        if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
+            pos = skip_block_comment(bytes, pos);
+            continue;
+        }
+
+        // ── Pattern: `new ClassName(…)` ─────────────────────────────
+        if pos + 3 < len && &body[pos..pos + 3] == "new" {
+            let before_ok =
+                pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+            let after_ok = pos + 3 >= len
+                || (!bytes[pos + 3].is_ascii_alphanumeric() && bytes[pos + 3] != b'_');
+            if before_ok && after_ok {
+                let call_start = pos;
+                let after_new = body[pos + 3..].trim_start();
+                // Extract class name (may be namespaced with `\`).
+                let name_end = after_new
+                    .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '\\')
+                    .unwrap_or(after_new.len());
+                let class_name = &after_new[..name_end];
+                let after_name = after_new[name_end..].trim_start();
+                if !class_name.is_empty() && after_name.starts_with('(') {
+                    let clean = class_name.trim_start_matches('\\');
+                    let call_key = format!("new:{}", clean);
+                    if seen_calls.insert(call_key) {
+                        if let Some(class_info) = class_loader(clean) {
+                            if let Some(ctor) = class_info
+                                .methods
+                                .iter()
+                                .find(|m| m.name == "__construct")
+                            {
+                                for exc_type in &ctor.throws {
+                                    results.push(ThrowInfo {
+                                        type_name: exc_type.clone(),
+                                        offset: call_start,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                pos += 3;
+                continue;
+            }
+        }
+
+        // ── Pattern: `$variable->method()` ──────────────────────────
+        if bytes[pos] == b'$' {
+            let var_start = pos;
+            pos += 1;
+            // Collect variable name characters.
+            while pos < len && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
+                pos += 1;
+            }
+            let var_name = &body[var_start..pos];
+
+            // Check for `->` immediately after (whitespace-tolerant).
+            let rest = &body[pos..];
+            let trimmed = rest.trim_start();
+            if !trimmed.starts_with("->") {
+                continue;
+            }
+            let arrow_offset = rest.len() - trimmed.len() + 2; // skip "->"
+            let after_arrow = &rest[arrow_offset..];
+            let after_arrow_trimmed = after_arrow.trim_start();
+
+            // Extract method name.
+            let name_end = after_arrow_trimmed
+                .find(|c: char| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(after_arrow_trimmed.len());
+            let method_name = &after_arrow_trimmed[..name_end];
+
+            if method_name.is_empty() {
+                continue;
+            }
+
+            // Check that it's followed by `(` (a method call, not a property).
+            let after_method = after_arrow_trimmed[name_end..].trim_start();
+            if !after_method.starts_with('(') {
+                continue;
+            }
+
+            // Skip `$this` — those are handled by find_propagated_throws.
+            if var_name == "$this" {
+                continue;
+            }
+
+            // De-duplicate: only process each (variable, method) pair once.
+            let call_key = format!("{}::{}", var_name, method_name);
+            if !seen_calls.insert(call_key) {
+                continue;
+            }
+
+            // Look up the variable's type from the parameter map.
+            let class_name = match param_map.iter().find(|(name, _)| name == var_name) {
+                Some((_, type_name)) => type_name.as_str(),
+                None => continue,
+            };
+
+            // Load the class and find the method's @throws tags.
+            collect_method_throws(class_loader, class_name, method_name, var_start, &mut results);
+
+            continue;
+        }
+
+        // ── Pattern: identifier — could be `ClassName::method()` or `functionName()` ──
+        if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' || bytes[pos] == b'\\' {
+            let ident_start = pos;
+            // Collect identifier characters (including namespace separators).
+            while pos < len
+                && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_' || bytes[pos] == b'\\')
+            {
+                pos += 1;
+            }
+            let ident = &body[ident_start..pos];
+
+            let after_ident = body[pos..].trim_start();
+
+            // ── Sub-pattern: `ClassName::method()` ──────────────────
+            if after_ident.starts_with("::") {
+                let after_colons = after_ident[2..].trim_start();
+                let method_end = after_colons
+                    .find(|c: char| !c.is_alphanumeric() && c != '_')
+                    .unwrap_or(after_colons.len());
+                let method_name = &after_colons[..method_end];
+                let after_method = after_colons[method_end..].trim_start();
+
+                if !method_name.is_empty() && after_method.starts_with('(') {
+                    // Skip self::/static::/parent:: — handled by same-file propagation.
+                    let ident_lower = ident.to_lowercase();
+                    if ident_lower != "self" && ident_lower != "static" && ident_lower != "parent"
+                    {
+                        let clean_class = ident.trim_start_matches('\\');
+                        let call_key = format!("{}::{}", clean_class, method_name);
+                        if seen_calls.insert(call_key) {
+                            collect_method_throws(
+                                class_loader,
+                                clean_class,
+                                method_name,
+                                ident_start,
+                                &mut results,
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // ── Sub-pattern: `functionName()` ───────────────────────
+            if after_ident.starts_with('(') {
+                // Skip PHP keywords that look like function calls.
+                let ident_lower = ident.to_lowercase();
+                if !is_php_keyword(&ident_lower) {
+                    let clean_name = ident.trim_start_matches('\\');
+                    let call_key = format!("fn:{}", clean_name);
+                    if seen_calls.insert(call_key) {
+                        // First check same-file methods (already handled by
+                        // find_propagated_throws for $this->/self::/static::).
+                        // For standalone functions, use the function loader.
+                        if let Some(func_loader) = ctx.function_loader {
+                            if let Some(func_info) = func_loader(clean_name) {
+                                for exc_type in &func_info.throws {
+                                    results.push(ThrowInfo {
+                                        type_name: exc_type.clone(),
+                                        offset: ident_start,
+                                    });
+                                }
+                            }
+                        }
+                        // Also check: it might be a same-file function with @throws
+                        // in its docblock (text-search fallback).
+                        let same_file_throws =
+                            find_method_throws_tags(file_content, clean_name);
+                        for t in same_file_throws {
+                            results.push(ThrowInfo {
+                                type_name: t,
+                                offset: ident_start,
+                            });
+                        }
+                    }
+                }
+            }
+
+            continue;
+        }
+
+        pos += 1;
+    }
+
+    results
+}
+
+/// Load a class by name and collect its method's `@throws` into `results`.
+fn collect_method_throws(
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    class_name: &str,
+    method_name: &str,
+    offset: usize,
+    results: &mut Vec<ThrowInfo>,
+) {
+    if let Some(class_info) = class_loader(class_name) {
+        if let Some(method_info) = class_info.methods.iter().find(|m| m.name == method_name) {
+            for exc_type in &method_info.throws {
+                results.push(ThrowInfo {
+                    type_name: exc_type.clone(),
+                    offset,
+                });
+            }
+        }
+    }
+}
+
+/// Check whether an identifier is a PHP keyword that should not be
+/// treated as a function call (e.g. `if(…)`, `foreach(…)`, `return`).
+fn is_php_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "if" | "else"
+            | "elseif"
+            | "while"
+            | "for"
+            | "foreach"
+            | "switch"
+            | "match"
+            | "return"
+            | "echo"
+            | "print"
+            | "isset"
+            | "unset"
+            | "empty"
+            | "list"
+            | "array"
+            | "die"
+            | "exit"
+            | "eval"
+            | "catch"
+            | "throw"
+            | "yield"
+            | "clone"
+            | "include"
+            | "include_once"
+            | "require"
+            | "require_once"
+            | "new"
+            | "self"
+            | "static"
+            | "parent"
+            | "fn"
+            | "function"
+            | "class"
+    )
 }
 
 // ─── Import Helpers ─────────────────────────────────────────────────────────

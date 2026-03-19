@@ -326,6 +326,17 @@ fn parse_phpstan_message(msg: &serde_json::Value) -> Option<Diagnostic> {
         message.to_string()
     };
 
+    // PHPStan includes `"ignorable": false` for errors that cannot be
+    // suppressed with `@phpstan-ignore` (e.g. visibility overrides).
+    // Store this in `Diagnostic.data` so code actions can check it.
+    // Default to `true` when the field is absent (older PHPStan versions).
+    let ignorable = msg
+        .get("ignorable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let data = Some(serde_json::json!({ "ignorable": ignorable }));
+
     Some(Diagnostic {
         range: Range {
             start: Position {
@@ -344,7 +355,7 @@ fn parse_phpstan_message(msg: &serde_json::Value) -> Option<Diagnostic> {
         message: full_message,
         related_information: None,
         tags: None,
-        data: None,
+        data,
     })
 }
 
@@ -615,12 +626,77 @@ mod tests {
             Some(NumberOrString::String("argument.type".to_string()))
         );
         assert!(diags[0].message.contains("Parameter #1"));
+        // ignorable: true is stored in data
+        assert_eq!(
+            diags[0].data,
+            Some(serde_json::json!({ "ignorable": true }))
+        );
 
         // Second diagnostic
         assert_eq!(diags[1].range.start.line, 24); // 25 - 1
         assert_eq!(
             diags[1].code,
             Some(NumberOrString::String("return.type".to_string()))
+        );
+        assert_eq!(
+            diags[1].data,
+            Some(serde_json::json!({ "ignorable": true }))
+        );
+    }
+
+    #[test]
+    fn parse_non_ignorable_diagnostic() {
+        let json = r#"{
+            "totals": {"errors": 0, "file_errors": 1},
+            "files": {
+                "/project/src/Foo.php": {
+                    "errors": 1,
+                    "messages": [
+                        {
+                            "message": "Private method Foo::bar() overriding public method Parent::bar() should also be public.",
+                            "line": 10,
+                            "ignorable": false,
+                            "identifier": "method.visibility"
+                        }
+                    ]
+                }
+            },
+            "errors": []
+        }"#;
+        let path = Path::new("/project/src/Foo.php");
+        let diags = parse_phpstan_json(json, path).unwrap();
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].data,
+            Some(serde_json::json!({ "ignorable": false }))
+        );
+    }
+
+    #[test]
+    fn parse_ignorable_defaults_true_when_field_absent() {
+        let json = r#"{
+            "totals": {"errors": 0, "file_errors": 1},
+            "files": {
+                "/project/src/Foo.php": {
+                    "errors": 1,
+                    "messages": [
+                        {
+                            "message": "Some error.",
+                            "line": 1,
+                            "identifier": "some.error"
+                        }
+                    ]
+                }
+            },
+            "errors": []
+        }"#;
+        let path = Path::new("/project/src/Foo.php");
+        let diags = parse_phpstan_json(json, path).unwrap();
+        assert_eq!(diags.len(), 1);
+        // When "ignorable" is absent from JSON, default to true
+        assert_eq!(
+            diags[0].data,
+            Some(serde_json::json!({ "ignorable": true }))
         );
     }
 

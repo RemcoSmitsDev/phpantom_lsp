@@ -2426,6 +2426,7 @@ async fn test_use_import_excludes_constants_and_functions() {
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    throws: vec![],
                 },
             ),
         );
@@ -2556,6 +2557,7 @@ async fn test_use_function_shows_only_functions() {
                     deprecated_replacement: None,
                     template_params: vec![],
                     template_bindings: vec![],
+                    throws: vec![],
                 },
             ),
         );

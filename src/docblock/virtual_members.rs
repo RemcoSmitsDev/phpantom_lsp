@@ -223,6 +223,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             is_abstract: false,
             is_virtual: true,
             type_assertions: Vec::new(),
+            throws: Vec::new(),
         });
     }
 

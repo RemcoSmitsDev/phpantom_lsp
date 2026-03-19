@@ -48,7 +48,8 @@ use tower_lsp::lsp_types::*;
 use super::context::{DocblockContext, SymbolInfo};
 use crate::completion::resolver::FunctionLoaderFn;
 use crate::completion::source::comment_position::position_to_byte_offset;
-use crate::completion::source::throws_analysis;
+use crate::completion::source::throws_analysis::{self, ThrowsContext};
+use crate::types::FunctionInfo;
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
 use crate::types::ClassInfo;
 
@@ -63,6 +64,7 @@ pub fn try_generate_docblock(
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> Option<CompletionResponse> {
     let (trigger_range, indent) = detect_docblock_trigger(content, position)?;
 
@@ -88,6 +90,7 @@ pub fn try_generate_docblock(
         use_map,
         file_namespace,
         class_loader,
+        function_loader,
     );
 
     if snippet.is_empty() {
@@ -96,7 +99,7 @@ pub fn try_generate_docblock(
 
     // Collect additional text edits (e.g. use imports for @throws).
     let additional_edits =
-        build_throws_import_edits(content, position, use_map, file_namespace, &context);
+        build_throws_import_edits(content, position, use_map, file_namespace, &context, class_loader, function_loader);
 
     let item = CompletionItem {
         label: "/** PHPDoc Block */".to_string(),
@@ -141,6 +144,7 @@ pub fn try_generate_docblock_on_enter(
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> Option<Vec<TextEdit>> {
     // Detect the empty docblock range and indentation.
     let (block_range, _block_indent, after_block) = detect_empty_docblock(content, position)?;
@@ -172,6 +176,7 @@ pub fn try_generate_docblock_on_enter(
         use_map,
         file_namespace,
         class_loader,
+        function_loader,
     );
 
     if plain.is_empty() {
@@ -190,6 +195,8 @@ pub fn try_generate_docblock_on_enter(
         use_map,
         file_namespace,
         &context,
+        class_loader,
+        function_loader,
     ));
 
     Some(edits)
@@ -1122,9 +1129,10 @@ fn build_docblock_plain(
     indent: &str,
     content: &str,
     position: Position,
-    use_map: &HashMap<String, String>,
-    file_namespace: &Option<String>,
+    _use_map: &HashMap<String, String>,
+    _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> String {
     match context {
         DocblockContext::FunctionOrMethod => build_function_plain(
@@ -1132,9 +1140,10 @@ fn build_docblock_plain(
             indent,
             content,
             position,
-            use_map,
-            file_namespace,
+            _use_map,
+            _file_namespace,
             class_loader,
+            function_loader,
         ),
         DocblockContext::ClassLike => build_class_plain(sym, indent, class_loader),
         DocblockContext::Property => build_property_plain(sym, indent, class_loader),
@@ -1159,9 +1168,10 @@ fn build_docblock_snippet(
     indent: &str,
     content: &str,
     position: Position,
-    use_map: &HashMap<String, String>,
-    file_namespace: &Option<String>,
+    _use_map: &HashMap<String, String>,
+    _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> String {
     match context {
         DocblockContext::FunctionOrMethod => build_function_snippet(
@@ -1169,9 +1179,10 @@ fn build_docblock_snippet(
             indent,
             content,
             position,
-            use_map,
-            file_namespace,
+            _use_map,
+            _file_namespace,
             class_loader,
+            function_loader,
         ),
         DocblockContext::ClassLike => build_class_snippet(sym, indent, class_loader),
         DocblockContext::Property => build_property_snippet(sym, indent, class_loader),
@@ -1197,8 +1208,10 @@ fn build_function_snippet(
     _use_map: &HashMap<String, String>,
     _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> String {
-    let uncaught = throws_analysis::find_uncaught_throw_types(content, position);
+    let throws_ctx = ThrowsContext { class_loader, function_loader };
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&throws_ctx));
 
     let mut tab_stop = 1u32;
 
@@ -1290,8 +1303,10 @@ fn build_function_plain(
     _use_map: &HashMap<String, String>,
     _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> String {
-    let uncaught = throws_analysis::find_uncaught_throw_types(content, position);
+    let throws_ctx = ThrowsContext { class_loader, function_loader };
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&throws_ctx));
 
     // Collect @param tags that need enrichment.
     let mut param_tags: Vec<(String, String)> = Vec::new();
@@ -1689,12 +1704,15 @@ fn build_throws_import_edits(
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
     context: &DocblockContext,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
 ) -> Vec<TextEdit> {
     if !matches!(context, DocblockContext::FunctionOrMethod) {
         return Vec::new();
     }
 
-    let uncaught = throws_analysis::find_uncaught_throw_types(content, position);
+    let throws_ctx = ThrowsContext { class_loader, function_loader };
+    let uncaught = throws_analysis::find_uncaught_throw_types_with_context(content, position, Some(&throws_ctx));
     if uncaught.is_empty() {
         return Vec::new();
     }
@@ -2203,6 +2221,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         // No line should start with the base indent "    ".
         for (i, line) in snippet.lines().enumerate() {
@@ -2238,6 +2257,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         // The `$` in `$data` must be escaped as `\$` so the snippet
         // parser does not treat it as a snippet variable.
@@ -2289,6 +2309,7 @@ mod tests {
             &use_map,
             &file_ns,
             &loader,
+            None,
         );
         // All params are fully typed, return type is non-template class.
         // Should be a summary-only skeleton with no tags.
@@ -2329,6 +2350,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         // Only $data (untyped) should get @param, not $name (string).
         assert!(
@@ -2374,6 +2396,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         assert!(snippet.contains("@param"), "array param should get @param");
         assert!(snippet.contains("$items"), "Should reference $items");
@@ -2403,6 +2426,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         assert!(snippet.contains("@param"));
         assert!(
@@ -2431,6 +2455,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         assert!(
             !snippet.is_empty(),
@@ -2606,6 +2631,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         // Both params are untyped → both get mixed placeholders.
         // The `$` names should start at the same column.
@@ -2655,6 +2681,7 @@ mod tests {
             &use_map,
             &file_ns,
             &loader,
+            None,
         );
         let param_lines: Vec<&str> = snippet.lines().filter(|l| l.contains("@param")).collect();
         assert_eq!(param_lines.len(), 2, "Should have 2 @param lines");
@@ -2729,6 +2756,7 @@ mod tests {
             &use_map,
             &file_ns,
             &no_classes,
+            None,
         );
         // @param, @throws and @return should all be present.
         assert!(
