@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Position;
 
 use super::comment_position::position_to_byte_offset;
-use crate::types::{ClassInfo, FunctionInfo};
+use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::short_name;
 
 /// Bundles the loaders needed for cross-file throws resolution.
@@ -50,7 +50,7 @@ pub(crate) struct ThrowsContext<'a> {
     /// Resolves a class name to its [`ClassInfo`].
     pub class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     /// Resolves a function name to its [`FunctionInfo`].
-    pub function_loader: Option<&'a dyn Fn(&str) -> Option<FunctionInfo>>,
+    pub function_loader: FunctionLoader<'a>,
 }
 
 /// Information about a `throw` statement (or throw-expression) found in
@@ -1325,18 +1325,16 @@ fn find_cross_file_propagated_throws(
                 if !class_name.is_empty() && after_name.starts_with('(') {
                     let clean = class_name.trim_start_matches('\\');
                     let call_key = format!("new:{}", clean);
-                    if seen_calls.insert(call_key) {
-                        if let Some(class_info) = class_loader(clean) {
-                            if let Some(ctor) =
-                                class_info.methods.iter().find(|m| m.name == "__construct")
-                            {
-                                for exc_type in &ctor.throws {
-                                    results.push(ThrowInfo {
-                                        type_name: exc_type.clone(),
-                                        offset: call_start,
-                                    });
-                                }
-                            }
+                    if seen_calls.insert(call_key)
+                        && let Some(class_info) = class_loader(clean)
+                        && let Some(ctor) =
+                            class_info.methods.iter().find(|m| m.name == "__construct")
+                    {
+                        for exc_type in &ctor.throws {
+                            results.push(ThrowInfo {
+                                type_name: exc_type.clone(),
+                                offset: call_start,
+                            });
                         }
                     }
                 }
@@ -1424,8 +1422,8 @@ fn find_cross_file_propagated_throws(
             let after_ident = body[pos..].trim_start();
 
             // ── Sub-pattern: `ClassName::method()` ──────────────────
-            if after_ident.starts_with("::") {
-                let after_colons = after_ident[2..].trim_start();
+            if let Some(after_colons_raw) = after_ident.strip_prefix("::") {
+                let after_colons = after_colons_raw.trim_start();
                 let method_end = after_colons
                     .find(|c: char| !c.is_alphanumeric() && c != '_')
                     .unwrap_or(after_colons.len());
@@ -1463,14 +1461,14 @@ fn find_cross_file_propagated_throws(
                         // First check same-file methods (already handled by
                         // find_propagated_throws for $this->/self::/static::).
                         // For standalone functions, use the function loader.
-                        if let Some(func_loader) = ctx.function_loader {
-                            if let Some(func_info) = func_loader(clean_name) {
-                                for exc_type in &func_info.throws {
-                                    results.push(ThrowInfo {
-                                        type_name: exc_type.clone(),
-                                        offset: ident_start,
-                                    });
-                                }
+                        if let Some(func_loader) = ctx.function_loader
+                            && let Some(func_info) = func_loader(clean_name)
+                        {
+                            for exc_type in &func_info.throws {
+                                results.push(ThrowInfo {
+                                    type_name: exc_type.clone(),
+                                    offset: ident_start,
+                                });
                             }
                         }
                         // Also check: it might be a same-file function with @throws
@@ -1503,14 +1501,14 @@ fn collect_method_throws(
     offset: usize,
     results: &mut Vec<ThrowInfo>,
 ) {
-    if let Some(class_info) = class_loader(class_name) {
-        if let Some(method_info) = class_info.methods.iter().find(|m| m.name == method_name) {
-            for exc_type in &method_info.throws {
-                results.push(ThrowInfo {
-                    type_name: exc_type.clone(),
-                    offset,
-                });
-            }
+    if let Some(class_info) = class_loader(class_name)
+        && let Some(method_info) = class_info.methods.iter().find(|m| m.name == method_name)
+    {
+        for exc_type in &method_info.throws {
+            results.push(ThrowInfo {
+                type_name: exc_type.clone(),
+                offset,
+            });
         }
     }
 }

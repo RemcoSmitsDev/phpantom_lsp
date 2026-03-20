@@ -26,7 +26,7 @@ use crate::completion::phpdoc::generation::enrichment_plain;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::docblock::is_compatible_refinement;
 use crate::docblock::type_strings::split_type_token;
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::offset_to_position;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -618,7 +618,7 @@ fn check_needs_update(
     info: &FunctionWithDocblock,
     content: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<crate::types::FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> bool {
     // Build a map of existing doc param names.
     let doc_param_names: Vec<&str> = info
@@ -830,7 +830,7 @@ fn build_updated_docblock(
     info: &FunctionWithDocblock,
     content: &str,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<crate::types::FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> String {
     let indent = &info.indent;
 
@@ -1376,7 +1376,7 @@ mod tests {
     }
 
     /// No function loader (for unit tests).
-    fn no_function_loader() -> Option<&'static dyn Fn(&str) -> Option<crate::types::FunctionInfo>> {
+    fn no_function_loader() -> FunctionLoader<'static> {
         None
     }
 

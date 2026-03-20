@@ -16,6 +16,12 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// Callback that resolves a function name to its [`FunctionInfo`].
+///
+/// Used by docblock generation and throws analysis to look up cross-file
+/// function metadata.
+pub type FunctionLoader<'a> = Option<&'a dyn Fn(&str) -> Option<FunctionInfo>>;
+
 // ─── PHP Version ────────────────────────────────────────────────────────────
 
 /// A PHP major.minor version used for version-aware stub filtering.

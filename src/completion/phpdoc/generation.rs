@@ -50,8 +50,7 @@ use crate::completion::resolver::FunctionLoaderFn;
 use crate::completion::source::comment_position::position_to_byte_offset;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::completion::use_edit::{analyze_use_block, build_use_edit};
-use crate::types::ClassInfo;
-use crate::types::FunctionInfo;
+use crate::types::{ClassInfo, FunctionLoader};
 
 /// Detect whether the cursor is immediately after a `/**` trigger and,
 /// if so, generate a full docblock completion item.
@@ -64,7 +63,7 @@ pub fn try_generate_docblock(
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> Option<CompletionResponse> {
     let (trigger_range, indent) = detect_docblock_trigger(content, position)?;
 
@@ -151,7 +150,7 @@ pub fn try_generate_docblock_on_enter(
     use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> Option<Vec<TextEdit>> {
     // Detect the empty docblock range and indentation.
     let (block_range, _block_indent, after_block) = detect_empty_docblock(content, position)?;
@@ -1139,7 +1138,7 @@ fn build_docblock_plain(
     _use_map: &HashMap<String, String>,
     _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> String {
     match context {
         DocblockContext::FunctionOrMethod => build_function_plain(
@@ -1178,7 +1177,7 @@ fn build_docblock_snippet(
     _use_map: &HashMap<String, String>,
     _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> String {
     match context {
         DocblockContext::FunctionOrMethod => build_function_snippet(
@@ -1215,7 +1214,7 @@ fn build_function_snippet(
     _use_map: &HashMap<String, String>,
     _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> String {
     let throws_ctx = ThrowsContext {
         class_loader,
@@ -1317,7 +1316,7 @@ fn build_function_plain(
     _use_map: &HashMap<String, String>,
     _file_namespace: &Option<String>,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> String {
     let throws_ctx = ThrowsContext {
         class_loader,
@@ -1726,7 +1725,7 @@ fn build_throws_import_edits(
     file_namespace: &Option<String>,
     context: &DocblockContext,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
-    function_loader: Option<&dyn Fn(&str) -> Option<FunctionInfo>>,
+    function_loader: FunctionLoader<'_>,
 ) -> Vec<TextEdit> {
     if !matches!(context, DocblockContext::FunctionOrMethod) {
         return Vec::new();

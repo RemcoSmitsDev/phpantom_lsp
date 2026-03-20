@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::*;
-use crate::types::{ClassInfo, ClassLikeKind, MethodInfo, Visibility};
+use crate::types::{ClassInfo, ClassLikeKind, FunctionInfo, MethodInfo, Visibility};
 
 // ── Low-level scanning tests ────────────────────────────────────────
 
