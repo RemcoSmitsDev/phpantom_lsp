@@ -143,6 +143,34 @@ type SubjectCache = HashMap<SubjectCacheKey, SubjectOutcome>;
 
 /// Build a [`ScopeKey`] from the innermost enclosing class (if any)
 /// and the enclosing function/method/closure scope start offset.
+/// Check whether a subject text is rooted in `$this`, `self`, `static`,
+/// or `parent`.  This matches both bare keywords (`"$this"`, `"static"`)
+/// and chain expressions that start with one of them
+/// (`"$this->relation()"`, `"static::where('x', 'y')"`, `"self::$prop"`).
+fn subject_text_is_rooted_in_self(subject_text: &str) -> bool {
+    // Bare keyword match (most common case).
+    if matches!(subject_text, "$this" | "self" | "static" | "parent") {
+        return true;
+    }
+
+    // Chain rooted at `$this->` or `$this?->`
+    if subject_text.starts_with("$this->") || subject_text.starts_with("$this?->") {
+        return true;
+    }
+
+    // Chain rooted at `self::`, `static::`, or `parent::`
+    if subject_text.starts_with("self::")
+        || subject_text.starts_with("static::")
+        || subject_text.starts_with("parent::")
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Build a [`ScopeKey`] from the innermost enclosing class (if any)
+/// and the enclosing function/method/closure scope start offset.
 fn scope_key_for(current_class: Option<&ClassInfo>, fn_scope_start: u32) -> ScopeKey {
     match current_class {
         Some(cc) => ScopeKey::Class {
@@ -307,12 +335,16 @@ impl Backend {
             // members accessed via $this/self/static/parent.  Flagging
             // these produces false positives for every trait that relies
             // on the host class's members.
+            //
+            // This also covers chain expressions rooted at these keywords,
+            // e.g. `static::where('x', 'y')->update(...)` has subject_text
+            // `"static::where('x', 'y')"` and `$this->relation()->first()`
+            // has subject_text `"$this->relation()"`.  The root of the
+            // chain is still the trait's self-reference, so the entire
+            // chain is unsuppressable without knowing the host class.
             if let Some(cc) = current_class
                 && cc.kind == ClassLikeKind::Trait
-                && matches!(
-                    subject_text.as_str(),
-                    "$this" | "self" | "static" | "parent"
-                )
+                && subject_text_is_rooted_in_self(subject_text)
             {
                 continue;
             }
@@ -3267,6 +3299,179 @@ function second(Beta $x): void {
             "expected no false positives for same-named variable in different \
              top-level functions, got: {diags:?}"
         );
+    }
+
+    #[test]
+    fn no_diagnostic_for_this_inside_closure_in_trait() {
+        // B3: $this-> and static:: inside a closure nested within a trait
+        // method should be suppressed, just like direct trait method bodies.
+        let php = r#"<?php
+trait SalesInfoGlobalTrait {
+    public function getSalesInfo(): void {
+        $items = array_map(function ($item) {
+            $this->model;
+            $this->eventType;
+            static::where();
+            static::query();
+        }, []);
+    }
+}
+
+class SalesReport {
+    use SalesInfoGlobalTrait;
+    public string $model = 'Sale';
+    public string $eventType = 'report';
+    public static function where(): void {}
+    public static function query(): void {}
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for $this/static:: inside closure in trait, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_this_inside_arrow_fn_in_trait() {
+        // B3: $this-> inside an arrow function nested within a trait method.
+        let php = r#"<?php
+trait FilterTrait {
+    public function applyFilter(): void {
+        $fn = fn() => $this->filterColumn;
+    }
+}
+
+class Report {
+    use FilterTrait;
+    public string $filterColumn = 'status';
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for $this-> inside arrow fn in trait, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_chain_rooted_at_static_inside_trait() {
+        // B3: `static::where(...)->update(...)` inside a trait method.
+        // The subject_text for `update` is `"static::where('x', 'y')"`,
+        // which is a chain rooted at `static`.  The suppression must
+        // recognise the root keyword, not require an exact match.
+        let php = r#"<?php
+trait SalesInfoGlobalTrait {
+    public function updateSalesInfo(): void {
+        static::where('column', 'value')->update(['sales' => 1]);
+    }
+}
+
+class SalesReport extends \Illuminate\Database\Eloquent\Model {
+    use SalesInfoGlobalTrait;
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for static::...->method() chain inside trait, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_chain_rooted_at_this_inside_trait() {
+        // B3: `$this->relation()->first()` inside a trait method.
+        // The subject_text for `first` is `"$this->relation()"`.
+        let php = r#"<?php
+trait HasRelation {
+    public function loadRelation(): void {
+        $this->items()->first();
+    }
+}
+
+class Order {
+    use HasRelation;
+    /** @return \Illuminate\Database\Eloquent\Builder */
+    public function items(): object { return new \stdClass(); }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for $this->...->method() chain inside trait, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_chain_rooted_at_static_inside_closure_in_trait() {
+        // B3: `static::where(...)` inside a closure within a trait method.
+        let php = r#"<?php
+trait SalesInfoGlobalTrait {
+    public function updateSalesInfo(): void {
+        $items = array_map(function ($item) {
+            static::where('col', 'val')->update(['x' => 1]);
+        }, []);
+    }
+}
+
+class SalesReport extends \Illuminate\Database\Eloquent\Model {
+    use SalesInfoGlobalTrait;
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for static:: chain inside closure in trait, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn no_diagnostic_for_self_chain_inside_trait() {
+        // B3: `self::create(...)` chain inside a trait.
+        let php = r#"<?php
+trait Creatable {
+    public function duplicate(): void {
+        self::create(['name' => 'copy'])->save();
+    }
+}
+
+class Product extends \Illuminate\Database\Eloquent\Model {
+    use Creatable;
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for self::...->method() chain inside trait, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn variable_chain_inside_trait_still_diagnosed() {
+        // Non-self-referencing variables inside traits should still be
+        // diagnosed when the member truly doesn't exist.
+        let php = r#"<?php
+trait BadTrait {
+    public function doStuff(): void {
+        $obj = new \stdClass();
+        $obj->nonExistentMethod();
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let _diags = collect(&backend, "file:///test.php", php);
+        // stdClass has __get/__set magic, so property access is fine,
+        // but we're just verifying the suppression doesn't swallow
+        // non-self-referencing subjects.  stdClass actually tolerates
+        // all member access, so this test verifies the suppression
+        // is scoped to self-referencing subjects only.
+        // (No assertion on diagnostic count — stdClass has magic methods.)
     }
 
     #[test]

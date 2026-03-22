@@ -15,47 +15,6 @@ within the same impact tier.
 
 ---
 
-#### B3. Type engine does not resolve `$this`/`static` inside traits
-
-| | |
-|---|---|
-| **Impact** | Medium |
-| **Effort** | Low |
-
-When a trait method (or a closure inside a trait method) accesses
-members via `$this`, `self`, `static`, or `parent`, the type engine
-resolves the subject to the trait itself rather than to the host class.
-Since the trait does not declare the members that the host class
-provides, the type engine reports the members as missing. This affects
-completion, hover, and go-to-definition for any trait that relies on
-host-class members.
-
-The diagnostic pass has a suppression heuristic for this case, but
-the underlying problem is in the type engine: it should resolve
-`$this`/`static`/`self` inside a trait to the using class (when known)
-or defer resolution (when the host class is not known). The
-suppression heuristic also fails when the access is inside a closure
-nested within a trait method.
-
-**Observed:** 43 cases in `shared`. The largest cluster (41) is
-`BusinessCentralErrorHandlerTrait` where `$this->model`,
-`$this->eventType`, etc. are properties provided by the host class.
-`SalesInfoGlobalTrait` contributes 2 cases where `static::where()` and
-`static::query()` are called inside a closure within a trait method.
-
-**Fix:** When the type engine encounters `$this`/`static`/`self` inside
-a trait, it should attempt to resolve to the known host class(es). For
-the analyze pass where no specific host class is open, the engine
-should recognise that trait member accesses are inherently incomplete
-and avoid reporting members as missing. The closure nesting issue is a
-separate symptom: `find_innermost_enclosing_class` does find the trait
-at the closure's offset, but the suppression check does not fire,
-suggesting the `subject_text` on the `MemberAccess` span differs from
-the expected `"static"` / `"$this"` keywords when emitted from inside
-a closure.
-
----
-
 #### B4. Variable reassignment loses type when parameter name is reused
 
 | | |
@@ -113,4 +72,3 @@ for functions with true overloads. The argument count checker consults
 this map before flagging. The map only needs entries for functions
 where the stub's single signature cannot represent the valid call
 forms.
-
