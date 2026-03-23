@@ -757,26 +757,43 @@ fn resolve_class_fully_inner(
                 }
             }
 
-            // Collect @extends / @implements generics from the
-            // interface so that template substitutions flow through
-            // transitive interface chains.
-            for (name, args) in &iface.extends_generics {
-                if !all_implements_generics.iter().any(|(n, _)| n == name) {
-                    all_implements_generics.push((name.clone(), args.clone()));
-                }
-            }
-            for (name, args) in &iface.implements_generics {
-                if !all_implements_generics.iter().any(|(n, _)| n == name) {
-                    all_implements_generics.push((name.clone(), args.clone()));
-                }
-            }
-
             // Build a substitution map from `@implements` generics for
             // this interface.  If the class (or a parent) declared
             // `@implements ThisInterface<Type1, Type2>`, map the
             // interface's template params to those concrete types.
             let iface_subs =
                 build_implements_substitution_map(&iface_name, &iface, &all_implements_generics);
+
+            // Collect @extends / @implements generics from the
+            // interface so that template substitutions flow through
+            // transitive interface chains.  Apply the substitution map
+            // we just built so that template params like `T` in
+            // `@extends IteratorAggregate<T>` are resolved to concrete
+            // types (e.g. `ReflectionArgument`) before propagation.
+            for (name, args) in &iface.extends_generics {
+                if !all_implements_generics.iter().any(|(n, _)| n == name) {
+                    let resolved_args: Vec<String> = if iface_subs.is_empty() {
+                        args.clone()
+                    } else {
+                        args.iter()
+                            .map(|a| apply_substitution(a, &iface_subs).into_owned())
+                            .collect()
+                    };
+                    all_implements_generics.push((name.clone(), resolved_args));
+                }
+            }
+            for (name, args) in &iface.implements_generics {
+                if !all_implements_generics.iter().any(|(n, _)| n == name) {
+                    let resolved_args: Vec<String> = if iface_subs.is_empty() {
+                        args.clone()
+                    } else {
+                        args.iter()
+                            .map(|a| apply_substitution(a, &iface_subs).into_owned())
+                            .collect()
+                    };
+                    all_implements_generics.push((name.clone(), resolved_args));
+                }
+            }
 
             // When we have substitutions to apply, we cannot use a
             // cached bare-interface resolution because the cached version

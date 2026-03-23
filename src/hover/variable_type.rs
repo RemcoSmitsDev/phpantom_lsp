@@ -1011,10 +1011,31 @@ fn is_transitive_iterable(
     iface: &ClassInfo,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> bool {
+    is_transitive_iterable_depth(iface, class_loader, 0)
+}
+
+/// Recursive helper with a depth guard to prevent infinite loops
+/// from circular interface hierarchies.
+fn is_transitive_iterable_depth(
+    iface: &ClassInfo,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    depth: u32,
+) -> bool {
+    if depth > 10 {
+        return false;
+    }
     // Check direct interfaces.
     for parent in &iface.interfaces {
         let s = short_name(parent);
         if ITERABLE_IFACE_NAMES.contains(&s) {
+            return true;
+        }
+        // Recurse into non-iterable interfaces to check if they
+        // transitively extend an iterable (e.g. ReflectionCollection
+        // extends IteratorAggregate).
+        if let Some(parent_info) = class_loader(parent)
+            && is_transitive_iterable_depth(&parent_info, class_loader, depth + 1)
+        {
             return true;
         }
     }
@@ -1022,6 +1043,11 @@ fn is_transitive_iterable(
     for (name, _) in &iface.extends_generics {
         let s = short_name(name);
         if ITERABLE_IFACE_NAMES.contains(&s) {
+            return true;
+        }
+        if let Some(parent_info) = class_loader(name)
+            && is_transitive_iterable_depth(&parent_info, class_loader, depth + 1)
+        {
             return true;
         }
     }
@@ -1032,7 +1058,7 @@ fn is_transitive_iterable(
             return true;
         }
         if let Some(parent) = class_loader(parent_name) {
-            return is_transitive_iterable(&parent, class_loader);
+            return is_transitive_iterable_depth(&parent, class_loader, depth + 1);
         }
     }
     false

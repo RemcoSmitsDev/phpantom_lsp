@@ -6463,6 +6463,180 @@ async fn test_shape_string_key_from_var_annotation() {
     }
 }
 
+/// Foreach over a class whose `@extends` parent is transitively iterable
+/// should resolve the element type.  Uses a single-level chain first
+/// (direct `@extends` of an iterable class) to isolate the resolution path.
+#[tokio::test]
+async fn test_foreach_extends_generic_collection_single_level() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///foreach_single_level.php").unwrap();
+    // SimpleCollection @extends AbstractReflectionCollection<Item>
+    // AbstractReflectionCollection @implements IteratorAggregate<T>
+    // → foreach element should be Item
+    let text = concat!(
+        "<?php\n",
+        "class Item {\n",
+        "    public function itemMethod(): void {}\n",
+        "}\n",
+        "\n",
+        "/**\n",
+        " * @template T\n",
+        " * @implements IteratorAggregate<T>\n",
+        " */\n",
+        "abstract class BaseCollection implements IteratorAggregate {}\n",
+        "\n",
+        "/**\n",
+        " * @extends BaseCollection<Item>\n",
+        " */\n",
+        "class ItemCollection extends BaseCollection {}\n",
+        "\n",
+        "class Demo {\n",
+        "    function test() {\n",
+        "        $items = new ItemCollection();\n",
+        "        foreach ($items as $item) {\n",
+        "            $item->\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Line 20: `            $item->`
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 20,
+                character: 19,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"itemMethod"),
+                "Foreach over ItemCollection @extends BaseCollection<Item> should resolve to Item and show 'itemMethod', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Multi-level generic collection: interface -> abstract class -> concrete class
+/// should resolve the element type in foreach through the full chain.
+/// Mirrors the `multi_level_collection_foreach.fixture` test.
+#[tokio::test]
+async fn test_multi_level_generic_collection_foreach() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///multi_level_foreach.php").unwrap();
+    // Top-level code (matching the fixture pattern) — the foreach
+    // resolution at the top level walks `program.statements` directly
+    // via `walk_statements_for_assignments`.
+    let text = concat!(
+        "<?php\n",                                                                          // 0
+        "/**\n",                                                                            // 1
+        " * @template T\n",                                                                 // 2
+        " * @extends IteratorAggregate<T>\n",                                               // 3
+        " */\n",                                                                            // 4
+        "interface ReflectionCollection extends IteratorAggregate {}\n",                    // 5
+        "\n",                                                                               // 6
+        "/**\n",                                                                            // 7
+        " * @template T\n",                                                                 // 8
+        " * @implements ReflectionCollection<T>\n",                                         // 9
+        " */\n",                                                                            // 10
+        "abstract class AbstractReflectionCollection implements ReflectionCollection {}\n", // 11
+        "\n",                                                                               // 12
+        "/**\n",                                                                            // 13
+        " * @extends AbstractReflectionCollection<ReflectionArgument>\n",                   // 14
+        " */\n",                                                                            // 15
+        "class ReflectionArgumentCollection extends AbstractReflectionCollection {}\n",     // 16
+        "\n",                                                                               // 17
+        "class ReflectionArgument {\n",                                                     // 18
+        "    public function argMethod(): void {}\n",                                       // 19
+        "}\n",                                                                              // 20
+        "\n",                                                                               // 21
+        "class ReflectionNode {\n",                                                         // 22
+        "    public function arguments(): ReflectionArgumentCollection {}\n",               // 23
+        "}\n",                                                                              // 24
+        "\n",                                                                               // 25
+        "$node = new ReflectionNode();\n",                                                  // 26
+        "$collection = $node->arguments();\n",                                              // 27
+        "\n",                                                                               // 28
+        "foreach ($collection as $item) {\n",                                               // 29
+        "    $item->\n",                                                                    // 30
+        "}\n",                                                                              // 31
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Line 30: `    $item->`  (4 spaces + `$item->` = char 11 is after `->`)
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 30,
+                character: 11,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(result.is_some(), "Completion should return results");
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let method_names: Vec<&str> = items
+                .iter()
+                .filter(|i| i.kind == Some(CompletionItemKind::METHOD))
+                .map(|i| i.filter_text.as_deref().unwrap_or(&i.label))
+                .collect();
+
+            assert!(
+                method_names.contains(&"argMethod"),
+                "Multi-level generic foreach should resolve element type to ReflectionArgument and show 'argMethod', got: {:?}",
+                method_names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
 // ─── Chain-level generic substitution tests ─────────────────────────────────
 //
 // These tests verify that when a method returns a parameterised generic type
