@@ -643,6 +643,7 @@ fn infer_expression_type_string<'b>(
             .unwrap_or_else(|| "array".to_string()),
         Expression::LegacyArray(arr) => infer_array_literal_raw_type(arr.elements.iter(), ctx)
             .unwrap_or_else(|| "array".to_string()),
+        Expression::Clone(clone_expr) => infer_expression_type_string(clone_expr.object, ctx),
         Expression::Parenthesized(p) => infer_expression_type_string(p.expression, ctx),
         // For calls and property access, try the iterable extractor.
         _ => super::foreach_resolution::extract_rhs_iterable_raw_type(expr, ctx)
@@ -812,6 +813,8 @@ fn resolve_rhs_raw_type<'b>(rhs: &'b Expression<'b>, ctx: &VarResolutionCtx<'_>)
         // through each segment (shape key → value type, element
         // access → generic value type).
         Expression::ArrayAccess(_) => resolve_rhs_array_access_raw_type(rhs, ctx),
+        // ── Clone: `clone $expr` → same type as the inner expression ──
+        Expression::Clone(clone_expr) => resolve_rhs_raw_type(clone_expr.object, ctx),
         // ── Parenthesized: unwrap ──
         Expression::Parenthesized(p) => resolve_rhs_raw_type(p.expression, ctx),
         // ── Ternary / elvis: `$a ? $b : $c` or `$a ?: $c` ──

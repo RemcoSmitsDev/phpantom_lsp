@@ -8075,3 +8075,109 @@ class B6Demo3 {
         text
     );
 }
+
+// ── Null coalesce (`??`) type refinement ────────────────────────────────────
+
+#[test]
+fn hover_null_coalesce_non_nullable_lhs_shows_only_lhs_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Pen {
+    public function write(): void {}
+}
+class Marker {
+    public function draw(): void {}
+}
+class Svc {
+    public function test(): void {
+        $a = new Pen() ?? new Marker();
+        $a->write();
+    }
+}
+"#;
+
+    // Hover on `$a` at line 10 (the usage `$a->write()`)
+    let hover = hover_at(&backend, uri, content, 10, 9).expect("expected hover on $a");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Pen"),
+        "hover should show Pen (non-nullable LHS of ??), got: {}",
+        text
+    );
+    assert!(
+        !text.contains("Marker"),
+        "hover should NOT show Marker (RHS is dead code), got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_null_coalesce_nullable_lhs_shows_union() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Pen {
+    public function write(): void {}
+}
+class Marker {
+    public function draw(): void {}
+}
+class Svc {
+    /** @return ?Pen */
+    public function maybePen(): ?Pen { return null; }
+    public function test(): void {
+        $b = $this->maybePen() ?? new Marker();
+        $b->write();
+    }
+}
+"#;
+
+    // Hover on `$b` at line 12 (the usage `$b->write()`)
+    let hover = hover_at(&backend, uri, content, 12, 9).expect("expected hover on $b");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Pen"),
+        "hover should show Pen (nullable LHS stripped of null), got: {}",
+        text
+    );
+    assert!(
+        text.contains("Marker"),
+        "hover should show Marker (RHS of ?? when LHS is nullable), got: {}",
+        text
+    );
+}
+
+#[test]
+fn hover_null_coalesce_clone_lhs_shows_only_cloned_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Pen {
+    public function write(): void {}
+}
+class Marker {
+    public function draw(): void {}
+}
+class Svc {
+    public function test(Pen $p): void {
+        $c = clone $p ?? new Marker();
+        $c->write();
+    }
+}
+"#;
+
+    // Hover on `$c` at line 10 (the usage `$c->write()`)
+    let hover = hover_at(&backend, uri, content, 10, 9).expect("expected hover on $c");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("Pen"),
+        "hover should show Pen (clone is non-nullable), got: {}",
+        text
+    );
+    assert!(
+        !text.contains("Marker"),
+        "hover should NOT show Marker (RHS is dead code after clone), got: {}",
+        text
+    );
+}
