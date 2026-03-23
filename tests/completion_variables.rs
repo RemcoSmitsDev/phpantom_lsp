@@ -18357,3 +18357,88 @@ async fn test_null_coalesce_clone_lhs_ignores_rhs() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+// ─── B13: Variable inside constructor args of self-reassignment ─────────────
+
+/// When `$request = new Bar(arg: $request->…)`, the `$request` inside
+/// the constructor arguments should still resolve to the *previous* type
+/// (Foo), not the type being assigned (Bar).  PHP evaluates all RHS
+/// arguments before performing the assignment.
+#[tokio::test]
+async fn test_completion_var_inside_reassignment_rhs_sees_old_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///b13_reassign_rhs.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Foo {\n",
+        "    public string $uuid = '';\n",
+        "    public function fooMethod(): void {}\n",
+        "}\n",
+        "class Bar {\n",
+        "    public function __construct(public string $name = '') {}\n",
+        "    public function barMethod(): void {}\n",
+        "}\n",
+        "class App {\n",
+        "    public function run(Foo $request): void {\n",
+        "        $request = new Bar(\n",
+        "            name: $request->\n",
+        "        );\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$request->` on the line inside constructor args (line 12)
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 28,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for $request-> inside constructor args"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // Should include Foo's members (the original param type)
+            assert!(
+                labels.iter().any(|l| l.starts_with("uuid")),
+                "Should include Foo's uuid property inside reassignment RHS, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("fooMethod")),
+                "Should include Foo's fooMethod inside reassignment RHS, got: {:?}",
+                labels
+            );
+            // Should NOT include Bar's members (the type being assigned)
+            assert!(
+                !labels.iter().any(|l| l.starts_with("barMethod")),
+                "Should NOT include Bar's barMethod inside reassignment RHS, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

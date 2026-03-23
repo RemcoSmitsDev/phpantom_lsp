@@ -1454,6 +1454,18 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
             return;
         }
 
+        // ── B13: Skip when cursor is inside the RHS ────────────
+        // When the cursor falls within the RHS of this assignment
+        // (e.g. `$request = new Bar(arg: $request->…)`), the
+        // variable reference on the RHS still sees the *previous*
+        // definition — PHP evaluates all RHS arguments before
+        // performing the assignment.  Do not apply this assignment.
+        let rhs_start = assignment.rhs.span().start.offset;
+        let assign_end = assignment.span().end.offset;
+        if ctx.cursor_offset >= rhs_start && ctx.cursor_offset <= assign_end {
+            return;
+        }
+
         // Delegate all RHS resolution to the shared helper.
         //
         // Use the assignment's own start offset as cursor_offset so

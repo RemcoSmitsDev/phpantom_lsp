@@ -1301,6 +1301,36 @@ fn assignment_effective_from_excludes_rhs() {
     );
 }
 
+#[test]
+fn assignment_effective_from_excludes_rhs_in_constructor_args() {
+    // B13: In `$request = new Foo(arg: $request->uuid)`, the `$request`
+    // inside the constructor arguments should see the *previous* definition
+    // (the parameter), not the assignment being written.  PHP evaluates
+    // all RHS arguments before performing the assignment.
+    let php = concat!(
+        "<?php\n",
+        "function f(Foo $request) {\n",
+        "    $request = new Bar(\n",
+        "        name: $request->uuid,\n",
+        "    );\n",
+        "}\n",
+    );
+    let map = parse_and_extract(php);
+    // The `$request` in `$request->uuid` (inside the constructor args)
+    let rhs_request_offset = php.find("$request->uuid").unwrap() as u32;
+    let scope = map.find_enclosing_scope(rhs_request_offset);
+    let def = map.find_var_definition("request", rhs_request_offset, scope);
+    assert!(def.is_some(), "Should find a definition for RHS $request");
+    // Should point to the parameter `$request`, not the assignment LHS.
+    let param_offset = php.find("$request)").unwrap() as u32;
+    assert_eq!(
+        def.unwrap().offset,
+        param_offset,
+        "RHS $request inside constructor args should see the parameter, not the assignment"
+    );
+    assert_eq!(def.unwrap().kind, VarDefKind::Parameter);
+}
+
 // ── is_at_var_definition tests ──────────────────────────────────────
 
 #[test]

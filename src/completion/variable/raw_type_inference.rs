@@ -585,6 +585,18 @@ fn check_expression_for_raw_type<'b>(
     // This mirrors the protection in `check_expression_for_assignment`.
     let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
 
+    // ── B13: Skip when cursor is inside the RHS ────────────────
+    // When the cursor falls within the RHS of this assignment
+    // (e.g. `$request = new Bar(arg: $request->…)`), the
+    // variable reference on the RHS still sees the *previous*
+    // definition — PHP evaluates all RHS arguments before
+    // performing the assignment.  Do not apply this assignment.
+    let rhs_start = assignment.rhs.span().start.offset;
+    let assign_end = assignment.span().end.offset;
+    if ctx.cursor_offset >= rhs_start && ctx.cursor_offset <= assign_end {
+        return;
+    }
+
     match assignment.lhs {
         // ── Base assignment: `$var = expr;` ──
         Expression::Variable(Variable::Direct(dv)) if dv.name == ctx.var_name => {

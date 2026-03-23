@@ -97,6 +97,105 @@ only has a native `array` type hint.
 
 ---
 
+## T8. `@mixin` generic substitution and chain-level template resolution
+**Impact: High · Effort: Medium-High**
+
+PHPantom's generics system substitutes template parameters through
+`@extends` and `@implements` chains but fails in two related
+scenarios that together account for ~180 of the ~325 remaining
+diagnostics in the `shared` triage project (iteration 4).
+
+### Problem 1: `@mixin` generic arguments are discarded
+
+`extract_mixin_tags` (docblock/tags.rs) calls `base_class_name`,
+which calls `strip_generics`. So `@mixin Builder<TRelatedModel>`
+is stored as just `"Builder"`, and the generic argument is lost.
+
+When `collect_mixin_members` (virtual_members/phpdoc.rs) later
+loads and merges Builder's methods, `TModel` in return types like
+`firstOrFail(): TModel` is never mapped to the concrete related
+model. The diagnostic reports the raw template parameter name.
+
+**Concrete example:**
+
+```php
+/**
+ * @template TRelatedModel of Model
+ * @template TDeclaringModel of Model
+ * @mixin Builder<TRelatedModel>          ← generic arg stripped
+ */
+abstract class Relation { ... }
+
+// User code:
+$product = $orderline->product()->firstOrFail();
+//         BelongsTo<Product, OrderLine> → Relation → @mixin Builder<TRelatedModel>
+//         Builder::firstOrFail() returns TModel
+//         TModel is never substituted → diagnostic: "subject type 'TModel' could not be resolved"
+```
+
+**Impact:** 38 `TModel` diagnostics + cascading anonymous chains.
+
+**Fix:** Preserve generic arguments in `@mixin` tags (store them
+alongside the mixin class name, similar to `extends_generics` /
+`implements_generics`). In `collect_mixin_members`, build a
+substitution map from the mixin class's `template_params` to the
+provided generic arguments and apply it to all merged members.
+
+### Problem 2: chain-level generic substitution not performed
+
+When a method returns a generic type like `Collection<int, Product>`,
+calling a method on that result (e.g. `->first()`) does not
+substitute the collection's template parameters into the called
+method's return type.
+
+```php
+// Collection<TKey, TValue> has first(): TValue|TFirstDefault
+$users->map(fn($u) => $u->name)->first();
+//     map() returns Collection<int, string>
+//     first() should return string|TFirstDefault → resolves to string
+//     Actually returns: TValue|TFirstDefault (unsubstituted)
+```
+
+The completion/type resolution pipeline resolves the return type of
+a chain call by:
+1. Resolving the subject to `ClassInfo` (e.g. `Collection`).
+2. Looking up the method on that class.
+3. Returning the method's `return_type` string.
+
+Step 1 produces an unparameterised `Collection` — the generic
+arguments `<int, Product>` from the previous call's return type
+are not carried forward. The method's return type `TValue` is
+never mapped to `Product`.
+
+**Impact:** 16 `TValue|TFirstDefault` + 3 `TModel|TFirstDefault`
++ 6 other template params + ~118 cascading anonymous chain
+diagnostics.
+
+**Fix:** When the previous link in a chain returns a parameterised
+type like `Collection<int, Product>`, resolve the class (`Collection`),
+zip its `template_params` (`[TKey, TValue]`) with the provided
+arguments (`[int, Product]`), build a substitution map, and apply
+it to the called method's return type before using it as the next
+link's subject type. This is the call-site equivalent of what
+`resolve_class_with_inheritance` already does for `@extends` chains.
+
+### Combined impact
+
+| Symptom | Count | Root cause |
+|---------|-------|------------|
+| `TModel` unresolvable | 38 | Problem 1 (@mixin generics stripped) |
+| `TValue\|TFirstDefault` unresolvable | 16 | Problem 2 (chain generics not substituted) |
+| Other template params (`T`, `TValue`, `TModel\|TFirstDefault`, `TReduceReturnType`) | 14 | Mix of both |
+| Cascading anonymous chains | ~118 | Downstream of unresolved template params |
+| **Total** | **~186** | |
+
+Fixing both problems would reduce the `shared` project from 325 to
+~140 diagnostics (57% reduction), with most remaining diagnostics
+being correct reports or `unresolved_member_access` hints on
+genuinely untyped code.
+
+---
+
 ## T2. File system watching for vendor and project changes
 **Impact: Medium-High · Effort: Medium**
 

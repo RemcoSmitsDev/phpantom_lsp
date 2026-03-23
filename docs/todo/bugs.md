@@ -75,33 +75,3 @@ completion.
   that both match arms cover the same set, so new expression types
   cannot be added to one without the other.
 
----
-
-#### B13. Variable type resolved from reassignment target inside RHS expression
-
-| | |
-|---|---|
-| **Impact** | Low |
-| **Effort** | Medium |
-
-When a variable is reassigned with an expression that references itself in
-the RHS arguments, PHPantom resolves the variable to the NEW type inside
-those arguments instead of the original type.
-
-**Reproducer:**
-```php
-public function requestToken(PaymentTokenRequest $request, ...): ... {
-    // $request is PaymentTokenRequest here
-    $request = new CreateRecurringSessionRequest(
-        paymentMethodReference: $request->uuid,  // ← PHPantom resolves $request as CreateRecurringSessionRequest
-    );
-}
-```
-
-PHP evaluates all arguments before performing the assignment, so `$request->uuid`
-should resolve against `PaymentTokenRequest`. PHPantom's variable definition
-offset tracking considers the new definition active too early — it should
-only take effect after the full RHS expression is evaluated.
-
-Affects 1 diagnostic in shared. Edge case but could appear in code that
-reuses variable names across reassignments with self-referencing expressions.

@@ -19,6 +19,22 @@ within the same impact tier.
 
 # Scheduled Sprints
 
+## Sprint 3 — Generic template resolution
+
+| #   | Item                                                                                                                                       | Impact | Effort      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ----------- |
+| B1  | [Dual type-resolution engines cause hover / completion divergence](todo/bugs.md#b1-dual-type-resolution-engines-cause-hover--completion-divergence) | Medium | Medium-High |
+| T8  | [`@mixin` generic substitution and chain-level template resolution](todo/type-inference.md#t8-mixin-generic-substitution-and-chain-level-template-resolution) | High   | Medium-High |
+|     | **Release 0.6.0**                                                                                                                          |        |             |
+
+> **Why this is next:** T8 accounts for ~186 of the 325 remaining
+> diagnostics in the `shared` triage project (57%). Two sub-problems:
+> (1) `@mixin` generic arguments are stripped during extraction, so
+> `@mixin Builder<TRelatedModel>` loses the type argument; (2)
+> chain-level calls like `Collection<int, Product>::first()` don't
+> substitute `TValue` → `Product`. Fixing both would drop the
+> diagnostic count below 140.
+
 ## Sprint 4 — Refactoring toolkit
 
 | #   | Item                                                                               | Impact | Effort |
@@ -99,9 +115,7 @@ unlikely to move the needle for most users.
 
 | #   | Item                                                                                                                                                         | Impact      | Effort      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- | ----------- |
-|     | **[Bug Fixes](todo/bugs.md)**                                                                                                                                |             |             |
-| B1  | [Dual type-resolution engines cause hover / completion divergence](todo/bugs.md#b1-dual-type-resolution-engines-cause-hover--completion-divergence)           | Medium      | Medium-High |
-|     | **[Completion](todo/completion.md)**                                                                                                                         |             |             |
+|     | **[Completion](todo/completion.md)**                                                                                                         |             |             |
 | C1  | Array functions needing new code paths                                                                                                                       | Medium     | High        |
 | C9  | [Lazy documentation via `completionItem/resolve`](todo/completion.md#c9-lazy-documentation-via-completionitemresolve)                                         | Medium     | Medium      |
 | C11 | [Smarter member ordering after `->` / `::`](todo/completion.md#c11-smarter-member-ordering-after----)                                                        | Medium     | Medium      |
