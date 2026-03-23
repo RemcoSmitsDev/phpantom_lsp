@@ -113,6 +113,7 @@ impl Backend {
                         &file_use_map,
                         &file_namespace,
                         &local_classes,
+                        span.start,
                     )
                     .and_then(|name| self.find_or_load_class(&name))
                     .map(|arc| ClassInfo::clone(&arc));
@@ -334,23 +335,35 @@ fn resolve_subject_to_class_name(
     file_use_map: &HashMap<String, String>,
     file_namespace: &Option<String>,
     local_classes: &[Arc<ClassInfo>],
+    access_offset: u32,
 ) -> Option<String> {
     let trimmed = subject_text.trim();
 
     match trimmed {
         "self" | "static" => {
             // Find the enclosing class in this file
-            find_enclosing_class_fqn(local_classes, file_namespace)
+            find_enclosing_class_fqn(local_classes, file_namespace, access_offset)
         }
         "parent" => {
             // Find the enclosing class that actually has a parent.
-            // Prefer a class with `parent_class` set — that's the one
-            // where `parent::` is meaningful.  Fall back to the first
-            // non-anonymous class if none has a parent (shouldn't happen
-            // in valid code, but be defensive).
+            // Prefer a class whose offset range contains the access site
+            // and that has `parent_class` set — that's the one where
+            // `parent::` is meaningful.  Fall back to any non-anonymous
+            // class with a parent, then to the first non-anonymous class
+            // (shouldn't happen in valid code, but be defensive).
             let cls = local_classes
                 .iter()
-                .find(|c| !c.name.starts_with("__anonymous@") && c.parent_class.is_some())
+                .find(|c| {
+                    !c.name.starts_with("__anonymous@")
+                        && c.parent_class.is_some()
+                        && access_offset >= c.start_offset
+                        && access_offset <= c.end_offset
+                })
+                .or_else(|| {
+                    local_classes
+                        .iter()
+                        .find(|c| !c.name.starts_with("__anonymous@") && c.parent_class.is_some())
+                })
                 .or_else(|| {
                     local_classes
                         .iter()
@@ -362,7 +375,7 @@ fn resolve_subject_to_class_name(
                     .map(|p| resolve_to_fqn(p, file_use_map, file_namespace))
             })
         }
-        "$this" => find_enclosing_class_fqn(local_classes, file_namespace),
+        "$this" => find_enclosing_class_fqn(local_classes, file_namespace, access_offset),
         _ if is_static && !trimmed.starts_with('$') => {
             // Static access on a class name: `ClassName::method()`
             Some(resolve_to_fqn(trimmed, file_use_map, file_namespace))
@@ -425,11 +438,23 @@ fn resolve_variable_subject(
 fn find_enclosing_class_fqn(
     local_classes: &[Arc<ClassInfo>],
     file_namespace: &Option<String>,
+    offset: u32,
 ) -> Option<String> {
-    // Skip anonymous classes
+    // Find the non-anonymous class whose byte range contains the offset.
+    // Fall back to the first non-anonymous class for top-level code
+    // outside any class body.
     let cls = local_classes
         .iter()
-        .find(|c| !c.name.starts_with("__anonymous@"))?;
+        .find(|c| {
+            !c.name.starts_with("__anonymous@")
+                && offset >= c.start_offset
+                && offset <= c.end_offset
+        })
+        .or_else(|| {
+            local_classes
+                .iter()
+                .find(|c| !c.name.starts_with("__anonymous@"))
+        })?;
     if let Some(ns) = file_namespace {
         Some(format!("{}\\{}", ns, cls.name))
     } else {

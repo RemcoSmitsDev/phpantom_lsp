@@ -99,6 +99,8 @@ unlikely to move the needle for most users.
 
 | #   | Item                                                                                                                                                         | Impact      | Effort      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- | ----------- |
+|     | **[Bug Fixes](todo/bugs.md)**                                                                                                                                |             |             |
+| B1  | [Dual type-resolution engines cause hover / completion divergence](todo/bugs.md#b1-dual-type-resolution-engines-cause-hover--completion-divergence)           | Medium      | Medium-High |
 |     | **[Completion](todo/completion.md)**                                                                                                                         |             |             |
 | C1  | Array functions needing new code paths                                                                                                                       | Medium     | High        |
 | C9  | [Lazy documentation via `completionItem/resolve`](todo/completion.md#c9-lazy-documentation-via-completionitemresolve)                                         | Medium     | Medium      |

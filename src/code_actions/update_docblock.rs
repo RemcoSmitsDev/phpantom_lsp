@@ -25,7 +25,7 @@ use crate::Backend;
 use crate::completion::phpdoc::generation::enrichment_plain;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::docblock::is_compatible_refinement;
-use crate::docblock::type_strings::split_type_token;
+use crate::docblock::type_strings::{split_type_token, split_union_depth0};
 use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::offset_to_position;
 
@@ -785,8 +785,8 @@ fn is_type_contradiction(doc_type: &str, native_type: &str) -> bool {
     // If the native type contains `|`, compare the union components.
 
     // Simple heuristic: normalize both and compare base types.
-    let doc_bases = split_union_types(&doc_clean);
-    let native_bases = split_union_types(&native_clean);
+    let doc_bases = split_union_depth0(&doc_clean);
+    let native_bases = split_union_depth0(&native_clean);
 
     // If every native base appears in doc bases (or a refinement thereof),
     // it's not a contradiction.
@@ -812,18 +812,12 @@ fn normalize_type_for_comparison(t: &str) -> String {
         |rest| format!("{}|null", rest.to_lowercase()),
     );
     // Sort union components.
-    let mut parts: Vec<&str> = t.split('|').map(|s| s.trim()).collect();
+    let mut parts: Vec<&str> = split_union_depth0(&t).into_iter().map(|s| s.trim()).collect();
     parts.sort();
     parts.join("|")
 }
 
-/// Split a union type string into its components.
-fn split_union_types(t: &str) -> Vec<String> {
-    t.split('|')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
+
 
 /// Build the updated docblock text.
 fn build_updated_docblock(
