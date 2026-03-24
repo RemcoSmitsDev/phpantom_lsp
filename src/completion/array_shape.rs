@@ -33,7 +33,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::Backend;
 use crate::docblock;
-use crate::types::FileContext;
+use crate::types::{ClassInfo, FileContext, ResolvedType};
 use crate::util::{find_class_at_offset, position_to_offset};
 
 /// Well-known keys for the `$_SERVER` superglobal.
@@ -516,18 +516,31 @@ impl Backend {
         let current_class = find_class_at_offset(&file_ctx.classes, cursor_offset as u32);
         let class_loader = self.class_loader(file_ctx);
 
-        // 2. AST-based assignment resolver — handles array literals with
+        // 2. Unified variable resolver — handles array literals with
         //    incremental key assignments, push-style assignments, and
         //    standalone function return types (via source docblock scan).
-        crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type(
+        let dummy_class;
+        let effective_class = match current_class {
+            Some(cc) => cc,
+            None => {
+                dummy_class = ClassInfo::default();
+                &dummy_class
+            }
+        };
+        let resolved = crate::completion::variable::resolution::resolve_variable_types(
             var_name,
+            effective_class,
+            &file_ctx.classes,
             content,
             cursor_offset as u32,
-            current_class,
-            &file_ctx.classes,
             &class_loader,
             None,
-        )
+        );
+        if resolved.is_empty() {
+            None
+        } else {
+            Some(ResolvedType::type_strings_joined(&resolved))
+        }
     }
 }
 
@@ -734,29 +747,6 @@ fn split_array_literal_elements(s: &str) -> Vec<&str> {
         parts.push(last);
     }
     parts
-}
-
-pub(super) fn build_list_type_from_push_types(types: &[String]) -> Option<String> {
-    if types.is_empty() {
-        return None;
-    }
-
-    // Deduplicate while preserving first-seen order.
-    let mut seen = Vec::new();
-    for t in types {
-        if !seen.contains(t) {
-            seen.push(t.clone());
-        }
-    }
-
-    // If all types are `mixed`, don't synthesize a list type — it's not
-    // useful for completion.
-    if seen.iter().all(|t| t == "mixed") {
-        return None;
-    }
-
-    let inner = seen.join("|");
-    Some(format!("list<{}>", inner))
 }
 
 #[cfg(test)]

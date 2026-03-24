@@ -59,13 +59,13 @@ use crate::Backend;
 use crate::completion::resolver::{
     ResolutionCtx, resolve_target_classes, resolve_target_classes_expr,
 };
-use crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type;
+use crate::completion::variable::resolution::resolve_variable_types;
 use crate::docblock::type_strings::{PHPDOC_TYPE_KEYWORDS, is_scalar, strip_generics};
 use crate::hover::variable_type::resolve_variable_type_string;
 use crate::inheritance::resolve_property_type_hint;
 use crate::subject_expr::SubjectExpr;
 use crate::symbol_map::SymbolKind;
-use crate::types::{AccessKind, ClassInfo, ClassLikeKind};
+use crate::types::{AccessKind, ClassInfo, ClassLikeKind, ResolvedType};
 use crate::virtual_members::{resolve_class_fully_cached, resolve_class_fully_maybe_cached};
 
 use super::helpers::{find_innermost_enclosing_class, make_diagnostic};
@@ -287,9 +287,9 @@ impl Backend {
         // The file content is immutable during a single diagnostic pass.
         // Activating the thread-local parse cache means every call to
         // `with_parsed_program(content, …)` in the resolution pipeline
-        // (resolve_variable_types, resolve_variable_assignment_raw_type,
-        // resolve_variable_type_string, etc.) will reuse the same parsed
-        // AST instead of re-parsing the entire file from scratch.
+        // (resolve_variable_types, resolve_variable_type_string, etc.)
+        // will reuse the same parsed AST instead of re-parsing the
+        // entire file from scratch.
         let _parse_guard = with_parse_cache(content);
 
         // ── Inner resolution cache for chain bases ──────────────────────
@@ -791,15 +791,21 @@ fn resolve_scalar_subject_type(
     match expr {
         // ── Bare variable: $number = 1; $number->foo() ──────────
         SubjectExpr::Variable(var_name) => {
-            let raw_type = resolve_variable_assignment_raw_type(
+            let default_class = ClassInfo::default();
+            let effective_class = rctx.current_class.unwrap_or(&default_class);
+            let resolved = resolve_variable_types(
                 var_name,
+                effective_class,
+                rctx.all_classes,
                 rctx.content,
                 rctx.cursor_offset,
-                rctx.current_class,
-                rctx.all_classes,
                 class_loader,
                 rctx.function_loader,
-            )?;
+            );
+            if resolved.is_empty() {
+                return None;
+            }
+            let raw_type = ResolvedType::type_strings_joined(&resolved);
             let cleaned = crate::docblock::types::clean_type(&raw_type);
             if is_scalar(&cleaned) {
                 Some(cleaned)
@@ -908,20 +914,26 @@ fn resolve_unresolvable_class_subject(
 ) -> Option<String> {
     let raw_type = match expr {
         SubjectExpr::Variable(var_name) => {
-            // Try assignment-based raw type first (covers `$x = new Foo`
-            // and native parameter type hints like `int $x`).
-            let assignment_type = resolve_variable_assignment_raw_type(
+            // Try the unified pipeline first (covers assignments,
+            // parameter type hints, foreach bindings, catch variables,
+            // inline @var overrides, etc.).
+            let default_class = ClassInfo::default();
+            let effective_class = rctx.current_class.unwrap_or(&default_class);
+            let resolved = resolve_variable_types(
                 var_name,
+                effective_class,
+                rctx.all_classes,
                 rctx.content,
                 rctx.cursor_offset,
-                rctx.current_class,
-                rctx.all_classes,
                 class_loader,
                 rctx.function_loader,
             );
-            // Fall back to the hover variable type resolver which also
-            // checks PHPDoc `@param` annotations and foreach bindings.
-            assignment_type.or_else(|| {
+            if !resolved.is_empty() {
+                Some(ResolvedType::type_strings_joined(&resolved))
+            } else {
+                // Fall back to the hover variable type resolver which
+                // also checks class-based foreach resolution through
+                // @implements / @extends generics.
                 resolve_variable_type_string(
                     var_name,
                     rctx.content,
@@ -931,7 +943,7 @@ fn resolve_unresolvable_class_subject(
                     class_loader,
                     rctx.function_loader,
                 )
-            })
+            }
         }
         SubjectExpr::CallExpr { callee, .. } => match callee.as_ref() {
             SubjectExpr::FunctionCall(fn_name) => {

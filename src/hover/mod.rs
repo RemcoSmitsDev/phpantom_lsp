@@ -732,7 +732,7 @@ impl Backend {
         // Fall back to ClassInfo-based resolution (handles cases the
         // type-string path doesn't cover, such as instanceof narrowing
         // and complex call chains).
-        let types = crate::completion::variable::resolution::resolve_variable_types(
+        let resolved = crate::completion::variable::resolution::resolve_variable_types(
             &var_name,
             effective_class,
             &ctx.classes,
@@ -742,12 +742,11 @@ impl Backend {
             Some(&function_loader as &dyn Fn(&str) -> Option<FunctionInfo>),
         );
 
-        if types.is_empty() {
+        if resolved.is_empty() {
             return Some(make_hover(format!("```php\n<?php\n{}\n```", var_name)));
         }
 
-        let type_names: Vec<&str> = types.iter().map(|c| c.name.as_str()).collect();
-        let type_str = type_names.join("|");
+        let type_str = ResolvedType::type_strings_joined(&resolved);
 
         let hover_body = build_variable_hover_body(&var_name, &type_str, &class_loader, None);
         Some(make_hover(hover_body))

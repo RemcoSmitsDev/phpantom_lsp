@@ -310,14 +310,16 @@ fn resolve_variable_type_names(
         }
     };
 
-    let types = crate::completion::variable::resolution::resolve_variable_types(
-        &var_name,
-        effective_class,
-        &ctx.classes,
-        content,
-        cursor_offset,
-        class_loader,
-        Some(function_loader),
+    let types = ResolvedType::into_classes(
+        crate::completion::variable::resolution::resolve_variable_types(
+            &var_name,
+            effective_class,
+            &ctx.classes,
+            content,
+            cursor_offset,
+            class_loader,
+            Some(function_loader),
+        ),
     );
 
     types

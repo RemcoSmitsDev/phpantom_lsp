@@ -89,6 +89,13 @@ pub(super) struct VarResolutionCtx<'a> {
     /// if known.  Used inside generator bodies to reverse-infer variable
     /// types from `Generator<TKey, TValue, TSend, TReturn>`.
     pub enclosing_return_type: Option<String>,
+    /// When `true`, if/else/elseif walking only considers the branch
+    /// that contains the cursor instead of unioning all branches.
+    /// This produces the single type visible at the cursor position,
+    /// which is what hover needs (e.g. only `Lamp` inside an if-branch,
+    /// not `Lamp|Faucet`).  Completion leaves this `false` so that all
+    /// possible types are offered.
+    pub branch_aware: bool,
 }
 
 impl<'a> VarResolutionCtx<'a> {
@@ -126,6 +133,7 @@ impl<'a> VarResolutionCtx<'a> {
             function_loader: self.function_loader,
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type,
+            branch_aware: self.branch_aware,
         }
     }
 
@@ -146,6 +154,7 @@ impl<'a> VarResolutionCtx<'a> {
             function_loader: self.function_loader,
             resolved_class_cache: self.resolved_class_cache,
             enclosing_return_type: self.enclosing_return_type.clone(),
+            branch_aware: self.branch_aware,
         }
     }
 }
@@ -560,15 +569,30 @@ pub(crate) fn resolve_target_classes_expr(
                 ctx.cursor_offset as usize,
                 &base_var,
             );
-            let ast_type = crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type(
-                &base_var,
-                ctx.content,
-                ctx.cursor_offset,
-                current_class,
-                all_classes,
-                class_loader,
-                ctx.function_loader,
-            );
+            let ast_type = {
+                let dummy_class;
+                let effective_class = match current_class {
+                    Some(cc) => cc,
+                    None => {
+                        dummy_class = ClassInfo::default();
+                        &dummy_class
+                    }
+                };
+                let resolved = crate::completion::variable::resolution::resolve_variable_types(
+                    &base_var,
+                    effective_class,
+                    all_classes,
+                    ctx.content,
+                    ctx.cursor_offset,
+                    class_loader,
+                    ctx.function_loader,
+                );
+                if resolved.is_empty() {
+                    None
+                } else {
+                    Some(ResolvedType::type_strings_joined(&resolved))
+                }
+            };
 
             let candidates = docblock_type.into_iter().chain(ast_type);
 
@@ -698,7 +722,7 @@ fn resolve_variable_fallback(
         }
     }
 
-    super::variable::resolution::resolve_variable_types(
+    ResolvedType::into_classes(super::variable::resolution::resolve_variable_types(
         var_name,
         effective_class,
         all_classes,
@@ -706,7 +730,7 @@ fn resolve_variable_fallback(
         ctx.cursor_offset,
         class_loader,
         function_loader,
-    )
+    ))
     .into_iter()
     .map(Arc::new)
     .collect()
@@ -778,6 +802,7 @@ fn apply_property_narrowing(
                 function_loader: rctx.function_loader,
                 resolved_class_cache: None,
                 enclosing_return_type: None,
+                branch_aware: false,
             };
             walk_property_narrowing_in_statements(program.statements.iter(), &ctx, &mut plain);
         },

@@ -37,7 +37,7 @@ use mago_syntax::ast::*;
 use crate::completion::types::narrowing;
 use crate::docblock;
 use crate::parser::{extract_hint_string, with_parsed_program};
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 
 use crate::completion::resolver::{FunctionLoaderFn, VarResolutionCtx};
 
@@ -132,7 +132,7 @@ pub(crate) fn resolve_variable_types(
     cursor_offset: u32,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     function_loader: FunctionLoaderFn<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     with_parsed_program(content, "resolve_variable_types", |program, _content| {
         let ctx = VarResolutionCtx {
             var_name,
@@ -144,6 +144,7 @@ pub(crate) fn resolve_variable_types(
             function_loader,
             resolved_class_cache: None,
             enclosing_return_type: None,
+            branch_aware: false,
         };
 
         // Walk top-level (and namespace-nested) statements to find the
@@ -152,13 +153,51 @@ pub(crate) fn resolve_variable_types(
     })
 }
 
+/// Resolve variable types with branch-aware if/else handling.
+///
+/// Like [`resolve_variable_types`], but when the cursor is inside a
+/// specific if/else/elseif branch, only that branch's assignments
+/// contribute to the result.  This produces the single type visible
+/// at the cursor position, which is what hover needs (e.g. only `Lamp`
+/// inside an if-branch, not `Lamp|Faucet`).
+pub(crate) fn resolve_variable_types_branch_aware(
+    var_name: &str,
+    current_class: &ClassInfo,
+    all_classes: &[Arc<ClassInfo>],
+    content: &str,
+    cursor_offset: u32,
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    function_loader: FunctionLoaderFn<'_>,
+) -> Vec<ResolvedType> {
+    with_parsed_program(
+        content,
+        "resolve_variable_types_branch_aware",
+        |program, _content| {
+            let ctx = VarResolutionCtx {
+                var_name,
+                current_class,
+                all_classes,
+                content,
+                cursor_offset,
+                class_loader,
+                function_loader,
+                resolved_class_cache: None,
+                enclosing_return_type: None,
+                branch_aware: true,
+            };
+
+            resolve_variable_in_statements(program.statements.iter(), &ctx)
+        },
+    )
+}
+
 /// Walk a sequence of top-level statements to find the class or
 /// function body that contains the cursor, then resolve the target
 /// variable's type within that scope.
 pub(in crate::completion) fn resolve_variable_in_statements<'b>(
     statements: impl Iterator<Item = &'b Statement<'b>>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     // Collect so we can iterate twice: once to check class bodies,
     // once (if needed) to walk top-level statements.
     let stmts: Vec<&Statement> = statements.collect();
@@ -236,7 +275,7 @@ pub(in crate::completion) fn resolve_variable_in_statements<'b>(
     // The cursor is not inside any class/interface/enum body — it must
     // be in top-level code.  Walk all top-level statements to find
     // variable assignments (e.g. `$user = new User(…);`).
-    let mut results: Vec<ClassInfo> = Vec::new();
+    let mut results: Vec<ResolvedType> = Vec::new();
     walk_statements_for_assignments(stmts.into_iter(), ctx, &mut results, false);
     results
 }
@@ -250,7 +289,7 @@ pub(in crate::completion) fn resolve_variable_in_statements<'b>(
 fn try_resolve_in_function(
     func: &Function<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<Vec<ClassInfo>> {
+) -> Option<Vec<ResolvedType>> {
     let body_start = func.body.left_brace.start.offset;
     let body_end = func.body.right_brace.end.offset;
     if ctx.cursor_offset < body_start || ctx.cursor_offset > body_end {
@@ -268,7 +307,7 @@ fn try_resolve_in_function(
     // The cursor is inside this function body.  PHP function scopes
     // are isolated, so return the result directly (even if empty
     // after `unset`).
-    let mut results: Vec<ClassInfo> = Vec::new();
+    let mut results: Vec<ResolvedType> = Vec::new();
     super::closure_resolution::resolve_closure_params(
         &func.parameter_list,
         &body_ctx,
@@ -284,7 +323,7 @@ fn try_resolve_in_function(
         let yield_results =
             super::raw_type_inference::try_infer_from_generator_yield(ret_type, &body_ctx);
         if !yield_results.is_empty() {
-            return Some(yield_results);
+            return Some(ResolvedType::from_classes(yield_results));
         }
     }
 
@@ -301,7 +340,7 @@ fn try_resolve_in_function(
 fn try_resolve_in_nested_function(
     stmt: &Statement<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Option<Vec<ClassInfo>> {
+) -> Option<Vec<ResolvedType>> {
     // Quick span check — skip if cursor is outside this statement entirely.
     let span = stmt.span();
     if ctx.cursor_offset < span.start.offset || ctx.cursor_offset > span.end.offset {
@@ -375,13 +414,13 @@ fn try_resolve_in_nested_function(
 fn resolve_variable_in_members<'b>(
     members: impl Iterator<Item = &'b ClassLikeMember<'b>>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     for member in members {
         if let ClassLikeMember::Method(method) = member {
             // Collect parameter type hint as initial candidate set.
             // We no longer return early here so that the method body
             // can be scanned for instanceof narrowing / reassignments.
-            let mut param_results: Vec<ClassInfo> = Vec::new();
+            let mut param_results: Vec<ResolvedType> = Vec::new();
             for param in method.parameter_list.parameters.iter() {
                 let pname = param.variable.name.to_string();
                 if pname == ctx.var_name {
@@ -428,7 +467,10 @@ fn resolve_variable_in_members<'b>(
                         .unwrap_or_default();
 
                     if !resolved_from_native.is_empty() {
-                        param_results = resolved_from_native;
+                        param_results = ResolvedType::from_classes_with_hint(
+                            resolved_from_native,
+                            type_str_for_resolution.unwrap_or(""),
+                        );
                         break;
                     }
 
@@ -437,26 +479,26 @@ fn resolve_variable_in_members<'b>(
                     // may carry a more specific type such as
                     // `object{foo: int, bar: string}`.
                     let method_start = method.span().start.offset as usize;
-                    if let Some(raw_docblock_type) =
-                        crate::docblock::find_iterable_raw_type_in_source(
-                            ctx.content,
-                            method_start,
-                            ctx.var_name,
-                        )
-                    {
+                    let raw_docblock_type = crate::docblock::find_iterable_raw_type_in_source(
+                        ctx.content,
+                        method_start,
+                        ctx.var_name,
+                    );
+                    if let Some(ref raw_docblock_type) = raw_docblock_type {
                         let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                            &raw_docblock_type,
+                            raw_docblock_type,
                             &ctx.current_class.name,
                             ctx.all_classes,
                             ctx.class_loader,
                         );
                         if !resolved.is_empty() {
-                            param_results = resolved;
+                            param_results =
+                                ResolvedType::from_classes_with_hint(resolved, raw_docblock_type);
                             break;
                         }
                     }
 
-                    // Neither native hint nor docblock resolved.
+                    // Neither native hint nor docblock resolved to a class.
                     // Check the fully-resolved class (with interface
                     // members merged and `@implements` generics applied)
                     // for a more specific parameter type.  This handles
@@ -487,10 +529,24 @@ fn resolve_variable_in_members<'b>(
                                 ctx.class_loader,
                             );
                             if !resolved.is_empty() {
-                                param_results = resolved;
+                                param_results =
+                                    ResolvedType::from_classes_with_hint(resolved, hint);
                                 break;
                             }
                         }
+                    }
+
+                    // All class-resolution attempts failed.  Emit a
+                    // type-string-only entry so that consumers like hover
+                    // and diagnostics can see the parameter's type even
+                    // when it's a scalar or PHPDoc pseudo-type.
+                    //
+                    // Prefer the docblock type (e.g. `class-string<BackedEnum>`)
+                    // over the native type (e.g. `string`) when the
+                    // docblock provides a more specific annotation.
+                    let best_type_str = raw_docblock_type.as_deref().or(type_str_for_resolution);
+                    if let Some(ts) = best_type_str {
+                        param_results = vec![ResolvedType::from_type_string(ts.to_string())];
                     }
                 }
             }
@@ -540,7 +596,7 @@ fn resolve_variable_in_members<'b>(
                                 ret_type, &body_ctx,
                             );
                         if !yield_results.is_empty() {
-                            return yield_results;
+                            return ResolvedType::from_classes(yield_results);
                         }
                     }
                 } else {
@@ -580,12 +636,15 @@ fn resolve_variable_in_members<'b>(
 pub(in crate::completion) fn walk_statements_for_assignments<'b>(
     statements: impl Iterator<Item = &'b Statement<'b>>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     /// Return the sorted set of class names in `results`.
-    fn result_names(results: &[ClassInfo]) -> Vec<String> {
-        let mut names: Vec<String> = results.iter().map(|c| c.name.clone()).collect();
+    fn result_names(results: &[ResolvedType]) -> Vec<String> {
+        let mut names: Vec<String> = results
+            .iter()
+            .filter_map(|rt| rt.class_info.as_ref().map(|c| c.name.clone()))
+            .collect();
         names.sort();
         names
     }
@@ -593,7 +652,7 @@ pub(in crate::completion) fn walk_statements_for_assignments<'b>(
     // Accumulator for sequential `assert($x instanceof ...)` calls.
     // Each assert narrows to a single type; this vec collects them
     // so that two asserts in a row produce a union (intersection type).
-    let mut assert_narrowed_types: Vec<ClassInfo> = Vec::new();
+    let mut assert_narrowed_types: Vec<ResolvedType> = Vec::new();
 
     for stmt in statements {
         // ── Closure / arrow-function scope ──
@@ -662,19 +721,24 @@ pub(in crate::completion) fn walk_statements_for_assignments<'b>(
                 // the assert actually narrowed, and merge with any
                 // prior assert-narrowed types.
                 let pre_assert_names = result_names(results);
-                narrowing::try_apply_assert_instanceof_narrowing(
-                    expr_stmt.expression,
-                    ctx,
-                    results,
-                );
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_instanceof_narrowing(
+                        expr_stmt.expression,
+                        ctx,
+                        classes,
+                    );
+                });
                 let changed = result_names(results) != pre_assert_names;
                 // If the assert changed results AND we had prior
                 // assert-narrowed types, merge the old narrowed
                 // types back in (accumulate the intersection).
                 if changed && !assert_narrowed_types.is_empty() {
-                    for cls in &assert_narrowed_types {
-                        if !results.iter().any(|c| c.name == cls.name) {
-                            results.push(cls.clone());
+                    for rt in &assert_narrowed_types {
+                        if !results
+                            .iter()
+                            .any(|existing| existing.type_string == rt.type_string)
+                        {
+                            results.push(rt.clone());
                         }
                     }
                 }
@@ -687,26 +751,38 @@ pub(in crate::completion) fn walk_statements_for_assignments<'b>(
                 // When a function with `@phpstan-assert Type $param`
                 // is called as a standalone statement, narrow the
                 // corresponding argument variable unconditionally.
-                narrowing::try_apply_custom_assert_narrowing(expr_stmt.expression, ctx, results);
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_custom_assert_narrowing(
+                        expr_stmt.expression,
+                        ctx,
+                        classes,
+                    );
+                });
 
                 // ── match(true) { $var instanceof Foo => … } narrowing ──
-                narrowing::try_apply_match_true_narrowing(expr_stmt.expression, ctx, results);
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_match_true_narrowing(expr_stmt.expression, ctx, classes);
+                });
 
                 // ── ternary instanceof narrowing ──
                 // `$var instanceof Foo ? $var->method() : …`
                 // When the cursor is inside a ternary whose condition
                 // checks instanceof, narrow accordingly.
-                narrowing::try_apply_ternary_instanceof_narrowing(
-                    expr_stmt.expression,
-                    ctx,
-                    results,
-                );
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_ternary_instanceof_narrowing(
+                        expr_stmt.expression,
+                        ctx,
+                        classes,
+                    );
+                });
 
                 // ── inline && narrowing ──
                 // `$var instanceof Foo && $var->method()`
                 // When the cursor is inside the RHS of `&&` whose
                 // LHS checks instanceof, narrow accordingly.
-                narrowing::try_apply_inline_and_narrowing(expr_stmt.expression, ctx, results);
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_inline_and_narrowing(expr_stmt.expression, ctx, classes);
+                });
             }
             // ── Return statements ──
             // The return value expression can contain narrowing
@@ -716,9 +792,15 @@ pub(in crate::completion) fn walk_statements_for_assignments<'b>(
             // apply to standalone expression statements.
             Statement::Return(ret) => {
                 if let Some(val) = ret.value {
-                    narrowing::try_apply_match_true_narrowing(val, ctx, results);
-                    narrowing::try_apply_ternary_instanceof_narrowing(val, ctx, results);
-                    narrowing::try_apply_inline_and_narrowing(val, ctx, results);
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_match_true_narrowing(val, ctx, classes);
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_ternary_instanceof_narrowing(val, ctx, classes);
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_inline_and_narrowing(val, ctx, classes);
+                    });
                 }
             }
             // Recurse into blocks — these are just `{ … }` groupings,
@@ -796,64 +878,93 @@ fn walk_if_statement<'b>(
     if_stmt: &'b If<'b>,
     enclosing_stmt: &'b Statement<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) {
+    // ── Branch-aware mode ──
+    // When `ctx.branch_aware` is true and the cursor is inside a
+    // specific branch body, only that branch's assignments contribute
+    // to the result.  This produces the single type visible at the
+    // cursor position (what hover needs).  If the cursor is not inside
+    // any branch body (i.e. it is after the if/else), fall through to
+    // the normal union-all-branches logic.
+    if ctx.branch_aware
+        && let Some(()) = walk_if_branch_aware(if_stmt, enclosing_stmt, ctx, results)
+    {
+        return;
+    }
+
     // ── Inline && narrowing inside the condition expression ──
     // When the cursor is inside the RHS of `&&` in the condition,
     // apply instanceof narrowing from the LHS so that e.g.
     // `if ($x instanceof Foo && $x->bar())` narrows `$x` to `Foo`
     // at the `$x->bar()` call site.
-    narrowing::try_apply_inline_and_narrowing(if_stmt.condition, ctx, results);
+    ResolvedType::apply_narrowing(results, |classes| {
+        narrowing::try_apply_inline_and_narrowing(if_stmt.condition, ctx, classes);
+    });
 
     match &if_stmt.body {
         IfBody::Statement(body) => {
             // ── instanceof narrowing for then-body ──
-            narrowing::try_apply_instanceof_narrowing(
-                if_stmt.condition,
-                body.statement.span(),
-                ctx,
-                results,
-            );
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_instanceof_narrowing(
+                    if_stmt.condition,
+                    body.statement.span(),
+                    ctx,
+                    classes,
+                );
+            });
             // ── @phpstan-assert-if-true/false narrowing for then-body ──
-            narrowing::try_apply_assert_condition_narrowing(
-                if_stmt.condition,
-                body.statement.span(),
-                ctx,
-                results,
-                false, // not inverted — this is the then-body
-            );
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_assert_condition_narrowing(
+                    if_stmt.condition,
+                    body.statement.span(),
+                    ctx,
+                    classes,
+                    false, // not inverted — this is the then-body
+                );
+            });
             // ── in_array strict-mode narrowing for then-body ──
-            narrowing::try_apply_in_array_narrowing(
-                if_stmt.condition,
-                body.statement.span(),
-                ctx,
-                results,
-            );
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_in_array_narrowing(
+                    if_stmt.condition,
+                    body.statement.span(),
+                    ctx,
+                    classes,
+                );
+            });
             check_statement_for_assignments(body.statement, ctx, results, true);
 
             for else_if in body.else_if_clauses.iter() {
                 // ── inline && narrowing for elseif condition ──
-                narrowing::try_apply_inline_and_narrowing(else_if.condition, ctx, results);
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_inline_and_narrowing(else_if.condition, ctx, classes);
+                });
                 // ── instanceof narrowing for elseif-body ──
-                narrowing::try_apply_instanceof_narrowing(
-                    else_if.condition,
-                    else_if.statement.span(),
-                    ctx,
-                    results,
-                );
-                narrowing::try_apply_assert_condition_narrowing(
-                    else_if.condition,
-                    else_if.statement.span(),
-                    ctx,
-                    results,
-                    false,
-                );
-                narrowing::try_apply_in_array_narrowing(
-                    else_if.condition,
-                    else_if.statement.span(),
-                    ctx,
-                    results,
-                );
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_instanceof_narrowing(
+                        else_if.condition,
+                        else_if.statement.span(),
+                        ctx,
+                        classes,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_condition_narrowing(
+                        else_if.condition,
+                        else_if.statement.span(),
+                        ctx,
+                        classes,
+                        false,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_in_array_narrowing(
+                        else_if.condition,
+                        else_if.statement.span(),
+                        ctx,
+                        classes,
+                    );
+                });
                 check_statement_for_assignments(else_if.statement, ctx, results, true);
             }
             if let Some(else_clause) = &body.else_clause {
@@ -861,48 +972,60 @@ fn walk_if_statement<'b>(
                 // `if ($v instanceof Foo) { … } else { ← here }`
                 // means $v is NOT Foo in the else branch.
                 let else_span = else_clause.statement.span();
-                narrowing::try_apply_instanceof_narrowing_inverse(
-                    if_stmt.condition,
-                    else_span,
-                    ctx,
-                    results,
-                );
-                narrowing::try_apply_assert_condition_narrowing(
-                    if_stmt.condition,
-                    else_span,
-                    ctx,
-                    results,
-                    true, // inverted — this is the else-body
-                );
-                narrowing::try_apply_in_array_narrowing_inverse(
-                    if_stmt.condition,
-                    else_span,
-                    ctx,
-                    results,
-                );
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_instanceof_narrowing_inverse(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_condition_narrowing(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        classes,
+                        true, // inverted — this is the else-body
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_in_array_narrowing_inverse(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        classes,
+                    );
+                });
                 // Also apply inverse narrowing for every elseif condition.
                 // In the else branch, all preceding conditions were false,
                 // so each elseif's condition is also inverted.
                 for else_if in body.else_if_clauses.iter() {
-                    narrowing::try_apply_instanceof_narrowing_inverse(
-                        else_if.condition,
-                        else_span,
-                        ctx,
-                        results,
-                    );
-                    narrowing::try_apply_assert_condition_narrowing(
-                        else_if.condition,
-                        else_span,
-                        ctx,
-                        results,
-                        true,
-                    );
-                    narrowing::try_apply_in_array_narrowing_inverse(
-                        else_if.condition,
-                        else_span,
-                        ctx,
-                        results,
-                    );
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_instanceof_narrowing_inverse(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_assert_condition_narrowing(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                            true,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_in_array_narrowing_inverse(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                        );
+                    });
                 }
                 check_statement_for_assignments(else_clause.statement, ctx, results, true);
             }
@@ -928,19 +1051,32 @@ fn walk_if_statement<'b>(
                 body.colon.start,
                 mago_span::Position::new(then_end),
             );
-            narrowing::try_apply_instanceof_narrowing(if_stmt.condition, then_span, ctx, results);
-            narrowing::try_apply_assert_condition_narrowing(
-                if_stmt.condition,
-                then_span,
-                ctx,
-                results,
-                false,
-            );
-            narrowing::try_apply_in_array_narrowing(if_stmt.condition, then_span, ctx, results);
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_instanceof_narrowing(
+                    if_stmt.condition,
+                    then_span,
+                    ctx,
+                    classes,
+                );
+            });
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_assert_condition_narrowing(
+                    if_stmt.condition,
+                    then_span,
+                    ctx,
+                    classes,
+                    false,
+                );
+            });
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_in_array_narrowing(if_stmt.condition, then_span, ctx, classes);
+            });
             walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
             for else_if in body.else_if_clauses.iter() {
                 // ── inline && narrowing for elseif condition ──
-                narrowing::try_apply_inline_and_narrowing(else_if.condition, ctx, results);
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_inline_and_narrowing(else_if.condition, ctx, classes);
+                });
                 let ei_span = mago_span::Span::new(
                     else_if.colon.file_id,
                     else_if.colon.start,
@@ -952,15 +1088,31 @@ fn walk_if_statement<'b>(
                             .offset,
                     ),
                 );
-                narrowing::try_apply_instanceof_narrowing(else_if.condition, ei_span, ctx, results);
-                narrowing::try_apply_assert_condition_narrowing(
-                    else_if.condition,
-                    ei_span,
-                    ctx,
-                    results,
-                    false,
-                );
-                narrowing::try_apply_in_array_narrowing(else_if.condition, ei_span, ctx, results);
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_instanceof_narrowing(
+                        else_if.condition,
+                        ei_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_condition_narrowing(
+                        else_if.condition,
+                        ei_span,
+                        ctx,
+                        classes,
+                        false,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_in_array_narrowing(
+                        else_if.condition,
+                        ei_span,
+                        ctx,
+                        classes,
+                    );
+                });
                 walk_statements_for_assignments(else_if.statements.iter(), ctx, results, true);
             }
             if let Some(else_clause) = &body.else_clause {
@@ -976,46 +1128,58 @@ fn walk_if_statement<'b>(
                             .offset,
                     ),
                 );
-                narrowing::try_apply_instanceof_narrowing_inverse(
-                    if_stmt.condition,
-                    else_span,
-                    ctx,
-                    results,
-                );
-                narrowing::try_apply_assert_condition_narrowing(
-                    if_stmt.condition,
-                    else_span,
-                    ctx,
-                    results,
-                    true, // inverted — else-body
-                );
-                narrowing::try_apply_in_array_narrowing_inverse(
-                    if_stmt.condition,
-                    else_span,
-                    ctx,
-                    results,
-                );
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_instanceof_narrowing_inverse(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_condition_narrowing(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        classes,
+                        true, // inverted — else-body
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_in_array_narrowing_inverse(
+                        if_stmt.condition,
+                        else_span,
+                        ctx,
+                        classes,
+                    );
+                });
                 // Also apply inverse narrowing for every elseif condition.
                 for else_if in body.else_if_clauses.iter() {
-                    narrowing::try_apply_instanceof_narrowing_inverse(
-                        else_if.condition,
-                        else_span,
-                        ctx,
-                        results,
-                    );
-                    narrowing::try_apply_assert_condition_narrowing(
-                        else_if.condition,
-                        else_span,
-                        ctx,
-                        results,
-                        true,
-                    );
-                    narrowing::try_apply_in_array_narrowing_inverse(
-                        else_if.condition,
-                        else_span,
-                        ctx,
-                        results,
-                    );
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_instanceof_narrowing_inverse(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_assert_condition_narrowing(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                            true,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_in_array_narrowing_inverse(
+                            else_if.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                        );
+                    });
                 }
                 walk_statements_for_assignments(else_clause.statements.iter(), ctx, results, true);
             }
@@ -1033,9 +1197,349 @@ fn walk_if_statement<'b>(
     //   if (!$var instanceof Foo) { return; }
     //   $var-> // narrowed to Foo here
     if enclosing_stmt.span().end.offset < ctx.cursor_offset {
-        narrowing::apply_guard_clause_narrowing(if_stmt, ctx, results);
-        narrowing::apply_guard_clause_in_array_narrowing(if_stmt, ctx, results);
+        ResolvedType::apply_narrowing(results, |classes| {
+            narrowing::apply_guard_clause_narrowing(if_stmt, ctx, classes);
+        });
+        ResolvedType::apply_narrowing(results, |classes| {
+            narrowing::apply_guard_clause_in_array_narrowing(if_stmt, ctx, classes);
+        });
     }
+}
+
+/// Branch-aware if/else walking for hover.
+///
+/// When the cursor is inside a specific branch body, only that branch's
+/// assignments are walked (with `conditional = false` since we know
+/// we're in that branch).  The appropriate narrowing for the branch is
+/// applied before walking.
+///
+/// Returns `Some(())` if the cursor was inside a branch body and the
+/// branch was handled.  Returns `None` if the cursor is not inside any
+/// branch (i.e. after the if/else), in which case the caller should
+/// fall through to the normal union-all-branches logic.
+fn walk_if_branch_aware<'b>(
+    if_stmt: &'b If<'b>,
+    _enclosing_stmt: &'b Statement<'b>,
+    ctx: &VarResolutionCtx<'_>,
+    results: &mut Vec<ResolvedType>,
+) -> Option<()> {
+    match &if_stmt.body {
+        IfBody::Statement(body) => {
+            let then_span = body.statement.span();
+            if ctx.cursor_offset >= then_span.start.offset
+                && ctx.cursor_offset <= then_span.end.offset
+            {
+                // Cursor is inside the then-branch.
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_instanceof_narrowing(
+                        if_stmt.condition,
+                        then_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_condition_narrowing(
+                        if_stmt.condition,
+                        then_span,
+                        ctx,
+                        classes,
+                        false,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_in_array_narrowing(
+                        if_stmt.condition,
+                        then_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                check_statement_for_assignments(body.statement, ctx, results, false);
+                return Some(());
+            }
+
+            for else_if in body.else_if_clauses.iter() {
+                let ei_span = else_if.statement.span();
+                if ctx.cursor_offset >= ei_span.start.offset
+                    && ctx.cursor_offset <= ei_span.end.offset
+                {
+                    // Cursor is inside this elseif-branch.
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_instanceof_narrowing(
+                            else_if.condition,
+                            ei_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_assert_condition_narrowing(
+                            else_if.condition,
+                            ei_span,
+                            ctx,
+                            classes,
+                            false,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_in_array_narrowing(
+                            else_if.condition,
+                            ei_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    check_statement_for_assignments(else_if.statement, ctx, results, false);
+                    return Some(());
+                }
+            }
+
+            if let Some(else_clause) = &body.else_clause {
+                let el_span = else_clause.statement.span();
+                if ctx.cursor_offset >= el_span.start.offset
+                    && ctx.cursor_offset <= el_span.end.offset
+                {
+                    // Cursor is inside the else-branch.
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_instanceof_narrowing_inverse(
+                            if_stmt.condition,
+                            el_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_assert_condition_narrowing(
+                            if_stmt.condition,
+                            el_span,
+                            ctx,
+                            classes,
+                            true,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_in_array_narrowing_inverse(
+                            if_stmt.condition,
+                            el_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    // Also apply inverse narrowing for every elseif condition.
+                    for else_if in body.else_if_clauses.iter() {
+                        ResolvedType::apply_narrowing(results, |classes| {
+                            narrowing::try_apply_instanceof_narrowing_inverse(
+                                else_if.condition,
+                                el_span,
+                                ctx,
+                                classes,
+                            );
+                        });
+                        ResolvedType::apply_narrowing(results, |classes| {
+                            narrowing::try_apply_assert_condition_narrowing(
+                                else_if.condition,
+                                el_span,
+                                ctx,
+                                classes,
+                                true,
+                            );
+                        });
+                        ResolvedType::apply_narrowing(results, |classes| {
+                            narrowing::try_apply_in_array_narrowing_inverse(
+                                else_if.condition,
+                                el_span,
+                                ctx,
+                                classes,
+                            );
+                        });
+                    }
+                    check_statement_for_assignments(else_clause.statement, ctx, results, false);
+                    return Some(());
+                }
+            }
+        }
+        IfBody::ColonDelimited(body) => {
+            // Approximate the span of each branch using colon/keyword
+            // boundaries (same logic as the raw-type pipeline's
+            // `accumulate_if_branch_at_cursor`).
+            let then_start = body.colon.start.offset;
+            let then_end = body
+                .else_if_clauses
+                .first()
+                .map(|ei| ei.elseif.span().start.offset)
+                .or_else(|| {
+                    body.else_clause
+                        .as_ref()
+                        .map(|ec| ec.r#else.span().start.offset)
+                })
+                .unwrap_or(body.endif.span().start.offset);
+
+            if ctx.cursor_offset >= then_start && ctx.cursor_offset < then_end {
+                // Cursor is inside the then-branch.
+                let then_span = mago_span::Span::new(
+                    body.colon.file_id,
+                    body.colon.start,
+                    mago_span::Position::new(then_end),
+                );
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_instanceof_narrowing(
+                        if_stmt.condition,
+                        then_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_assert_condition_narrowing(
+                        if_stmt.condition,
+                        then_span,
+                        ctx,
+                        classes,
+                        false,
+                    );
+                });
+                ResolvedType::apply_narrowing(results, |classes| {
+                    narrowing::try_apply_in_array_narrowing(
+                        if_stmt.condition,
+                        then_span,
+                        ctx,
+                        classes,
+                    );
+                });
+                walk_statements_for_assignments(body.statements.iter(), ctx, results, false);
+                return Some(());
+            }
+
+            for (i, else_if) in body.else_if_clauses.iter().enumerate() {
+                let ei_start = else_if.colon.start.offset;
+                let ei_end = body
+                    .else_if_clauses
+                    .get(i + 1)
+                    .map(|next| next.elseif.span().start.offset)
+                    .or_else(|| {
+                        body.else_clause
+                            .as_ref()
+                            .map(|ec| ec.r#else.span().start.offset)
+                    })
+                    .unwrap_or(body.endif.span().start.offset);
+
+                if ctx.cursor_offset >= ei_start && ctx.cursor_offset < ei_end {
+                    // Cursor is inside this elseif-branch.
+                    let ei_span = mago_span::Span::new(
+                        else_if.colon.file_id,
+                        else_if.colon.start,
+                        mago_span::Position::new(ei_end),
+                    );
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_instanceof_narrowing(
+                            else_if.condition,
+                            ei_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_assert_condition_narrowing(
+                            else_if.condition,
+                            ei_span,
+                            ctx,
+                            classes,
+                            false,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_in_array_narrowing(
+                            else_if.condition,
+                            ei_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    walk_statements_for_assignments(else_if.statements.iter(), ctx, results, false);
+                    return Some(());
+                }
+            }
+
+            if let Some(ref else_clause) = body.else_clause {
+                let el_start = else_clause.colon.start.offset;
+                let el_end = body.endif.span().start.offset;
+
+                if ctx.cursor_offset >= el_start && ctx.cursor_offset < el_end {
+                    // Cursor is inside the else-branch.
+                    let else_span = mago_span::Span::new(
+                        else_clause.colon.file_id,
+                        else_clause.colon.start,
+                        mago_span::Position::new(el_end),
+                    );
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_instanceof_narrowing_inverse(
+                            if_stmt.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_assert_condition_narrowing(
+                            if_stmt.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                            true,
+                        );
+                    });
+                    ResolvedType::apply_narrowing(results, |classes| {
+                        narrowing::try_apply_in_array_narrowing_inverse(
+                            if_stmt.condition,
+                            else_span,
+                            ctx,
+                            classes,
+                        );
+                    });
+                    // Also apply inverse narrowing for every elseif condition.
+                    for else_if in body.else_if_clauses.iter() {
+                        ResolvedType::apply_narrowing(results, |classes| {
+                            narrowing::try_apply_instanceof_narrowing_inverse(
+                                else_if.condition,
+                                else_span,
+                                ctx,
+                                classes,
+                            );
+                        });
+                        ResolvedType::apply_narrowing(results, |classes| {
+                            narrowing::try_apply_assert_condition_narrowing(
+                                else_if.condition,
+                                else_span,
+                                ctx,
+                                classes,
+                                true,
+                            );
+                        });
+                        ResolvedType::apply_narrowing(results, |classes| {
+                            narrowing::try_apply_in_array_narrowing_inverse(
+                                else_if.condition,
+                                else_span,
+                                ctx,
+                                classes,
+                            );
+                        });
+                    }
+                    walk_statements_for_assignments(
+                        else_clause.statements.iter(),
+                        ctx,
+                        results,
+                        false,
+                    );
+                    return Some(());
+                }
+            }
+        }
+    }
+
+    // Cursor is not inside any branch body — fall through to the
+    // normal union-all-branches logic in `walk_if_statement`.
+    None
 }
 
 /// Handle `foreach` statements during variable assignment walking.
@@ -1048,7 +1552,7 @@ fn walk_if_statement<'b>(
 fn walk_foreach_statement<'b>(
     foreach: &'b Foreach<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     let body_span = foreach.body.span();
@@ -1110,32 +1614,40 @@ fn walk_foreach_statement<'b>(
 fn walk_while_statement<'b>(
     while_stmt: &'b While<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) {
     // ── Inline && narrowing inside the while condition ──
-    narrowing::try_apply_inline_and_narrowing(while_stmt.condition, ctx, results);
+    ResolvedType::apply_narrowing(results, |classes| {
+        narrowing::try_apply_inline_and_narrowing(while_stmt.condition, ctx, classes);
+    });
 
     match &while_stmt.body {
         WhileBody::Statement(inner) => {
-            narrowing::try_apply_instanceof_narrowing(
-                while_stmt.condition,
-                inner.span(),
-                ctx,
-                results,
-            );
-            narrowing::try_apply_assert_condition_narrowing(
-                while_stmt.condition,
-                inner.span(),
-                ctx,
-                results,
-                false,
-            );
-            narrowing::try_apply_in_array_narrowing(
-                while_stmt.condition,
-                inner.span(),
-                ctx,
-                results,
-            );
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_instanceof_narrowing(
+                    while_stmt.condition,
+                    inner.span(),
+                    ctx,
+                    classes,
+                );
+            });
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_assert_condition_narrowing(
+                    while_stmt.condition,
+                    inner.span(),
+                    ctx,
+                    classes,
+                    false,
+                );
+            });
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_in_array_narrowing(
+                    while_stmt.condition,
+                    inner.span(),
+                    ctx,
+                    classes,
+                );
+            });
             check_statement_for_assignments(inner, ctx, results, true);
         }
         WhileBody::ColonDelimited(body) => {
@@ -1144,20 +1656,31 @@ fn walk_while_statement<'b>(
                 body.colon.start,
                 mago_span::Position::new(body.end_while.span().start.offset),
             );
-            narrowing::try_apply_instanceof_narrowing(
-                while_stmt.condition,
-                body_span,
-                ctx,
-                results,
-            );
-            narrowing::try_apply_assert_condition_narrowing(
-                while_stmt.condition,
-                body_span,
-                ctx,
-                results,
-                false,
-            );
-            narrowing::try_apply_in_array_narrowing(while_stmt.condition, body_span, ctx, results);
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_instanceof_narrowing(
+                    while_stmt.condition,
+                    body_span,
+                    ctx,
+                    classes,
+                );
+            });
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_assert_condition_narrowing(
+                    while_stmt.condition,
+                    body_span,
+                    ctx,
+                    classes,
+                    false,
+                );
+            });
+            ResolvedType::apply_narrowing(results, |classes| {
+                narrowing::try_apply_in_array_narrowing(
+                    while_stmt.condition,
+                    body_span,
+                    ctx,
+                    classes,
+                );
+            });
             walk_statements_for_assignments(body.statements.iter(), ctx, results, true);
         }
     }
@@ -1172,7 +1695,7 @@ fn walk_while_statement<'b>(
 fn walk_try_statement<'b>(
     try_stmt: &'b Try<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) {
     walk_statements_for_assignments(try_stmt.block.statements.iter(), ctx, results, true);
     for catch in try_stmt.catch_clauses.iter() {
@@ -1191,7 +1714,7 @@ fn walk_try_statement<'b>(
                 ctx.all_classes,
                 ctx.class_loader,
             );
-            ClassInfo::extend_unique(results, resolved);
+            ResolvedType::extend_unique(results, ResolvedType::from_classes(resolved));
         }
         walk_statements_for_assignments(catch.block.statements.iter(), ctx, results, true);
     }
@@ -1205,7 +1728,7 @@ fn walk_try_statement<'b>(
 pub(in crate::completion) fn check_statement_for_assignments<'b>(
     stmt: &'b Statement<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     walk_statements_for_assignments(std::iter::once(stmt), ctx, results, conditional);
@@ -1234,7 +1757,7 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
     expr: &'b Expression<'b>,
     stmt_start: usize,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) -> bool {
     // Must be an assignment to our target variable.
@@ -1281,19 +1804,32 @@ pub(in crate::completion) fn try_inline_var_override<'b>(
     );
 
     if resolved.is_empty() {
+        // When `type_hint_to_classes` can't resolve the type (e.g.
+        // `list<User>`, `array{name: string}`, `int[]`), emit a
+        // type-string-only entry so that downstream consumers like
+        // foreach resolution can still extract element types via
+        // `extract_generic_value_type`.  Skip non-informative types
+        // (`array`, `mixed`, etc.) so normal resolution can provide
+        // more precise information.
+        if crate::completion::variable::rhs_resolution::is_informative_type_string(&eff_type) {
+            let resolved_types = vec![ResolvedType::from_type_string(eff_type)];
+            if !conditional {
+                results.clear();
+            }
+            ResolvedType::extend_unique(results, resolved_types);
+            return true;
+        }
         return false;
     }
+
+    let resolved_types = ResolvedType::from_classes_with_hint(resolved, &eff_type);
 
     // Apply the resolved type(s) with the same conditional semantics
     // used by `check_expression_for_assignment`.
     if !conditional {
         results.clear();
     }
-    for cls in resolved {
-        if !results.iter().any(|c| c.name == cls.name) {
-            results.push(cls);
-        }
-    }
+    ResolvedType::extend_unique(results, resolved_types);
     true
 }
 
@@ -1402,12 +1938,12 @@ fn extract_native_type_from_rhs<'b>(
 pub(in crate::completion) fn check_expression_for_assignment<'b>(
     expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     let var_name = ctx.var_name;
 
-    /// Push one or more resolved classes into `results`.
+    /// Push one or more resolved types into `results`.
     ///
     /// * `conditional == false` → unconditional assignment: **clear**
     ///   previous candidates first, then add all new ones (handles
@@ -1415,15 +1951,15 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
     /// * `conditional == true` → conditional branch: **append**
     ///   without clearing (the variable *might* be these types).
     ///
-    /// Duplicates (same class name) are always suppressed.
-    fn push_results(results: &mut Vec<ClassInfo>, new_classes: Vec<ClassInfo>, conditional: bool) {
-        if new_classes.is_empty() {
+    /// Duplicates (same type string) are always suppressed.
+    fn push_results(results: &mut Vec<ResolvedType>, new: Vec<ResolvedType>, conditional: bool) {
+        if new.is_empty() {
             return;
         }
         if !conditional {
             results.clear();
         }
-        ClassInfo::extend_unique(results, new_classes);
+        ResolvedType::extend_unique(results, new);
     }
 
     if let Expression::Assignment(assignment) = expr {
@@ -1442,6 +1978,103 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
                 results,
                 conditional,
             );
+            return;
+        }
+
+        // ── Incremental key assignment: `$var['key'] = expr;` ──
+        // Track string-keyed assignments and merge them into the
+        // base type's array shape.  This produces type strings like
+        // `array{name: string, age: int}` which downstream consumers
+        // use for shape-aware completion and hover.
+        if let Expression::ArrayAccess(array_access) = assignment.lhs
+            && let Expression::Variable(Variable::Direct(dv)) = array_access.array
+            && dv.name == var_name
+        {
+            // ── B13: Skip when cursor is inside the RHS ────────
+            // Same guard as the base-assignment path below.
+            // Without this, `$var['key'] = $var['key']->method()`
+            // would infinitely recurse: resolving the RHS triggers
+            // resolution of `$var`, which re-discovers the same
+            // assignment and resolves its RHS again.
+            let rhs_start = assignment.rhs.span().start.offset;
+            let assign_end = assignment.span().end.offset;
+            if ctx.cursor_offset >= rhs_start && ctx.cursor_offset <= assign_end {
+                return;
+            }
+
+            let key = extract_array_key_for_shape(array_access.index);
+            // Skip numeric-only keys and unresolvable indices.
+            if let Some(key) = key {
+                let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
+                let resolved =
+                    super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
+                let value_type = if !resolved.is_empty() {
+                    ResolvedType::type_strings_joined(&resolved)
+                } else {
+                    "mixed".to_string()
+                };
+                // Read the current base type from results (if any)
+                // and merge the new key into its shape.
+                let base = results
+                    .last()
+                    .map(|rt| rt.type_string.as_str())
+                    .unwrap_or("array");
+                let merged = merge_shape_key(base, &key, &value_type);
+                // Replace results with the enriched shape type.
+                // Use extend_unique so this works in conditional
+                // branches (appends) as well as unconditional
+                // (results cleared first by push_results via the
+                // base assignment that preceded this).
+                // We always push here without clearing — shape keys
+                // accumulate on top of the existing base.
+                let new_rt = ResolvedType::from_type_string(merged);
+                results.clear();
+                results.push(new_rt);
+            }
+            return;
+        }
+
+        // ── Push assignment: `$var[] = expr;` ──
+        // Track push-style assignments and merge them into the base
+        // type's list element type.  This produces type strings like
+        // `list<User>` or `list<User|Admin>`.
+        if let Expression::ArrayAppend(array_append) = assignment.lhs
+            && let Expression::Variable(Variable::Direct(dv)) = array_append.array
+            && dv.name == var_name
+        {
+            // ── B13: Skip when cursor is inside the RHS ────────
+            let rhs_start = assignment.rhs.span().start.offset;
+            let assign_end = assignment.span().end.offset;
+            if ctx.cursor_offset >= rhs_start && ctx.cursor_offset <= assign_end {
+                return;
+            }
+
+            let rhs_ctx = ctx.with_cursor_offset(assignment.span().start.offset);
+            let resolved = super::rhs_resolution::resolve_rhs_expression(assignment.rhs, &rhs_ctx);
+            let value_type = if !resolved.is_empty() {
+                ResolvedType::type_strings_joined(&resolved)
+            } else {
+                "mixed".to_string()
+            };
+            // Read the current base type from results (if any)
+            // and merge the push element type into it.
+            //
+            // When the base is already an array shape (from prior
+            // `$var['key'] = expr` assignments), skip the push merge.
+            // String-keyed entries take precedence over positional
+            // pushes, matching the old AssignmentAccumulator's
+            // finalize() behaviour.
+            let base = results
+                .last()
+                .map(|rt| rt.type_string.as_str())
+                .unwrap_or("array");
+            if base.starts_with("array{") {
+                return;
+            }
+            let merged = merge_push_type(base, &value_type);
+            let new_rt = ResolvedType::from_type_string(merged);
+            results.clear();
+            results.push(new_rt);
             return;
         }
 
@@ -1482,6 +2115,107 @@ pub(in crate::completion) fn check_expression_for_assignment<'b>(
     }
 }
 
+// ── Shape mutation helpers ───────────────────────────────────────────
+
+/// Extract a string key from an array access index expression.
+///
+/// Returns `Some(key)` for string-literal keys like `'name'` or `"age"`.
+/// Returns `None` for numeric keys, variable indices, and other
+/// non-string-literal expressions — these are not tracked as shape
+/// entries.
+fn extract_array_key_for_shape(index: &Expression<'_>) -> Option<String> {
+    if let Expression::Literal(Literal::String(s)) = index {
+        let key = s.value.map(|v| v.to_string()).unwrap_or_else(|| {
+            let raw = s.raw;
+            raw.strip_prefix('\'')
+                .and_then(|r| r.strip_suffix('\''))
+                .or_else(|| raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
+                .unwrap_or(raw)
+                .to_string()
+        });
+        // Skip numeric-only keys — they are positional, not shape entries.
+        if key.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        Some(key)
+    } else {
+        None
+    }
+}
+
+/// Merge a `(key, value_type)` pair into an existing type string to
+/// produce an array shape.
+///
+/// If `base` is already an `array{…}` shape, the key is added or
+/// updated.  Otherwise a new shape is created with just the given key.
+///
+/// Examples:
+/// - `merge_shape_key("array", "name", "string")` → `"array{name: string}"`
+/// - `merge_shape_key("array{name: string}", "age", "int")` → `"array{name: string, age: int}"`
+/// - `merge_shape_key("array{name: string}", "name", "int")` → `"array{name: int}"`
+fn merge_shape_key(base: &str, key: &str, value_type: &str) -> String {
+    let mut entries: Vec<(String, String)> = Vec::new();
+
+    // Parse existing shape entries from the base type.
+    if let Some(parsed) = crate::docblock::parse_array_shape(base) {
+        for entry in &parsed {
+            entries.push((entry.key.clone(), entry.value_type.clone()));
+        }
+    }
+
+    // Upsert the new key.
+    if let Some(existing) = entries.iter_mut().find(|(k, _)| k == key) {
+        existing.1 = value_type.to_string();
+    } else {
+        entries.push((key.to_string(), value_type.to_string()));
+    }
+
+    let parts: Vec<String> = entries
+        .iter()
+        .map(|(k, v)| format!("{}: {}", k, v))
+        .collect();
+    format!("array{{{}}}", parts.join(", "))
+}
+
+/// Merge a push element type into an existing type string to produce
+/// a `list<…>` type.
+///
+/// If `base` already has a generic value type (e.g. `list<User>`),
+/// the new type is unioned with it (e.g. `list<User|Admin>`).
+/// Otherwise, produces `list<value_type>`.
+///
+/// Examples:
+/// - `merge_push_type("array", "User")` → `"list<User>"`
+/// - `merge_push_type("list<User>", "Admin")` → `"list<User|Admin>"`
+/// - `merge_push_type("list<User>", "User")` → `"list<User>"` (no duplicate)
+fn merge_push_type(base: &str, value_type: &str) -> String {
+    let mut elem_types: Vec<String> = Vec::new();
+
+    // Extract existing element types from the base.
+    if let Some(existing_elem) = docblock::types::extract_iterable_element_type(base) {
+        for part in existing_elem.split('|') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                elem_types.push(trimmed.to_string());
+            }
+        }
+    }
+
+    // Add the new value type (split on `|` in case it's already a union).
+    for part in value_type.split('|') {
+        let trimmed = part.trim();
+        if !trimmed.is_empty() && !elem_types.contains(&trimmed.to_string()) {
+            elem_types.push(trimmed.to_string());
+        }
+    }
+
+    if elem_types.is_empty() {
+        return "array".to_string();
+    }
+
+    format!("list<{}>", elem_types.join("|"))
+}
+
 // ── Array function type preservation helpers ─────────────────────────
 
 /// Extract the first positional argument expression from an
@@ -1509,7 +2243,7 @@ pub(in crate::completion) fn nth_arg_expr<'b>(
 /// Resolve the raw iterable type of an argument expression.
 ///
 /// Handles `$variable` (via docblock scanning) and delegates to
-/// `extract_rhs_iterable_raw_type` for method calls, property access,
+/// `resolve_expression_type_string` for method calls, property access,
 /// etc.
 pub(in crate::completion) fn resolve_arg_raw_type<'b>(
     arg_expr: &'b Expression<'b>,
@@ -1530,26 +2264,24 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
         // `$users = $this->getUsers(); array_pop($users)` where
         // `$users` has no `@var` annotation but was assigned from a
         // method returning `list<User>`.
-        let current_class = ctx
-            .all_classes
-            .iter()
-            .find(|c| c.name == ctx.current_class.name)
-            .map(|c| c.as_ref());
-        if let Some(raw) = super::raw_type_inference::resolve_variable_assignment_raw_type(
+        let resolved = resolve_variable_types(
             &var_text,
+            ctx.current_class,
+            ctx.all_classes,
             ctx.content,
             offset as u32,
-            current_class,
-            ctx.all_classes,
             ctx.class_loader,
             ctx.function_loader,
-        ) && docblock::types::extract_generic_value_type(&raw).is_some()
-        {
-            return Some(raw);
+        );
+        if !resolved.is_empty() {
+            let raw = crate::types::ResolvedType::type_strings_joined(&resolved);
+            if docblock::types::extract_generic_value_type(&raw).is_some() {
+                return Some(raw);
+            }
         }
     }
-    // Fall back to structural extraction (method calls, etc.)
-    super::foreach_resolution::extract_rhs_iterable_raw_type(arg_expr, ctx)
+    // Fall back to the unified pipeline (method calls, etc.)
+    super::foreach_resolution::resolve_expression_type_string(arg_expr, ctx)
 }
 
 /// Check whether a call expression passes the target variable to a
@@ -1566,7 +2298,7 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
 fn try_apply_pass_by_reference_type(
     expr: &Expression<'_>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     let (argument_list, parameters) = match expr {
@@ -1621,7 +2353,7 @@ fn try_apply_pass_by_reference_type(
                 if !conditional {
                     results.clear();
                 }
-                ClassInfo::extend_unique(results, resolved);
+                ResolvedType::extend_unique(results, ResolvedType::from_classes(resolved));
             }
         }
     }

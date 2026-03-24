@@ -1001,16 +1001,22 @@ impl Backend {
             ) {
                 return Some(raw);
             }
-            // Fall back to AST-based assignment scanning.
-            return crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type(
+            // Fall back to the unified variable resolution pipeline.
+            let default_class = ClassInfo::default();
+            let effective_class = current_class.unwrap_or(&default_class);
+            let resolved = crate::completion::variable::resolution::resolve_variable_types(
                 arg_text,
+                effective_class,
+                all_classes,
                 ctx.content,
                 ctx.cursor_offset,
-                current_class,
-                all_classes,
                 class_loader,
                 ctx.function_loader,
             );
+            if !resolved.is_empty() {
+                return Some(ResolvedType::type_strings_joined(&resolved));
+            }
+            return None;
         }
 
         // ── Call expression ending with `)` ─────────────────────────────

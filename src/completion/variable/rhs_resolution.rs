@@ -1,8 +1,11 @@
 /// Right-hand-side expression resolution for variable assignments.
 ///
 /// This module resolves the type of the right-hand side of an assignment
-/// (`$var = <expr>`) to zero or more `ClassInfo` values.  It handles:
+/// (`$var = <expr>`) to zero or more [`ResolvedType`] values.  It handles:
 ///
+///   - Scalar literals: `1` → `int`, `'hello'` → `string`, etc.
+///   - Array literals: `[new Foo()]` → `list<Foo>`,
+///     `['a' => 1]` → `array{a: int}`
 ///   - `new ClassName(…)` → the instantiated class
 ///   - Array access: `$arr[0]` → generic element type,
 ///     `$arr['key']` → array shape value type,
@@ -29,38 +32,62 @@ use mago_syntax::ast::*;
 use crate::Backend;
 use crate::docblock;
 use crate::parser::extract_hint_string;
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 
 use super::resolution::build_var_resolver_from_ctx;
 use crate::completion::call_resolution::MethodReturnCtx;
 use crate::completion::conditional_resolution::resolve_conditional_with_args;
 use crate::completion::resolver::VarResolutionCtx;
 
-/// Resolve a right-hand-side expression to zero or more `ClassInfo`
-/// values.
+/// Resolve a right-hand-side expression to zero or more
+/// [`ResolvedType`] values.
 ///
 /// This is the single place where an arbitrary PHP expression is
-/// resolved to class types.  It handles:
+/// resolved to a type.  It handles scalars, array literals,
+/// instantiations, calls, property access, match/ternary/null-coalesce,
+/// clone, closures, generators, pipe, and bare variables.
 ///
-///   - `new ClassName(…)` → the instantiated class
-///   - Array access: `$arr[0]` → generic element type,
-///     `$arr['key']` → array shape value type,
-///     `$arr['key'][0]` → chained bracket access
-///   - Function calls: `someFunc()` → return type
-///   - Method calls: `$this->method()`, `$obj->method()` → return type
-///   - Static calls: `ClassName::method()` → return type
-///   - Property access: `$this->prop`, `$obj->prop` → property type
-///   - Match expressions: union of all arm types
-///   - Ternary / null-coalescing: union of both branches
-///   - Clone: `clone $expr` → preserves the cloned expression's type
+/// Entries may have `class_info: None` (e.g. scalar literals, array
+/// shapes).  Callers that need only class-backed results should
+/// filter with [`ResolvedType::into_classes`].
 ///
-/// Used by `check_expression_for_assignment` (for `$var = <expr>`)
+/// Used by `check_expression_for_assignment` (for `$var = <expr>`),
+/// `check_expression_for_raw_type` (for hover/diagnostics type strings),
 /// and recursively by multi-branch constructs (match, ternary, `??`).
 pub(in crate::completion) fn resolve_rhs_expression<'b>(
     expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     match expr {
+        // ── Scalar literals ─────────────────────────────────────────
+        Expression::Literal(Literal::Integer(_)) => {
+            vec![ResolvedType::from_type_string("int".to_string())]
+        }
+        Expression::Literal(Literal::Float(_)) => {
+            vec![ResolvedType::from_type_string("float".to_string())]
+        }
+        Expression::Literal(Literal::String(_)) => {
+            vec![ResolvedType::from_type_string("string".to_string())]
+        }
+        Expression::Literal(Literal::True(_) | Literal::False(_)) => {
+            vec![ResolvedType::from_type_string("bool".to_string())]
+        }
+        Expression::Literal(Literal::Null(_)) => {
+            vec![ResolvedType::from_type_string("null".to_string())]
+        }
+        // ── Array literals ──────────────────────────────────────────
+        Expression::Array(arr) => {
+            let ts =
+                super::raw_type_inference::infer_array_literal_raw_type(arr.elements.iter(), ctx)
+                    .unwrap_or_else(|| "array".to_string());
+            vec![ResolvedType::from_type_string(ts)]
+        }
+        Expression::LegacyArray(arr) => {
+            let ts =
+                super::raw_type_inference::infer_array_literal_raw_type(arr.elements.iter(), ctx)
+                    .unwrap_or_else(|| "array".to_string());
+            vec![ResolvedType::from_type_string(ts)]
+        }
         Expression::Instantiation(inst) => resolve_rhs_instantiation(inst, ctx),
         Expression::ArrayAccess(array_access) => resolve_rhs_array_access(array_access, expr, ctx),
         Expression::Call(call) => resolve_rhs_call(call, expr, ctx),
@@ -70,21 +97,25 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
             let mut combined = Vec::new();
             for arm in match_expr.arms.iter() {
                 let arm_results = resolve_rhs_expression(arm.expression(), ctx);
-                ClassInfo::extend_unique(&mut combined, arm_results);
+                ResolvedType::extend_unique(&mut combined, arm_results);
             }
             combined
         }
         Expression::Conditional(cond_expr) => {
             let mut combined = Vec::new();
             let then_expr = cond_expr.then.unwrap_or(cond_expr.condition);
-            ClassInfo::extend_unique(&mut combined, resolve_rhs_expression(then_expr, ctx));
-            ClassInfo::extend_unique(&mut combined, resolve_rhs_expression(cond_expr.r#else, ctx));
+            ResolvedType::extend_unique(&mut combined, resolve_rhs_expression(then_expr, ctx));
+            ResolvedType::extend_unique(
+                &mut combined,
+                resolve_rhs_expression(cond_expr.r#else, ctx),
+            );
             combined
         }
         Expression::Binary(binary) if binary.operator.is_null_coalesce() => {
             // When the LHS is syntactically non-nullable (e.g. `new Foo()`,
             // a literal, `clone $x`), the RHS is dead code — return only
-            // the LHS classes.  Otherwise union both sides.
+            // the LHS results.  Otherwise resolve both sides; if the LHS
+            // type string is nullable, strip `null` before unioning.
             let lhs_non_nullable = matches!(
                 binary.lhs,
                 Expression::Instantiation(_)
@@ -93,12 +124,35 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
                     | Expression::LegacyArray(_)
                     | Expression::Clone(_)
             );
-            let lhs_classes = resolve_rhs_expression(binary.lhs, ctx);
-            if !lhs_classes.is_empty() && lhs_non_nullable {
-                lhs_classes
+            let lhs_results = resolve_rhs_expression(binary.lhs, ctx);
+            if !lhs_results.is_empty() && lhs_non_nullable {
+                lhs_results
+            } else if !lhs_results.is_empty() {
+                // Strip `null` entries and nullable wrappers from the
+                // LHS type strings before unioning with the RHS.
+                // Example: `?Foo ?? Bar` → `Foo|Bar`.
+                let mut combined: Vec<ResolvedType> = lhs_results
+                    .into_iter()
+                    .filter_map(|mut rt| {
+                        if rt.type_string == "null" {
+                            return None;
+                        }
+                        if docblock::type_strings::raw_type_is_nullable(&rt.type_string) {
+                            rt.type_string =
+                                docblock::type_strings::strip_null_from_union(&rt.type_string)
+                                    .unwrap_or(rt.type_string);
+                        }
+                        Some(rt)
+                    })
+                    .collect();
+                // Always union with the RHS.  Even when the LHS type
+                // string looks non-nullable, the user wrote `??`
+                // defensively and both branches are valid candidates.
+                ResolvedType::extend_unique(&mut combined, resolve_rhs_expression(binary.rhs, ctx));
+                combined
             } else {
-                let mut combined = lhs_classes;
-                ClassInfo::extend_unique(&mut combined, resolve_rhs_expression(binary.rhs, ctx));
+                let mut combined = lhs_results;
+                ResolvedType::extend_unique(&mut combined, resolve_rhs_expression(binary.rhs, ctx));
                 combined
             }
         }
@@ -119,11 +173,14 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
             // succeeds even inside a namespace block (unqualified
             // class names are prefixed with the current namespace
             // and do NOT fall back to the global scope in PHP).
-            crate::completion::type_resolution::type_hint_to_classes(
-                "\\Closure",
-                &ctx.current_class.name,
-                ctx.all_classes,
-                ctx.class_loader,
+            ResolvedType::from_classes_with_hint(
+                crate::completion::type_resolution::type_hint_to_classes(
+                    "\\Closure",
+                    &ctx.current_class.name,
+                    ctx.all_classes,
+                    ctx.class_loader,
+                ),
+                "Closure",
             )
         }
         // ── Generator yield-assignment: `$var = yield $expr` ──
@@ -133,11 +190,14 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
             if let Some(ref ret_type) = ctx.enclosing_return_type
                 && let Some(send_type) = crate::docblock::extract_generator_send_type(ret_type)
             {
-                return crate::completion::type_resolution::type_hint_to_classes(
+                return ResolvedType::from_classes_with_hint(
+                    crate::completion::type_resolution::type_hint_to_classes(
+                        &send_type,
+                        &ctx.current_class.name,
+                        ctx.all_classes,
+                        ctx.class_loader,
+                    ),
                     &send_type,
-                    &ctx.current_class.name,
-                    ctx.all_classes,
-                    ctx.class_loader,
                 );
             }
             vec![]
@@ -164,6 +224,18 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
                 ctx.function_loader,
             )
         }
+        // ── Concatenation: `"prefix" . $var` → string ───────────────
+        Expression::Binary(binary) if binary.operator.is_concatenation() => {
+            vec![ResolvedType::from_type_string("string".to_string())]
+        }
+        // ── Arithmetic: `$a + $b`, `$a * $b` etc. → numeric ────────
+        // We can't distinguish int vs float without deeper analysis,
+        // so we don't emit a type here and let callers fall back.
+        //
+        // ── Catch-all: unrecognised expression types ────────────────
+        // Return an empty vec — callers that need a type string for
+        // expressions not handled above should use the raw-type
+        // inference pipeline.
         _ => vec![],
     }
 }
@@ -177,7 +249,7 @@ pub(in crate::completion) fn resolve_rhs_expression<'b>(
 ///
 /// Currently handles function-level callables (e.g. `createDate(...)`).
 /// Method and static method callables are not yet supported.
-fn resolve_rhs_pipe(pipe: &Pipe<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ClassInfo> {
+fn resolve_rhs_pipe(pipe: &Pipe<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ResolvedType> {
     // The callable determines the result type.
     // For `PartialApplication::Function`, extract the function name
     // and look up its return type.
@@ -191,11 +263,14 @@ fn resolve_rhs_pipe(pipe: &Pipe<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ClassInf
                 && let Some(func_info) = fl(&func_name)
                 && let Some(ref ret) = func_info.return_type
             {
-                return crate::completion::type_resolution::type_hint_to_classes(
+                return ResolvedType::from_classes_with_hint(
+                    crate::completion::type_resolution::type_hint_to_classes(
+                        ret,
+                        &ctx.current_class.name,
+                        ctx.all_classes,
+                        ctx.class_loader,
+                    ),
                     ret,
-                    &ctx.current_class.name,
-                    ctx.all_classes,
-                    ctx.class_loader,
                 );
             }
             vec![]
@@ -211,7 +286,7 @@ fn resolve_rhs_pipe(pipe: &Pipe<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ClassInf
 fn resolve_rhs_instantiation(
     inst: &Instantiation<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     let class_name = match inst.class {
         Expression::Self_(_) => Some("self"),
         Expression::Static(_) => Some("static"),
@@ -252,13 +327,13 @@ fn resolve_rhs_instantiation(
                             crate::virtual_members::resolve_class_fully(cls, ctx.class_loader);
                         let substituted =
                             crate::inheritance::apply_generic_args(&resolved, &type_args);
-                        return vec![substituted];
+                        return vec![ResolvedType::from_class(substituted)];
                     }
                 }
             }
         }
 
-        return classes;
+        return ResolvedType::from_classes(classes);
     }
 
     // ── `new $var` where `$var` holds a class-string ────────────
@@ -278,7 +353,7 @@ fn resolve_rhs_instantiation(
                 ctx.class_loader,
             );
         if !resolved.is_empty() {
-            return resolved;
+            return ResolvedType::from_classes(resolved);
         }
     }
 
@@ -518,7 +593,7 @@ fn resolve_rhs_array_access<'b>(
     array_access: &ArrayAccess<'b>,
     expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     // Collect bracket segments and find the innermost base variable by
     // walking through nested ArrayAccess nodes.  This handles both
     // single access (`$result['data']`) and chained access
@@ -550,15 +625,20 @@ fn resolve_rhs_array_access<'b>(
     let raw_type =
         docblock::find_iterable_raw_type_in_source(ctx.content, access_offset, &base_var).or_else(
             || {
-                super::raw_type_inference::resolve_variable_assignment_raw_type(
+                let resolved = super::resolution::resolve_variable_types(
                     &base_var,
+                    ctx.current_class,
+                    ctx.all_classes,
                     ctx.content,
                     access_offset as u32,
-                    Some(ctx.current_class),
-                    ctx.all_classes,
                     ctx.class_loader,
                     ctx.function_loader,
-                )
+                );
+                if resolved.is_empty() {
+                    None
+                } else {
+                    Some(ResolvedType::type_strings_joined(&resolved))
+                }
             },
         );
 
@@ -609,11 +689,14 @@ fn resolve_rhs_array_access<'b>(
         }
     }
 
-    crate::completion::type_resolution::type_hint_to_classes(
+    ResolvedType::from_classes_with_hint(
+        crate::completion::type_resolution::type_hint_to_classes(
+            &current_type,
+            &ctx.current_class.name,
+            ctx.all_classes,
+            ctx.class_loader,
+        ),
         &current_type,
-        &ctx.current_class.name,
-        ctx.all_classes,
-        ctx.class_loader,
     )
 }
 
@@ -759,18 +842,23 @@ fn resolve_arg_variable_raw_type(
         return Some(raw);
     }
 
-    // 2. Fall back to AST-based raw type inference.
+    // 2. Fall back to unified variable resolution pipeline.
     let default_class = crate::types::ClassInfo::default();
     let current_class = rctx.current_class.unwrap_or(&default_class);
-    super::raw_type_inference::resolve_variable_assignment_raw_type(
+    let resolved = super::resolution::resolve_variable_types(
         var_name,
+        current_class,
+        rctx.all_classes,
         rctx.content,
         rctx.cursor_offset,
-        Some(current_class),
-        rctx.all_classes,
         rctx.class_loader,
         rctx.function_loader,
-    )
+    );
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(ResolvedType::type_strings_joined(&resolved))
+    }
 }
 
 /// Extract the concrete type at `position` from an array type string.
@@ -858,7 +946,7 @@ fn resolve_rhs_call<'b>(
     call: &'b Call<'b>,
     expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     match call {
         Call::Function(func_call) => resolve_rhs_function_call(func_call, expr, ctx),
         Call::Method(method_call) => resolve_rhs_method_call_inner(
@@ -883,7 +971,7 @@ fn resolve_rhs_function_call<'b>(
     func_call: &'b FunctionCall<'b>,
     expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     let current_class_name: &str = &ctx.current_class.name;
     let all_classes = ctx.all_classes;
     let content = ctx.content;
@@ -912,13 +1000,39 @@ fn resolve_rhs_function_call<'b>(
             class_loader,
         );
         if !resolved.is_empty() {
-            return resolved;
+            return ResolvedType::from_classes_with_hint(resolved, &element_type);
         }
     }
 
-    if let Some(name) = func_name
+    // For type-preserving functions (array_filter, array_values, etc.)
+    // the output has the same iterable type as the input array.
+    // Return the full type string (e.g. `list<User>`) so that
+    // downstream consumers (foreach, array access, hover) see the
+    // element type without needing the raw-type pipeline's fallback.
+    if let Some(ref name) = func_name
+        && let Some(raw_type) = super::raw_type_inference::resolve_array_func_raw_type(
+            name,
+            &func_call.argument_list,
+            ctx,
+        )
+    {
+        let resolved = crate::completion::type_resolution::type_hint_to_classes(
+            &raw_type,
+            current_class_name,
+            all_classes,
+            class_loader,
+        );
+        if !resolved.is_empty() {
+            return ResolvedType::from_classes_with_hint(resolved, &raw_type);
+        }
+        // The type string is informative (e.g. `list<User>`) but
+        // doesn't resolve to a class — return as type-string-only.
+        return vec![ResolvedType::from_type_string(raw_type)];
+    }
+
+    if let Some(ref name) = func_name
         && let Some(fl) = function_loader
-        && let Some(func_info) = fl(&name)
+        && let Some(func_info) = fl(name)
     {
         // Try conditional return type first
         if let Some(ref cond) = func_info.conditional_return {
@@ -937,7 +1051,7 @@ fn resolve_rhs_function_call<'b>(
                     class_loader,
                 );
                 if !resolved.is_empty() {
-                    return resolved;
+                    return ResolvedType::from_classes_with_hint(resolved, ty);
                 }
             }
         }
@@ -966,19 +1080,59 @@ fn resolve_rhs_function_call<'b>(
                         class_loader,
                     );
                     if !resolved.is_empty() {
-                        return resolved;
+                        return ResolvedType::from_classes_with_hint(resolved, &substituted);
                     }
                 }
             }
         }
 
         if let Some(ref ret) = func_info.return_type {
-            return crate::completion::type_resolution::type_hint_to_classes(
+            let resolved = crate::completion::type_resolution::type_hint_to_classes(
                 ret,
                 current_class_name,
                 all_classes,
                 class_loader,
             );
+            if !resolved.is_empty() {
+                return ResolvedType::from_classes_with_hint(resolved, ret);
+            }
+            // The function has a return type string but
+            // `type_hint_to_classes` found no matching class (e.g.
+            // `list<Widget>`, `int`, `array{name: string}`).  Return a
+            // type-string-only entry so that consumers reading
+            // `.type_string` still get the information.
+            //
+            // Skip non-informative types like `array`, `mixed`, `void`
+            // — returning these would mask more precise type info from
+            // the raw-type pipeline's specialised handlers (e.g.
+            // `resolve_array_func_raw_type` for `array_filter`).
+            if is_informative_type_string(ret) {
+                return vec![ResolvedType::from_type_string(ret.clone())];
+            }
+        }
+    }
+
+    // ── Source-scanning fallback for named function calls ────
+    // When no function_loader is available (e.g. raw-type pipeline,
+    // test backends without PSR-4), scan the source text for the
+    // function's docblock @return annotation.  This covers standalone
+    // function calls when no function_loader is available.
+    if let Some(ref name) = func_name
+        && function_loader.is_none()
+        && let Some(ret) =
+            crate::completion::source::helpers::extract_function_return_from_source(name, content)
+    {
+        let resolved = crate::completion::type_resolution::type_hint_to_classes(
+            &ret,
+            current_class_name,
+            all_classes,
+            class_loader,
+        );
+        if !resolved.is_empty() {
+            return ResolvedType::from_classes_with_hint(resolved, &ret);
+        }
+        if is_informative_type_string(&ret) {
+            return vec![ResolvedType::from_type_string(ret)];
         }
     }
 
@@ -1005,7 +1159,7 @@ fn resolve_rhs_function_call<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
-                return resolved;
+                return ResolvedType::from_classes_with_hint(resolved, &ret);
             }
         }
 
@@ -1025,7 +1179,7 @@ fn resolve_rhs_function_call<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
-                return resolved;
+                return ResolvedType::from_classes_with_hint(resolved, &ret);
             }
         }
 
@@ -1046,7 +1200,7 @@ fn resolve_rhs_function_call<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
-                return resolved;
+                return ResolvedType::from_classes_with_hint(resolved, &ret);
             }
         }
 
@@ -1070,7 +1224,15 @@ fn resolve_rhs_function_call<'b>(
                     class_loader,
                 );
                 if !resolved.is_empty() {
-                    return resolved;
+                    return ResolvedType::from_classes_with_hint(resolved, ret);
+                }
+                // When type_hint_to_classes can't resolve the return
+                // type (e.g. `Item[]` where the `[]` suffix prevents
+                // class lookup), emit a type-string-only entry so that
+                // callers like foreach resolution can still extract the
+                // element type via `extract_generic_value_type`.
+                if !ret.is_empty() {
+                    return vec![ResolvedType::from_type_string(ret.clone())];
                 }
             }
         }
@@ -1098,13 +1260,14 @@ fn resolve_rhs_function_call<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
-                return resolved;
+                return ResolvedType::from_classes_with_hint(resolved, &ret_type);
             }
         }
 
-        let callee_classes = resolve_rhs_expression(callee_expr, ctx);
-        for owner in &callee_classes {
-            if let Some(invoke) = owner.methods.iter().find(|m| m.name == "__invoke")
+        let callee_results = resolve_rhs_expression(callee_expr, ctx);
+        for rt in &callee_results {
+            if let Some(ref owner_cls) = rt.class_info
+                && let Some(invoke) = owner_cls.methods.iter().find(|m| m.name == "__invoke")
                 && let Some(ref ret) = invoke.return_type
             {
                 let resolved = crate::completion::type_resolution::type_hint_to_classes(
@@ -1114,7 +1277,10 @@ fn resolve_rhs_function_call<'b>(
                     class_loader,
                 );
                 if !resolved.is_empty() {
-                    return resolved;
+                    return ResolvedType::from_classes_with_hint(resolved, ret);
+                }
+                if !ret.is_empty() {
+                    return vec![ResolvedType::from_type_string(ret.clone())];
                 }
             }
         }
@@ -1135,7 +1301,7 @@ fn resolve_rhs_method_call_inner<'b>(
     method: &'b ClassLikeMemberSelector<'b>,
     argument_list: &'b ArgumentList<'b>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     let method_name = match method {
         ClassLikeMemberSelector::Identifier(ident) => ident.value.to_string(),
         // Variable method name (`$obj->$method()`) — can't resolve statically.
@@ -1165,7 +1331,7 @@ fn resolve_rhs_method_call_inner<'b>(
         // Handle non-variable object expressions like
         // `(new Factory())->create()`, `getService()->method()`,
         // or chained calls by recursively resolving the expression.
-        resolve_rhs_expression(object, ctx)
+        ResolvedType::into_classes(resolve_rhs_expression(object, ctx))
     };
 
     let text_args = super::raw_type_inference::extract_argument_text(argument_list, ctx.content);
@@ -1185,6 +1351,27 @@ fn resolve_rhs_method_call_inner<'b>(
             var_resolver: Some(&var_resolver),
             cache: ctx.resolved_class_cache,
         };
+        // Recover the effective return type string from the method.
+        // Look up the method on the (possibly merged) owner and apply
+        // the same template substitution that
+        // `resolve_method_return_types_with_args` used internally,
+        // then replace `static`/`self`/`$this` with the owner class
+        // name so that e.g. `static[]` becomes `Country[]`.
+        let merged = crate::virtual_members::resolve_class_fully(owner, ctx.class_loader);
+        let ret_type_string = merged
+            .methods
+            .iter()
+            .find(|m| m.name == method_name)
+            .and_then(|m| m.return_type.as_ref())
+            .map(|ret| {
+                let substituted = if !template_subs.is_empty() {
+                    crate::inheritance::apply_substitution(ret, &template_subs).into_owned()
+                } else {
+                    ret.clone()
+                };
+                docblock::type_strings::replace_self_in_type(&substituted, &owner.name)
+            });
+
         let results = Backend::resolve_method_return_types_with_args(
             owner,
             &method_name,
@@ -1192,7 +1379,36 @@ fn resolve_rhs_method_call_inner<'b>(
             &mr_ctx,
         );
         if !results.is_empty() {
-            return results.into_iter().map(Arc::unwrap_or_clone).collect();
+            let classes: Vec<ClassInfo> = results.into_iter().map(Arc::unwrap_or_clone).collect();
+            return match ret_type_string {
+                Some(ref hint) => ResolvedType::from_classes_with_hint(classes, hint),
+                None => ResolvedType::from_classes(classes),
+            };
+        }
+
+        // The method has a return type string but `type_hint_to_classes`
+        // found no matching class (e.g. `list<Widget>`, `int`,
+        // `array{name: string}`).  Return a type-string-only entry so
+        // that consumers reading `.type_string` (hover, foreach
+        // resolution, null-coalesce stripping) still get the information.
+        //
+        // Skip non-informative types (`array`, `mixed`, `void`, etc.)
+        // so that downstream handlers can provide more precise
+        // information.  Also expand type aliases before the check so
+        // that `@phpstan-type UserList array<int, User>` with
+        // `@return UserList` is recognized as informative.
+        if let Some(ref hint) = ret_type_string {
+            // Try expanding type aliases (e.g. `UserList` → `array<int, User>`).
+            let expanded = crate::completion::type_resolution::resolve_type_alias(
+                hint,
+                &owner.name,
+                ctx.all_classes,
+                ctx.class_loader,
+            );
+            let effective = expanded.as_deref().unwrap_or(hint);
+            if is_informative_type_string(effective) {
+                return vec![ResolvedType::from_type_string(effective.to_string())];
+            }
         }
     }
     vec![]
@@ -1203,7 +1419,7 @@ fn resolve_rhs_method_call_inner<'b>(
 fn resolve_rhs_static_call(
     static_call: &StaticMethodCall<'_>,
     ctx: &VarResolutionCtx<'_>,
-) -> Vec<ClassInfo> {
+) -> Vec<ResolvedType> {
     let current_class_name: &str = &ctx.current_class.name;
 
     let class_name = match static_call.class {
@@ -1255,25 +1471,105 @@ fn resolve_rhs_static_call(
                 var_resolver: Some(&var_resolver),
                 cache: ctx.resolved_class_cache,
             };
-            return Backend::resolve_method_return_types_with_args(
+            // Recover the effective return type string from the method.
+            // Look up the method on the (possibly merged) owner and apply
+            // the same template substitution that
+            // `resolve_method_return_types_with_args` used internally,
+            // then replace `static`/`self`/`$this` with the owner class
+            // name so that e.g. `static[]` becomes `Country[]`.
+            let merged = crate::virtual_members::resolve_class_fully(owner, ctx.class_loader);
+            let ret_type_string = merged
+                .methods
+                .iter()
+                .find(|m| m.name == method_name)
+                .and_then(|m| m.return_type.as_ref())
+                .map(|ret| {
+                    let substituted = if !template_subs.is_empty() {
+                        crate::inheritance::apply_substitution(ret, &template_subs).into_owned()
+                    } else {
+                        ret.clone()
+                    };
+                    docblock::type_strings::replace_self_in_type(&substituted, &owner.name)
+                });
+
+            let results = Backend::resolve_method_return_types_with_args(
                 owner,
                 &method_name,
                 &text_args,
                 &mr_ctx,
-            )
-            .into_iter()
-            .map(Arc::unwrap_or_clone)
-            .collect();
+            );
+            if !results.is_empty() {
+                let classes: Vec<ClassInfo> =
+                    results.into_iter().map(Arc::unwrap_or_clone).collect();
+                return match ret_type_string {
+                    Some(ref hint) => ResolvedType::from_classes_with_hint(classes, hint),
+                    None => ResolvedType::from_classes(classes),
+                };
+            }
+
+            // The method has a return type string but `type_hint_to_classes`
+            // found no matching class (e.g. `list<Widget>`, `int`,
+            // `array{name: string}`).  Return a type-string-only entry so
+            // that consumers reading `.type_string` (hover, raw-type
+            // pipeline, null-coalesce stripping) still get the information.
+            if let Some(ref hint) = ret_type_string
+                && is_informative_type_string(hint)
+            {
+                return vec![ResolvedType::from_type_string(hint.clone())];
+            }
         }
     }
     vec![]
 }
 
 /// Resolve property access: `$this->prop`, `$obj->prop`, `$obj?->prop`.
-fn resolve_rhs_property_access(access: &Access<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ClassInfo> {
+fn resolve_rhs_property_access(
+    access: &Access<'_>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Vec<ResolvedType> {
     let current_class_name: &str = &ctx.current_class.name;
     let all_classes = ctx.all_classes;
     let class_loader = ctx.class_loader;
+
+    /// Resolve a property's type to `Vec<ResolvedType>`, preserving the
+    /// property's type hint string in each result.
+    ///
+    /// When the property type is a scalar (e.g. `string`, `int`) and
+    /// `type_hint_to_classes` returns no `ClassInfo`, a type-string-only
+    /// `ResolvedType` is produced so that the type information is not lost.
+    fn resolve_property_with_hint(
+        prop_name: &str,
+        owner: &ClassInfo,
+        all_classes: &[Arc<ClassInfo>],
+        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+    ) -> Vec<ResolvedType> {
+        // Get the type hint string before resolving to ClassInfo.
+        let type_hint =
+            crate::inheritance::resolve_property_type_hint(owner, prop_name, class_loader);
+        let resolved = crate::completion::type_resolution::resolve_property_types(
+            prop_name,
+            owner,
+            all_classes,
+            class_loader,
+        );
+        if resolved.is_empty() {
+            // The property has a type hint but `type_hint_to_classes`
+            // found no matching class (e.g. `list<Widget>`, `int`,
+            // `array{name: string}`).  Return a type-string-only
+            // entry when the type is informative (carries generics,
+            // shapes, or names a non-scalar class).
+            return match type_hint {
+                Some(hint) if is_informative_type_string(&hint) => {
+                    vec![ResolvedType::from_type_string(hint)]
+                }
+                _ => vec![],
+            };
+        }
+        match type_hint {
+            Some(ref hint) => ResolvedType::from_classes_with_hint(resolved, hint),
+            None => ResolvedType::from_classes(resolved),
+        }
+    }
 
     // ── Class constant / enum case access: `Foo::BAR` ──
     // When the RHS is a class constant access, resolve the class and
@@ -1306,7 +1602,7 @@ fn resolve_rhs_property_access(access: &Access<'_>, ctx: &VarResolutionCtx<'_>) 
                     // result type is the enum class itself.
                     if let Some(c) = cls.constants.iter().find(|c| c.name == const_name) {
                         if c.is_enum_case {
-                            return target_classes;
+                            return ResolvedType::from_classes(target_classes);
                         }
                         // Typed class constant — resolve via type_hint.
                         if let Some(ref th) = c.type_hint {
@@ -1317,7 +1613,7 @@ fn resolve_rhs_property_access(access: &Access<'_>, ctx: &VarResolutionCtx<'_>) 
                                 class_loader,
                             );
                             if !resolved.is_empty() {
-                                return resolved;
+                                return ResolvedType::from_classes_with_hint(resolved, th);
                             }
                         }
                     }
@@ -1365,16 +1661,12 @@ fn resolve_rhs_property_access(access: &Access<'_>, ctx: &VarResolutionCtx<'_>) 
                 // `(new Canvas())->easel`, `getService()->prop`,
                 // or `SomeClass::make()->prop` by recursively
                 // resolving the expression type.
-                resolve_rhs_expression(obj, ctx)
+                ResolvedType::into_classes(resolve_rhs_expression(obj, ctx))
             };
 
             for owner in &owner_classes {
-                let resolved = crate::completion::type_resolution::resolve_property_types(
-                    &prop_name,
-                    owner,
-                    all_classes,
-                    class_loader,
-                );
+                let resolved =
+                    resolve_property_with_hint(&prop_name, owner, all_classes, class_loader);
                 if !resolved.is_empty() {
                     return resolved;
                 }
@@ -1384,6 +1676,51 @@ fn resolve_rhs_property_access(access: &Access<'_>, ctx: &VarResolutionCtx<'_>) 
     vec![]
 }
 
+/// Whether a type string carries enough information to be worth
+/// returning as a type-string-only `ResolvedType`.
+///
+/// Bare scalars (`int`, `string`, `bool`, etc.) and uninformative
+/// base types (`array`, `mixed`, `void`, `object`, `iterable`) are
+/// considered **not** informative — returning them from the unified
+/// resolver would mask more precise results from the raw-type
+/// pipeline's specialised handlers (e.g. `resolve_array_func_raw_type`
+/// which tracks element types through `array_filter`).
+///
+/// Types that carry generic or shape information (`list<User>`,
+/// `array{name: string}`, `Collection<int, Foo>`) ARE informative
+/// because the raw-type pipeline cannot reconstruct the parametric
+/// detail.
+pub(in crate::completion) fn is_informative_type_string(ts: &str) -> bool {
+    // Contains generic params or shape braces → informative.
+    if ts.contains('<') || ts.contains('{') {
+        return true;
+    }
+    // `Type[]` shorthand carries element type info.
+    if ts.ends_with("[]") {
+        return true;
+    }
+    // Union types that contain at least one non-informative part are
+    // still informative if ANY part is informative.
+    if ts.contains('|') {
+        return ts
+            .split('|')
+            .any(|part| !part.trim().is_empty() && is_informative_type_string(part.trim()));
+    }
+    // Non-informative base types: these are either too vague for the
+    // unified resolver to carry useful information, or have specialised
+    // handlers in the raw-type pipeline that can produce more precise
+    // results (e.g. `array_filter` returning `array` → the raw pipeline
+    // can track the input element type).
+    //
+    // Concrete scalar types (`int`, `string`, `bool`, `float`, etc.)
+    // ARE informative — there is no specialised handler that can
+    // produce a more specific result for them.
+    !matches!(
+        ts,
+        "array" | "mixed" | "object" | "void" | "null" | "self" | "static" | "$this"
+    )
+}
+
 /// Resolve `clone $expr` — preserves the cloned expression's type.
 ///
 /// First tries resolving the inner expression structurally (handles
@@ -1391,7 +1728,7 @@ fn resolve_rhs_property_access(access: &Access<'_>, ctx: &VarResolutionCtx<'_>) 
 /// If that yields nothing, falls back to text-based resolution by
 /// extracting the source text of the cloned expression and resolving
 /// it as a subject string via `resolve_target_classes`.
-fn resolve_rhs_clone(clone_expr: &Clone<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ClassInfo> {
+fn resolve_rhs_clone(clone_expr: &Clone<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<ResolvedType> {
     let structural = resolve_rhs_expression(clone_expr.object, ctx);
     if !structural.is_empty() {
         return structural;
@@ -1413,7 +1750,7 @@ fn resolve_rhs_clone(clone_expr: &Clone<'_>, ctx: &VarResolutionCtx<'_>) -> Vec<
                 &rctx,
             )
             .into_iter()
-            .map(Arc::unwrap_or_clone)
+            .map(|arc| ResolvedType::from_class(Arc::unwrap_or_clone(arc)))
             .collect();
         }
     }

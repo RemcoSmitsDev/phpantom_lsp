@@ -19,7 +19,7 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::diagnostics::offset_range_to_lsp_range;
 use crate::symbol_map::SymbolKind;
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 use crate::virtual_members::resolve_class_fully_cached;
 
 /// File-level context needed for subject resolution.
@@ -559,14 +559,16 @@ fn resolve_subject_to_class(
             let class_loader =
                 backend.class_loader_with(ctx.local_classes, ctx.use_map, ctx.namespace);
 
-            let results = crate::completion::variable::resolution::resolve_variable_types(
-                trimmed,
-                &enclosing_class,
-                ctx.local_classes,
-                content,
-                access_offset,
-                &class_loader,
-                Some(&function_loader),
+            let results = ResolvedType::into_classes(
+                crate::completion::variable::resolution::resolve_variable_types(
+                    trimmed,
+                    &enclosing_class,
+                    ctx.local_classes,
+                    content,
+                    access_offset,
+                    &class_loader,
+                    Some(&function_loader),
+                ),
             );
 
             results.into_iter().next()

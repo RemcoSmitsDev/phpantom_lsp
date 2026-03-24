@@ -11,15 +11,33 @@ use mago_syntax::ast::*;
 ///     or array shape type annotation.
 ///
 /// These functions are self-contained: they receive a [`VarResolutionCtx`]
-/// and push resolved [`ClassInfo`] values into a results vector.  They were
+/// and push resolved [`ResolvedType`] values into a results vector.  They were
 /// extracted from `variable_resolution.rs` to improve navigability.
 use std::sync::Arc;
 
 use crate::docblock;
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 use crate::util::short_name;
 
 use crate::completion::resolver::VarResolutionCtx;
+
+/// Resolve an expression's type string via the unified pipeline.
+///
+/// Wraps `resolve_rhs_expression` + `type_strings_joined` into a single
+/// `Option<String>` suitable for callers that previously used
+/// `extract_rhs_iterable_raw_type`.  Returns `None` when the unified
+/// pipeline produces no results or an empty type string.
+pub(in crate::completion) fn resolve_expression_type_string<'b>(
+    expr: &'b mago_syntax::ast::Expression<'b>,
+    ctx: &VarResolutionCtx<'_>,
+) -> Option<String> {
+    let resolved = super::rhs_resolution::resolve_rhs_expression(expr, ctx);
+    if resolved.is_empty() {
+        return None;
+    }
+    let ts = ResolvedType::type_strings_joined(&resolved);
+    if ts.is_empty() { None } else { Some(ts) }
+}
 
 // ─── Foreach Resolution ─────────────────────────────────────────────
 
@@ -30,12 +48,12 @@ use crate::completion::resolver::VarResolutionCtx;
 /// foreach value variable and the iterated expression is a simple
 /// `$variable` whose type is annotated as a generic iterable (via
 /// `@var list<User> $var` or `@param list<User> $var`), this function
-/// extracts the element type and pushes the resolved `ClassInfo` into
+/// extracts the element type and pushes the resolved `ResolvedType` into
 /// `results`.
 pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     foreach: &'b Foreach<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     // Check if the foreach value variable is the one we're resolving.
@@ -74,24 +92,26 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
                 ctx.class_loader,
             );
             if !resolved.is_empty() {
-                for cls in resolved {
-                    if conditional {
-                        if !results.iter().any(|r| r.name == cls.name) {
-                            results.push(cls);
-                        }
-                    } else {
-                        results.push(cls);
-                    }
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &var_type);
+                if conditional {
+                    ResolvedType::extend_unique(results, resolved_types);
+                } else {
+                    results.clear();
+                    ResolvedType::extend_unique(results, resolved_types);
                 }
                 return;
             }
         }
     }
 
-    // Try to extract the raw iterable type from the foreach expression.
-    // `extract_rhs_iterable_raw_type` handles method calls, static
-    // calls, property access, function calls, and simple variables.
-    let raw_type = extract_rhs_iterable_raw_type(foreach.expression, ctx)
+    // Try to resolve the iterable type from the foreach expression
+    // via the unified pipeline.  Filter out bare class names (no
+    // generics, array suffix, or shape) so that the class-based
+    // fallback can resolve generics through @implements / @extends
+    // annotations (e.g. `Collection` → `Collection<int, Customer>`
+    // via closure parameter inference).
+    let raw_type = resolve_expression_type_string(foreach.expression, ctx)
+        .filter(|ts| ts.contains('<') || ts.contains('[') || ts.contains('{'))
         .or_else(|| {
             // Fallback 1: for simple `$variable` expressions, search backward
             // from the foreach for @var or @param annotations.
@@ -123,15 +143,29 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
             }
 
             let foreach_offset = foreach.foreach.span().start.offset;
-            super::raw_type_inference::resolve_variable_assignment_raw_type(
+            let resolved = super::resolution::resolve_variable_types(
                 expr_text,
+                ctx.current_class,
+                ctx.all_classes,
                 ctx.content,
                 foreach_offset,
-                Some(ctx.current_class),
-                ctx.all_classes,
                 ctx.class_loader,
                 ctx.function_loader,
-            )
+            );
+            if resolved.is_empty() {
+                None
+            } else {
+                let ts = ResolvedType::type_strings_joined(&resolved);
+                // If the resolved type is a bare class name (no generics,
+                // array suffix, or shape), return None so that the
+                // class-based fallback can resolve generics through
+                // @implements / @extends annotations.
+                if !ts.contains('<') && !ts.contains('[') && !ts.contains('{') {
+                    None
+                } else {
+                    Some(ts)
+                }
+            }
         });
 
     // ── Expand type aliases before extracting generic element type ──
@@ -208,7 +242,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
 /// `$variable` whose type is annotated as a two-parameter generic
 /// iterable (via `@var array<Request, Response> $var` or similar),
 /// this function extracts the key type and pushes the resolved
-/// `ClassInfo` into `results`.
+/// `ResolvedType` into `results`.
 ///
 /// For common scalar key types (`int`, `string`), no `ClassInfo` is
 /// produced — which is correct because scalars have no members to
@@ -216,7 +250,7 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
 pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     foreach: &'b Foreach<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     // Check if the foreach has a key variable and if it matches what
@@ -233,10 +267,11 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
         return;
     }
 
-    // Try to extract the raw iterable type from the foreach expression.
-    // `extract_rhs_iterable_raw_type` handles method calls, static
-    // calls, property access, function calls, and simple variables.
-    let raw_type = extract_rhs_iterable_raw_type(foreach.expression, ctx)
+    // Try to resolve the iterable type from the foreach expression
+    // via the unified pipeline.  Same bare-class-name filter as the
+    // value-type path above.
+    let raw_type = resolve_expression_type_string(foreach.expression, ctx)
+        .filter(|ts| ts.contains('<') || ts.contains('[') || ts.contains('{'))
         .or_else(|| {
             // Fallback 1: for simple `$variable` expressions, search backward
             // from the foreach for @var or @param annotations.
@@ -268,15 +303,29 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
             }
 
             let foreach_offset = foreach.foreach.span().start.offset;
-            super::raw_type_inference::resolve_variable_assignment_raw_type(
+            let resolved = super::resolution::resolve_variable_types(
                 expr_text,
+                ctx.current_class,
+                ctx.all_classes,
                 ctx.content,
                 foreach_offset,
-                Some(ctx.current_class),
-                ctx.all_classes,
                 ctx.class_loader,
                 ctx.function_loader,
-            )
+            );
+            if resolved.is_empty() {
+                None
+            } else {
+                let ts = ResolvedType::type_strings_joined(&resolved);
+                // If the resolved type is a bare class name (no generics,
+                // array suffix, or shape), return None so that the
+                // class-based fallback can resolve generics through
+                // @implements / @extends annotations.
+                if !ts.contains('<') && !ts.contains('[') && !ts.contains('{') {
+                    None
+                } else {
+                    Some(ts)
+                }
+            }
         });
 
     // ── Expand type aliases before extracting generic key type ──
@@ -334,11 +383,11 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
 /// Push resolved foreach element types into the results list.
 ///
 /// Shared by both value and key foreach resolution paths: resolves a
-/// type string to `ClassInfo`(s) and merges them into `results`.
+/// type string to `ResolvedType`(s) and merges them into `results`.
 fn push_foreach_resolved_types(
     type_str: &str,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     let resolved = crate::completion::type_resolution::type_hint_to_classes(
@@ -352,14 +401,11 @@ fn push_foreach_resolved_types(
         return;
     }
 
+    let resolved_types = ResolvedType::from_classes_with_hint(resolved, type_str);
     if !conditional {
         results.clear();
     }
-    for cls in resolved {
-        if !results.iter().any(|c| c.name == cls.name) {
-            results.push(cls);
-        }
-    }
+    ResolvedType::extend_unique(results, resolved_types);
 }
 
 /// Resolve the foreach iterated expression to `ClassInfo`(s).
@@ -567,7 +613,7 @@ fn is_transitive_iterable(
 pub(in crate::completion) fn try_resolve_destructured_type<'b>(
     assignment: &'b Assignment<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     conditional: bool,
 ) {
     // ── 1. Collect the elements from the LHS ────────────────────────
@@ -641,14 +687,11 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &entry_type);
                 if !conditional {
                     results.clear();
                 }
-                for cls in resolved {
-                    if !results.iter().any(|c| c.name == cls.name) {
-                        results.push(cls);
-                    }
-                }
+                ResolvedType::extend_unique(results, resolved_types);
                 return;
             }
         }
@@ -661,21 +704,18 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &element_type);
                 if !conditional {
                     results.clear();
                 }
-                for cls in resolved {
-                    if !results.iter().any(|c| c.name == cls.name) {
-                        results.push(cls);
-                    }
-                }
+                ResolvedType::extend_unique(results, resolved_types);
                 return;
             }
         }
     }
 
-    // ── 4. Try to extract the raw iterable type from the RHS ────────
-    let raw_type: Option<String> = extract_rhs_iterable_raw_type(assignment.rhs, ctx);
+    // ── 4. Try to resolve the iterable type from the RHS ────────────
+    let raw_type: Option<String> = resolve_expression_type_string(assignment.rhs, ctx);
 
     // ── Expand type aliases before shape/generic extraction ─────────
     // Same as the foreach value/key paths: when the raw type is a type
@@ -704,14 +744,11 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &entry_type);
                 if !conditional {
                     results.clear();
                 }
-                for cls in resolved {
-                    if !results.iter().any(|c| c.name == cls.name) {
-                        results.push(cls);
-                    }
-                }
+                ResolvedType::extend_unique(results, resolved_types);
                 return;
             }
         }
@@ -725,14 +762,11 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
                 class_loader,
             );
             if !resolved.is_empty() {
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &element_type);
                 if !conditional {
                     results.clear();
                 }
-                for cls in resolved {
-                    if !results.iter().any(|c| c.name == cls.name) {
-                        results.push(cls);
-                    }
-                }
+                ResolvedType::extend_unique(results, resolved_types);
             }
         }
     }
@@ -759,234 +793,4 @@ fn extract_destructuring_key(key_expr: &Expression<'_>) -> Option<String> {
         Expression::Literal(Literal::Integer(lit_int)) => Some(lit_int.raw.to_string()),
         _ => None,
     }
-}
-
-// ─── Shared: RHS Iterable Type Extraction ───────────────────────────
-
-/// Extract the raw iterable type string from an RHS expression.
-///
-/// Returns the type annotation string (e.g. `"array<int, User>"`,
-/// `"list<User>"`) without resolving it to `ClassInfo`.  The caller
-/// can then use `extract_generic_value_type` to get the element type.
-///
-/// Used by both foreach resolution and destructuring resolution, as
-/// well as `resolve_arg_raw_type` in `variable_resolution.rs`.
-pub(in crate::completion) fn extract_rhs_iterable_raw_type<'b>(
-    rhs: &'b Expression<'b>,
-    ctx: &VarResolutionCtx<'_>,
-) -> Option<String> {
-    let current_class_name: &str = &ctx.current_class.name;
-    let all_classes = ctx.all_classes;
-    let content = ctx.content;
-    let class_loader = ctx.class_loader;
-    let function_loader = ctx.function_loader;
-
-    // ── Variable RHS: `[$a, $b] = $users` ──────────────────────────
-    if let Expression::Variable(Variable::Direct(dv)) = rhs {
-        let var_text = dv.name.to_string();
-        let offset = rhs.span().start.offset as usize;
-        return docblock::find_iterable_raw_type_in_source(content, offset, &var_text);
-    }
-
-    // ── Function call RHS: `[$a, $b] = getUsers()` ─────────────────
-    if let Expression::Call(Call::Function(func_call)) = rhs {
-        let func_name = match func_call.function {
-            Expression::Identifier(ident) => Some(ident.value().to_string()),
-            _ => None,
-        };
-        if let Some(ref name) = func_name {
-            // Check for known array functions that preserve element type.
-            if let Some(raw) = super::raw_type_inference::resolve_array_func_raw_type(
-                name,
-                &func_call.argument_list,
-                ctx,
-            ) {
-                return Some(raw);
-            }
-        }
-        if let Some(name) = func_name
-            && let Some(fl) = function_loader
-            && let Some(func_info) = fl(&name)
-            && let Some(ref ret) = func_info.return_type
-        {
-            return Some(ret.clone());
-        }
-
-        // ── Variable / expression invocation: $fn() or ($this->foo)()
-        // Resolve the callee to classes and check for __invoke().
-        let callee_expr = match func_call.function {
-            Expression::Parenthesized(p) => p.expression,
-            other => other,
-        };
-        let callee_classes = if let Expression::Variable(Variable::Direct(dv)) = callee_expr {
-            let var = dv.name.to_string();
-            crate::completion::resolver::resolve_target_classes(
-                &var,
-                crate::types::AccessKind::Arrow,
-                &ctx.as_resolution_ctx(),
-            )
-            .into_iter()
-            .map(Arc::unwrap_or_clone)
-            .collect()
-        } else {
-            super::rhs_resolution::resolve_rhs_expression(callee_expr, ctx)
-        };
-        for cls in &callee_classes {
-            if let Some(invoke) = cls.methods.iter().find(|m| m.name == "__invoke")
-                && let Some(ref ret) = invoke.return_type
-            {
-                return Some(ret.clone());
-            }
-        }
-    }
-
-    // ── Method call RHS: `[$a, $b] = $this->getUsers()` ────────────
-    if let Expression::Call(Call::Method(method_call)) = rhs {
-        let method_name = match &method_call.method {
-            ClassLikeMemberSelector::Identifier(ident) => ident.value.to_string(),
-            // Variable method name (`$obj->$method()`) — can't resolve statically.
-            _ => return None,
-        };
-
-        // Resolve the object expression to candidate owner classes.
-        let owner_classes: Vec<ClassInfo> = if let Expression::Variable(Variable::Direct(dv)) =
-            method_call.object
-            && dv.name == "$this"
-        {
-            all_classes
-                .iter()
-                .find(|c| c.name == current_class_name)
-                .map(|c| ClassInfo::clone(c))
-                .into_iter()
-                .collect()
-        } else if let Expression::Variable(Variable::Direct(dv)) = method_call.object {
-            let var = dv.name.to_string();
-            crate::completion::resolver::resolve_target_classes(
-                &var,
-                crate::types::AccessKind::Arrow,
-                &ctx.as_resolution_ctx(),
-            )
-            .into_iter()
-            .map(Arc::unwrap_or_clone)
-            .collect()
-        } else {
-            // Handle non-variable object expressions (chained calls,
-            // `new` expressions, etc.) by extracting the object's
-            // source text and resolving it as a subject string.
-            let obj_span = method_call.object.span();
-            let start = obj_span.start.offset as usize;
-            let end = obj_span.end.offset as usize;
-            if end <= content.len() {
-                let obj_text = content[start..end].trim();
-                crate::completion::resolver::resolve_target_classes(
-                    obj_text,
-                    crate::types::AccessKind::Arrow,
-                    &ctx.as_resolution_ctx(),
-                )
-                .into_iter()
-                .map(Arc::unwrap_or_clone)
-                .collect()
-            } else {
-                vec![]
-            }
-        };
-
-        for cls in &owner_classes {
-            if let Some(rt) =
-                crate::inheritance::resolve_method_return_type(cls, &method_name, class_loader)
-            {
-                // Replace `static`/`self`/`$this` with the owner class
-                // name so that return types like `static[]` resolve to
-                // `OwnerClass[]` rather than the *enclosing* class.
-                let rt = docblock::type_strings::replace_self_in_type(&rt, &cls.name);
-                return Some(rt);
-            }
-        }
-    }
-
-    // ── Static method call RHS: `[$a, $b] = MyClass::getUsers()` ───
-    if let Expression::Call(Call::StaticMethod(static_call)) = rhs {
-        let class_name = match static_call.class {
-            Expression::Self_(_) => Some(current_class_name.to_string()),
-            Expression::Static(_) => Some(current_class_name.to_string()),
-            Expression::Identifier(ident) => Some(ident.value().to_string()),
-            _ => None,
-        };
-        if let Some(cls_name) = class_name
-            && let ClassLikeMemberSelector::Identifier(ident) = &static_call.method
-        {
-            let method_name = ident.value.to_string();
-            let owner = all_classes
-                .iter()
-                .find(|c| c.name == cls_name)
-                .map(|c| ClassInfo::clone(c))
-                .or_else(|| class_loader(&cls_name).map(Arc::unwrap_or_clone));
-            if let Some(ref owner) = owner
-                && let Some(rt) = crate::inheritance::resolve_method_return_type(
-                    owner,
-                    &method_name,
-                    class_loader,
-                )
-            {
-                // Replace `static`/`self`/`$this` with the owner class
-                // name so that return types like `static[]` resolve to
-                // `OwnerClass[]` rather than the *enclosing* class.
-                let rt = docblock::type_strings::replace_self_in_type(&rt, &owner.name);
-                return Some(rt);
-            }
-        }
-    }
-
-    // ── Property access RHS: `[$a, $b] = $this->items` ─────────────
-    if let Expression::Access(access) = rhs {
-        let (object_expr, prop_selector) = match access {
-            Access::Property(pa) => (Some(pa.object), Some(&pa.property)),
-            Access::NullSafeProperty(pa) => (Some(pa.object), Some(&pa.property)),
-            _ => (None, None),
-        };
-        if let Some(obj) = object_expr
-            && let Some(sel) = prop_selector
-        {
-            let prop_name = match sel {
-                ClassLikeMemberSelector::Identifier(ident) => Some(ident.value.to_string()),
-                _ => None,
-            };
-            if let Some(prop_name) = prop_name {
-                let owner_classes: Vec<ClassInfo> =
-                    if let Expression::Variable(Variable::Direct(dv)) = obj
-                        && dv.name == "$this"
-                    {
-                        all_classes
-                            .iter()
-                            .find(|c| c.name == current_class_name)
-                            .map(|c| ClassInfo::clone(c))
-                            .into_iter()
-                            .collect()
-                    } else if let Expression::Variable(Variable::Direct(dv)) = obj {
-                        let var = dv.name.to_string();
-                        crate::completion::resolver::resolve_target_classes(
-                            &var,
-                            crate::types::AccessKind::Arrow,
-                            &ctx.as_resolution_ctx(),
-                        )
-                        .into_iter()
-                        .map(Arc::unwrap_or_clone)
-                        .collect()
-                    } else {
-                        vec![]
-                    };
-                for owner in &owner_classes {
-                    if let Some(hint) = crate::inheritance::resolve_property_type_hint(
-                        owner,
-                        &prop_name,
-                        class_loader,
-                    ) {
-                        return Some(hint);
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }

@@ -231,25 +231,21 @@ pub(in crate::completion) fn extract_first_class_callable_return_type(
             current_class.cloned()
         } else if lhs.starts_with('$') {
             // Bare variable LHS like `$factory->create(...)`.
-            // Resolve the variable's type via the AST walker.
-            crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type(
+            // Resolve the variable's type via the unified pipeline.
+            let default_class = ClassInfo::default();
+            let effective_class = current_class.unwrap_or(&default_class);
+            let resolved = crate::completion::variable::resolution::resolve_variable_types(
                 lhs,
+                effective_class,
+                all_classes,
                 content,
                 cursor_offset,
-                current_class,
-                all_classes,
                 class_loader,
                 function_loader,
-            )
-            .and_then(|raw| {
-                let clean = crate::docblock::types::clean_type(&raw);
-                let lookup = short_name(&clean);
-                all_classes
-                    .iter()
-                    .find(|c| c.name == lookup)
-                    .map(|c| ClassInfo::clone(c))
-                    .or_else(|| class_loader(&clean).map(Arc::unwrap_or_clone))
-            })
+            );
+            crate::types::ResolvedType::into_classes(resolved)
+                .into_iter()
+                .next()
         } else {
             // Non-variable LHS (e.g. chained call) — delegate to
             // the general-purpose text resolver.

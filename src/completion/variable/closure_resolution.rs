@@ -62,7 +62,7 @@ thread_local! {
 use crate::docblock::replace_self_in_type;
 use crate::parser::extract_hint_string;
 use crate::parser::with_parsed_program;
-use crate::types::{AccessKind, ClassInfo, FunctionInfo, MethodInfo};
+use crate::types::{AccessKind, ClassInfo, FunctionInfo, MethodInfo, ResolvedType};
 
 use crate::completion::resolver::VarResolutionCtx;
 
@@ -622,7 +622,7 @@ fn resolve_closure_this_type(
 pub(in crate::completion) fn try_resolve_in_closure_stmt<'b>(
     stmt: &'b Statement<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) -> bool {
     match stmt {
         Statement::Expression(expr_stmt) => {
@@ -765,7 +765,7 @@ pub(in crate::completion) fn try_resolve_in_closure_stmt<'b>(
 pub(in crate::completion) fn try_resolve_in_closure_expr<'b>(
     expr: &'b Expression<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) -> bool {
     // Quick span-based prune: if the cursor is not within this
     // expression at all, skip the entire sub-tree.
@@ -925,7 +925,7 @@ pub(in crate::completion) fn try_resolve_in_closure_expr<'b>(
 fn try_resolve_in_closure_call<'b>(
     call: &'b Call<'b>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) -> bool {
     match call {
         Call::Function(fc) => {
@@ -1026,7 +1026,7 @@ fn try_resolve_in_closure_call<'b>(
 fn try_resolve_in_closure_args<'b>(
     arguments: &'b TokenSeparatedSequence<'b, Argument<'b>>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) -> bool {
     for arg in arguments.iter() {
         let arg_expr = match arg {
@@ -1050,7 +1050,7 @@ fn try_resolve_in_closure_args<'b>(
 fn try_resolve_closure_in_call_args<'b, F>(
     arguments: &'b TokenSeparatedSequence<'b, Argument<'b>>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     infer_fn: F,
 ) -> bool
 where
@@ -1142,7 +1142,7 @@ where
 pub(in crate::completion) fn resolve_closure_params(
     parameter_list: &FunctionLikeParameterList<'_>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
 ) {
     resolve_closure_params_with_inferred(parameter_list, ctx, results, &[]);
 }
@@ -1155,7 +1155,7 @@ pub(in crate::completion) fn resolve_closure_params(
 fn resolve_closure_params_with_inferred(
     parameter_list: &FunctionLikeParameterList<'_>,
     ctx: &VarResolutionCtx<'_>,
-    results: &mut Vec<ClassInfo>,
+    results: &mut Vec<ResolvedType>,
     inferred_types: &[String],
 ) {
     for (idx, param) in parameter_list.parameters.iter().enumerate() {
@@ -1184,18 +1184,18 @@ fn resolve_closure_params_with_inferred(
                         ctx.class_loader,
                     );
                     if !resolved.is_empty() {
-                        *results = resolved;
+                        *results = ResolvedType::from_classes(resolved);
                         break;
                     }
                 }
 
-                let resolved = crate::completion::type_resolution::type_hint_to_classes(
+                let resolved_classes = crate::completion::type_resolution::type_hint_to_classes(
                     &type_str,
                     &ctx.current_class.name,
                     ctx.all_classes,
                     ctx.class_loader,
                 );
-                if !resolved.is_empty() {
+                if !resolved_classes.is_empty() {
                     // When the inferred type from the callable signature
                     // is a subclass of the explicit type hint, prefer
                     // the inferred type.  For example, the user writes
@@ -1213,7 +1213,7 @@ fn resolve_closure_params_with_inferred(
                             );
                         if !inferred_resolved.is_empty()
                             && inferred_resolved.iter().all(|inferred_cls| {
-                                resolved.iter().any(|explicit_cls| {
+                                resolved_classes.iter().any(|explicit_cls| {
                                     crate::completion::types::narrowing::is_subtype_of(
                                         inferred_cls,
                                         &explicit_cls.name,
@@ -1222,13 +1222,45 @@ fn resolve_closure_params_with_inferred(
                                 })
                             })
                         {
-                            *results = inferred_resolved;
+                            *results = ResolvedType::from_classes(inferred_resolved);
                             break;
                         }
                     }
-                    *results = resolved;
+                    *results = ResolvedType::from_classes(resolved_classes);
                     break;
                 }
+
+                // The explicit hint didn't resolve to any class (e.g.
+                // `int $value`, `string $name`).  Check the `@param`
+                // docblock annotation which may carry a more specific
+                // type (e.g. `class-string<BackedEnum>` when the native
+                // hint is just `string`).
+                let param_start = parameter_list.left_parenthesis.start.offset as usize;
+                let docblock_type = crate::docblock::find_iterable_raw_type_in_source(
+                    ctx.content,
+                    param_start,
+                    ctx.var_name,
+                );
+                if let Some(ref dt) = docblock_type {
+                    let resolved = crate::completion::type_resolution::type_hint_to_classes(
+                        dt,
+                        &ctx.current_class.name,
+                        ctx.all_classes,
+                        ctx.class_loader,
+                    );
+                    if !resolved.is_empty() {
+                        *results = ResolvedType::from_classes_with_hint(resolved, dt);
+                        break;
+                    }
+                }
+
+                // Emit a type-string-only entry so that consumers like
+                // hover and diagnostics can see the parameter's type
+                // even when it's a scalar.  Prefer the docblock type
+                // over the native type when available.
+                let best_type = docblock_type.unwrap_or(type_str);
+                *results = vec![ResolvedType::from_type_string(best_type)];
+                break;
             }
             // 2. Fall back to the inferred type from the callable
             //    signature of the enclosing method/function call.
@@ -1240,7 +1272,7 @@ fn resolve_closure_params_with_inferred(
                     ctx.class_loader,
                 );
                 if !resolved.is_empty() {
-                    *results = resolved;
+                    *results = ResolvedType::from_classes(resolved);
                 }
             }
             break;

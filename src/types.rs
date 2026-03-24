@@ -1548,10 +1548,211 @@ impl ClassInfo {
     }
 }
 
+// ─── ResolvedType ───────────────────────────────────────────────────────────
+
+/// The result of resolving a single type reference.
+///
+/// Carries the full PHPStan-style type string (preserving generics,
+/// shapes, scalars, unions) alongside the resolved [`ClassInfo`] when
+/// the type names a class-like.  Consumers pick whichever
+/// representation they need without re-resolving.
+///
+/// This is the core type of the unified type resolution engine.
+/// Instead of maintaining parallel resolvers that return `Vec<ClassInfo>`
+/// (losing the type string) or `Option<String>` (losing the class info),
+/// every expression resolver returns `Vec<ResolvedType>` and each
+/// consumer reads the field it needs.
+#[derive(Clone, Debug)]
+pub struct ResolvedType {
+    /// Full type string, e.g. `"Collection<int, User>"`, `"int"`,
+    /// `"array{name: string}"`, `"Foo|Bar|null"`.
+    pub type_string: String,
+
+    /// Resolved class info, present when the base type names a
+    /// class/interface/trait/enum.  `None` for scalars, shapes
+    /// where the base is `array`, and unresolvable types.
+    pub class_info: Option<ClassInfo>,
+}
+
+impl ResolvedType {
+    /// Create a `ResolvedType` from a [`ClassInfo`], using its name as
+    /// the type string.
+    ///
+    /// Use this when the original type string is not available (e.g.
+    /// when a deep helper returns only `ClassInfo`).  The type string
+    /// will be the class name, which is correct for non-generic types
+    /// but loses generic parameters.  Future sprints will populate the
+    /// type string from the actual return type annotation.
+    pub fn from_class(class: ClassInfo) -> Self {
+        let type_string = class.name.clone();
+        Self {
+            type_string,
+            class_info: Some(class),
+        }
+    }
+
+    /// Create a `ResolvedType` from a type string with no associated
+    /// class info.
+    ///
+    /// Use this for scalar types (`"int"`, `"string"`), array shapes
+    /// (`"array{name: string}"`), and other non-class types.
+    pub fn from_type_string(type_string: impl Into<String>) -> Self {
+        Self {
+            type_string: type_string.into(),
+            class_info: None,
+        }
+    }
+
+    /// Create a `ResolvedType` carrying both a type string and a
+    /// [`ClassInfo`].
+    ///
+    /// Use this when the original type string is available (e.g. the
+    /// return type annotation of a method).  The type string preserves
+    /// generic parameters that would otherwise be lost when resolving
+    /// to `ClassInfo`.
+    pub fn from_both(type_string: impl Into<String>, class: ClassInfo) -> Self {
+        Self {
+            type_string: type_string.into(),
+            class_info: Some(class),
+        }
+    }
+
+    /// Extract just the class info, discarding the type string.
+    ///
+    /// Convenience method for callers that only need the `ClassInfo`
+    /// (e.g. the completion builder).
+    pub fn into_class_info(self) -> Option<ClassInfo> {
+        self.class_info
+    }
+
+    /// Push a `ResolvedType` into `results` only if no existing entry
+    /// shares the same class name (when both have class info) or the
+    /// same type string (when comparing non-class types).
+    pub(crate) fn push_unique(results: &mut Vec<ResolvedType>, rt: ResolvedType) {
+        let dominated =
+            results
+                .iter()
+                .any(|existing| match (&existing.class_info, &rt.class_info) {
+                    (Some(a), Some(b)) => a.name == b.name,
+                    (None, None) => existing.type_string == rt.type_string,
+                    _ => false,
+                });
+        if !dominated {
+            results.push(rt);
+        }
+    }
+
+    /// Extend `results` with entries from `new`, skipping duplicates.
+    pub(crate) fn extend_unique(results: &mut Vec<ResolvedType>, new: Vec<ResolvedType>) {
+        for rt in new {
+            Self::push_unique(results, rt);
+        }
+    }
+
+    /// Convert a `Vec<ClassInfo>` into `Vec<ResolvedType>`, using each
+    /// class's name as the type string.
+    ///
+    /// This is a migration helper for code paths that still produce
+    /// `Vec<ClassInfo>` internally (e.g. `type_hint_to_classes`).
+    /// Future sprints will populate proper type strings at the source.
+    pub(crate) fn from_classes(classes: Vec<ClassInfo>) -> Vec<ResolvedType> {
+        classes.into_iter().map(ResolvedType::from_class).collect()
+    }
+
+    /// Convert a `Vec<ClassInfo>` into `Vec<ResolvedType>`, preserving
+    /// the original type hint string.
+    ///
+    /// When exactly one class was resolved, the full `type_hint` is
+    /// attached (preserving generics like `"Collection<int, User>"`).
+    /// When multiple classes were resolved (union split by
+    /// `type_hint_to_classes`), each class uses its own name as the
+    /// type string because the hint was already split into parts.
+    pub(crate) fn from_classes_with_hint(
+        classes: Vec<ClassInfo>,
+        type_hint: &str,
+    ) -> Vec<ResolvedType> {
+        if classes.len() == 1 {
+            let class = classes.into_iter().next().unwrap();
+            vec![ResolvedType::from_both(type_hint, class)]
+        } else {
+            classes.into_iter().map(ResolvedType::from_class).collect()
+        }
+    }
+
+    /// Extract `Vec<ClassInfo>` from `Vec<ResolvedType>`, discarding
+    /// entries that have no class info.
+    ///
+    /// This is a migration helper for callers that currently expect
+    /// `Vec<ClassInfo>`.
+    pub(crate) fn into_classes(resolved: Vec<ResolvedType>) -> Vec<ClassInfo> {
+        resolved
+            .into_iter()
+            .filter_map(|rt| rt.class_info)
+            .collect()
+    }
+
+    /// Run a narrowing function that operates on `&mut Vec<ClassInfo>`
+    /// against a `Vec<ResolvedType>`, preserving type strings.
+    ///
+    /// Narrowing functions (instanceof, assert, custom type guards)
+    /// work on `ClassInfo` values — they add, remove, or replace
+    /// classes in the result set based on runtime type checks.  This
+    /// adapter extracts the `ClassInfo` layer, runs the narrowing
+    /// closure, then reconciles the `ResolvedType` vec:
+    ///
+    ///   - Entries whose class was removed by narrowing are dropped.
+    ///   - Entries that narrowing introduced (e.g. instanceof narrows
+    ///     to a new class) are added via `from_class`.
+    ///   - Non-class entries (scalars, shapes) are kept unchanged —
+    ///     narrowing never affects them.
+    pub(crate) fn apply_narrowing(
+        results: &mut Vec<ResolvedType>,
+        f: impl FnOnce(&mut Vec<ClassInfo>),
+    ) {
+        let mut classes: Vec<ClassInfo> = results
+            .iter()
+            .filter_map(|rt| rt.class_info.clone())
+            .collect();
+        f(&mut classes);
+
+        // Remove entries whose class was removed by narrowing.
+        // Compare by FQN (namespace + name) so that same-named classes
+        // from different namespaces (e.g. Contracts\Provider vs
+        // Concrete\Provider) are correctly distinguished.
+        results.retain(|rt| match &rt.class_info {
+            Some(c) => classes.iter().any(|nc| nc.fqn() == c.fqn()),
+            // Non-class entries (scalars, shapes) are never affected
+            // by narrowing — keep them.
+            None => true,
+        });
+
+        // Add entries that narrowing introduced (e.g. instanceof
+        // narrows to a new class that wasn't in the original set).
+        for cls in classes {
+            if !results
+                .iter()
+                .any(|rt| rt.class_info.as_ref().is_some_and(|c| c.fqn() == cls.fqn()))
+            {
+                results.push(ResolvedType::from_class(cls));
+            }
+        }
+    }
+
+    /// Join the type strings of all entries with `|`.
+    ///
+    /// Useful for hover display and other consumers that need a single
+    /// union type string from the resolved types.
+    pub(crate) fn type_strings_joined(resolved: &[ResolvedType]) -> String {
+        resolved
+            .iter()
+            .map(|rt| rt.type_string.as_str())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
 // ─── File Context ───────────────────────────────────────────────────────────
 
-/// Cached per-file context retrieved from the `Backend` maps.
-///
 /// Bundles the three pieces of file-level metadata that almost every
 /// handler needs: the parsed classes, the `use` statement import table,
 /// and the declared namespace.  Constructed by

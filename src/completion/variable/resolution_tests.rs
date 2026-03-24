@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::enrich_builder_type_in_scope;
 use crate::test_fixtures::make_class;
 
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 
 fn make_model(name: &str) -> ClassInfo {
     let mut class = make_class(name);
@@ -227,7 +227,7 @@ function test() {
     // meaningful line.  We need an offset inside `function test()`.
     let cursor_offset = content.find("$result->").unwrap() as u32 + 9; // after `->`
 
-    let results = super::resolve_variable_types(
+    let results = ResolvedType::into_classes(super::resolve_variable_types(
         "$result",
         &ClassInfo::default(),
         &all_classes,
@@ -235,7 +235,7 @@ function test() {
         cursor_offset,
         &class_loader,
         None,
-    );
+    ));
 
     let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();
     assert!(
@@ -362,8 +362,157 @@ function test() {
 
     let cursor_offset = content.find("$user->").unwrap() as u32 + 7;
 
-    let results = super::resolve_variable_types(
+    let results = ResolvedType::into_classes(super::resolve_variable_types(
         "$user",
+        &ClassInfo::default(),
+        &all_classes,
+        content,
+        cursor_offset,
+        &class_loader,
+        None,
+    ));
+
+    let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        names.contains(&"User"),
+        "$user should resolve to User via User::factory()->create(), got: {:?}",
+        names
+    );
+}
+
+// ── Shape tracking: incremental key assignments ─────────────────────
+
+/// `$data = []; $data['name'] = 'John'; $data['age'] = 42;`
+/// The unified pipeline should produce `array{name: string, age: int}`.
+#[test]
+fn resolve_var_shape_from_incremental_key_assignments() {
+    let content = r#"<?php
+function test() {
+    $data = [];
+    $data['name'] = 'John';
+    $data['age'] = 42;
+    $data['x']
+}
+"#;
+    let cursor_offset = content.find("$data['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$data",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    assert!(!results.is_empty(), "Should resolve $data to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
+    assert!(
+        ts.contains("name: string"),
+        "Shape should contain 'name: string', got: {ts}"
+    );
+    assert!(
+        ts.contains("age: int"),
+        "Shape should contain 'age: int', got: {ts}"
+    );
+}
+
+/// A base assignment followed by incremental keys should merge the
+/// shape keys into the base type.
+#[test]
+fn resolve_var_shape_merges_with_base_assignment() {
+    let content = r#"<?php
+function test() {
+    $config = ['host' => 'localhost'];
+    $config['port'] = 3306;
+    $config['x']
+}
+"#;
+    let cursor_offset = content.find("$config['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$config",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    assert!(!results.is_empty(), "Should resolve $config to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
+    // The base array{host: string} should be merged with the new key.
+    assert!(
+        ts.contains("port: int"),
+        "Shape should contain 'port: int', got: {ts}"
+    );
+}
+
+/// Overwriting an existing shape key should update its type.
+#[test]
+fn resolve_var_shape_key_override() {
+    let content = r#"<?php
+function test() {
+    $data = [];
+    $data['value'] = 'hello';
+    $data['value'] = 42;
+    $data['x']
+}
+"#;
+    let cursor_offset = content.find("$data['x']").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$data",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    assert!(!results.is_empty(), "Should resolve $data to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
+    assert!(
+        ts.contains("value: int"),
+        "Shape key 'value' should be overridden to int, got: {ts}"
+    );
+    assert!(
+        !ts.contains("value: string"),
+        "Old type 'string' should be gone, got: {ts}"
+    );
+}
+
+// ── List tracking: push assignments ─────────────────────────────────
+
+/// `$items = []; $items[] = new User();`
+/// The unified pipeline should produce `list<User>`.
+#[test]
+fn resolve_var_list_from_push_assignments() {
+    let content = r#"<?php
+class User { public string $name; }
+function test() {
+    $items = [];
+    $items[] = new User();
+    $items[0]->
+}
+"#;
+    let user = make_class("User");
+    let all_classes: Vec<Arc<ClassInfo>> = vec![Arc::new(user.clone())];
+    let class_loader = move |name: &str| -> Option<Arc<ClassInfo>> {
+        if name == "User" {
+            Some(Arc::new(make_class("User")))
+        } else {
+            None
+        }
+    };
+
+    let cursor_offset = content.find("$items[0]->").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$items",
         &ClassInfo::default(),
         &all_classes,
         content,
@@ -372,10 +521,146 @@ function test() {
         None,
     );
 
-    let names: Vec<&str> = results.iter().map(|c| c.name.as_str()).collect();
+    assert!(!results.is_empty(), "Should resolve $items to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
     assert!(
-        names.contains(&"User"),
-        "$user should resolve to User via User::factory()->create(), got: {:?}",
-        names
+        ts.contains("User"),
+        "List element type should contain User, got: {ts}"
+    );
+    assert!(
+        ts.starts_with("list<"),
+        "Should be a list<> type, got: {ts}"
+    );
+}
+
+/// Multiple push assignments with different types should union.
+#[test]
+fn resolve_var_list_from_push_union() {
+    let content = r#"<?php
+function test() {
+    $items = [];
+    $items[] = 'hello';
+    $items[] = 42;
+    $items[0]
+}
+"#;
+    let cursor_offset = content.find("$items[0]").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$items",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    assert!(!results.is_empty(), "Should resolve $items to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
+    assert!(
+        ts.contains("string") && ts.contains("int"),
+        "List should contain string|int union, got: {ts}"
+    );
+}
+
+/// Push of the same type should not duplicate.
+#[test]
+fn resolve_var_list_push_deduplicates() {
+    let content = r#"<?php
+function test() {
+    $items = [];
+    $items[] = 'a';
+    $items[] = 'b';
+    $items[0]
+}
+"#;
+    let cursor_offset = content.find("$items[0]").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$items",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    assert!(!results.is_empty(), "Should resolve $items to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
+    assert_eq!(
+        ts, "list<string>",
+        "Duplicate pushes of same type should not duplicate, got: {ts}"
+    );
+}
+
+/// Reassignment resets push tracking: `$x = []; $x[] = 1; $x = []; $x[] = 'a';`
+/// should produce `list<string>`, not `list<int|string>`.
+#[test]
+fn resolve_var_reassignment_resets_push_tracking() {
+    let content = r#"<?php
+function test() {
+    $x = [];
+    $x[] = 1;
+    $x = [];
+    $x[] = 'hello';
+    $x[0]
+}
+"#;
+    let cursor_offset = content.find("$x[0]").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$x",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    assert!(!results.is_empty(), "Should resolve $x to a type");
+    let ts = ResolvedType::type_strings_joined(&results);
+    assert_eq!(
+        ts, "list<string>",
+        "Reassignment should reset; only 'string' push should remain, got: {ts}"
+    );
+}
+
+/// Numeric keys in `$var[0] = expr` should NOT be treated as shape entries.
+#[test]
+fn resolve_var_numeric_key_not_tracked_as_shape() {
+    let content = r#"<?php
+function test() {
+    $data = [];
+    $data[0] = 'hello';
+    $data[1] = 42;
+    echo $data;
+}
+"#;
+    let cursor_offset = content.find("echo $data").unwrap() as u32;
+
+    let results = super::resolve_variable_types(
+        "$data",
+        &ClassInfo::default(),
+        &[],
+        content,
+        cursor_offset,
+        &|_| None,
+        None,
+    );
+
+    // Numeric keys are not shape entries, so the type should stay as
+    // the base `array` from `$data = []`.  The results may be empty
+    // (just `array`) or contain `array` as a type string.
+    let ts = if results.is_empty() {
+        "array".to_string()
+    } else {
+        ResolvedType::type_strings_joined(&results)
+    };
+    assert!(
+        !ts.contains('{'),
+        "Numeric keys should not produce a shape, got: {ts}"
     );
 }

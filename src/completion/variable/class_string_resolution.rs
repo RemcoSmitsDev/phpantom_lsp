@@ -51,6 +51,7 @@ pub(in crate::completion) fn resolve_class_string_targets(
                 function_loader: None,
                 resolved_class_cache: None,
                 enclosing_return_type: None,
+                branch_aware: false,
             };
             resolve_class_string_in_statements(program.statements.iter(), &ctx)
         },

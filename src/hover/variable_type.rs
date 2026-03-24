@@ -18,11 +18,11 @@ use mago_syntax::ast::*;
 use crate::completion::types::narrowing::is_subtype_of;
 use crate::docblock;
 use crate::parser::{extract_hint_string, with_parsed_program};
-use crate::types::{AccessKind, ClassInfo};
+use crate::types::{AccessKind, ClassInfo, ResolvedType};
 use crate::util::short_name;
 
 use crate::completion::resolver::FunctionLoaderFn;
-use crate::completion::variable::raw_type_inference::resolve_variable_assignment_raw_type;
+use crate::completion::variable::resolution::resolve_variable_types_branch_aware;
 
 /// Context for closure parameter type resolution in hover.
 ///
@@ -44,7 +44,7 @@ struct HoverClosureCtx<'a> {
 /// 2. Parameter type (native + `@param` → effective)
 /// 3. Foreach value/key binding (iterable element type from `@param`/`@var`)
 /// 4. Catch variable (catch clause hint string)
-/// 5. Assignment raw type via [`resolve_variable_assignment_raw_type`]
+/// 5. Assignment type via [`resolve_variable_types_branch_aware`]
 ///
 /// Returns `None` when no type information could be determined.
 pub(crate) fn resolve_variable_type_string(
@@ -113,22 +113,48 @@ pub(crate) fn resolve_variable_type_string(
         }
     }
 
-    // 5. Assignment raw type — tried before falling back to the
-    //    parameter type from step 2–4 so that reassignments like
+    // 5. Assignment type via unified pipeline (branch-aware) — tried
+    //    before falling back to the parameter type from step 2–4 so
+    //    that reassignments like
     //    `$markets = $markets ?: Country::getActiveCountries();`
     //    resolve to the richer assignment type (`array<int, Country>`)
     //    instead of the bare parameter type (`array`).
-    let assignment_result = resolve_variable_assignment_raw_type(
+    let dummy_class;
+    let effective_class = match current_class {
+        Some(cc) => cc,
+        None => {
+            dummy_class = ClassInfo::default();
+            &dummy_class
+        }
+    };
+    let resolved = resolve_variable_types_branch_aware(
         var_name,
+        effective_class,
+        all_classes,
         content,
         cursor_offset,
-        current_class,
-        all_classes,
         class_loader,
         function_loader,
     );
-    if assignment_result.is_some() {
-        return assignment_result;
+    if !resolved.is_empty() {
+        let joined = ResolvedType::type_strings_joined(&resolved);
+        if !joined.is_empty() {
+            // When the AST-based result (step 2–4) carries richer type
+            // information than the unified pipeline (e.g. the docblock
+            // says `Generator<int, Pencil>` but the pipeline only
+            // resolved the bare class name `Generator`), prefer the
+            // AST result.  The AST path preserves the full `@param` /
+            // `@var` type string including generic parameters, while
+            // the unified pipeline resolves to ClassInfo objects that
+            // may lose that detail.
+            if let Some(ref ast) = ast_result
+                && ast.len() > joined.len()
+                && ast.starts_with(&joined)
+            {
+                return ast_result;
+            }
+            return Some(joined);
+        }
     }
 
     // Fall back to the AST-based parameter/foreach/catch type.
@@ -928,14 +954,16 @@ fn resolve_expression_to_classes(
             );
         }
         // Try variable resolution.
-        let types = crate::completion::variable::resolution::resolve_variable_types(
-            expr_text,
-            current_class,
-            all_classes,
-            content,
-            cursor_offset,
-            class_loader,
-            None,
+        let types = ResolvedType::into_classes(
+            crate::completion::variable::resolution::resolve_variable_types(
+                expr_text,
+                current_class,
+                all_classes,
+                content,
+                cursor_offset,
+                class_loader,
+                None,
+            ),
         );
         if !types.is_empty() {
             return types;

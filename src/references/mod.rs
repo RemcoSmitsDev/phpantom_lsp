@@ -31,7 +31,7 @@ use tower_lsp::lsp_types::{Location, Position, Range, Url};
 
 use crate::Backend;
 use crate::symbol_map::{SymbolKind, SymbolMap};
-use crate::types::{ClassInfo, MAX_INHERITANCE_DEPTH};
+use crate::types::{ClassInfo, MAX_INHERITANCE_DEPTH, ResolvedType};
 use crate::util::{
     collect_php_files_gitignore, find_class_at_offset, offset_to_position, position_to_offset,
 };
@@ -931,14 +931,16 @@ impl Backend {
         let class_loader = self.class_loader(ctx);
         let function_loader = self.function_loader(ctx);
 
-        let resolved = crate::completion::variable::resolution::resolve_variable_types(
-            var_name,
-            &enclosing_class,
-            &ctx.classes,
-            content,
-            cursor_offset,
-            &class_loader,
-            Some(&function_loader),
+        let resolved = ResolvedType::into_classes(
+            crate::completion::variable::resolution::resolve_variable_types(
+                var_name,
+                &enclosing_class,
+                &ctx.classes,
+                content,
+                cursor_offset,
+                &class_loader,
+                Some(&function_loader),
+            ),
         );
 
         resolved

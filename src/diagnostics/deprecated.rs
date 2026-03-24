@@ -22,7 +22,7 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::completion::variable::resolution::resolve_variable_types;
 use crate::symbol_map::SymbolKind;
-use crate::types::ClassInfo;
+use crate::types::{ClassInfo, ResolvedType};
 use crate::virtual_members::resolve_class_fully_cached;
 
 use super::helpers::resolve_to_fqn;
@@ -420,7 +420,7 @@ fn resolve_variable_subject(
         .map(|c| ClassInfo::clone(c))
         .unwrap_or_default();
 
-    let results = resolve_variable_types(
+    let results = ResolvedType::into_classes(resolve_variable_types(
         var_name,
         &enclosing_class,
         local_classes,
@@ -428,7 +428,7 @@ fn resolve_variable_subject(
         access_offset,
         class_loader,
         Some(function_loader),
-    );
+    ));
 
     results.into_iter().next()
 }
