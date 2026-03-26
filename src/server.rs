@@ -1049,15 +1049,16 @@ impl Backend {
                 // constants — regardless of whether they appear in
                 // composer.json's autoload sections.
                 //
-                // The vendor directory is typically gitignored, so the
-                // workspace-wide walk skips it.  Scan vendor packages
-                // separately via installed.json so that third-party
-                // classes are still indexed.
-                let skip_dirs = HashSet::new();
+                // Explicitly skip the vendor directory so it is never
+                // walked even when it is not in .gitignore.  Vendor
+                // packages are scanned separately via installed.json
+                // so that third-party classes are still indexed.
+                let mut skip_dirs = HashSet::new();
+                skip_dirs.insert(vendor_path.clone());
                 let mut scan = classmap_scanner::scan_workspace_fallback_full(root, &skip_dirs);
 
-                // Merge vendor packages (gitignored, so not covered
-                // by the workspace walk above).
+                // Merge vendor packages (excluded from the workspace
+                // walk above, scanned separately here).
                 let vendor_cm = classmap_scanner::scan_vendor_packages(root, &vendor_dir);
                 for (fqcn, path) in vendor_cm {
                     scan.classmap.entry(fqcn).or_insert(path);
