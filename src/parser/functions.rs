@@ -223,8 +223,9 @@ impl Backend {
                         let deprecation_message = depr_info.message;
                         let deprecated_replacement = depr_info.replacement;
 
-                        let desc = docblock_text
-                            .and_then(|doc| crate::hover::extract_docblock_description(Some(doc)));
+                        let desc = info
+                            .as_ref()
+                            .and_then(crate::hover::extract_description_from_info);
 
                         let ret_desc = info
                             .as_ref()

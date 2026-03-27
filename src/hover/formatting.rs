@@ -6,6 +6,7 @@
 
 use tower_lsp::lsp_types::*;
 
+use crate::docblock::parser::{DocblockInfo, parse_docblock_for_tags};
 use crate::symbol_map::SymbolSpan;
 use crate::types::*;
 use crate::util::offset_to_position;
@@ -433,52 +434,40 @@ pub(super) fn format_see_refs(
     }
 }
 
-/// Extract the trailing description from a `@var` tag line.
+/// Extract the trailing description from a `@var` tag in a pre-parsed
+/// [`DocblockInfo`].
 ///
 /// Handles formats like:
-///   - `/** @var list<Pen> The batches */`       → `Some("The batches")`
-///   - `/** @var list<Pen> $batch The batches */` → `Some("The batches")`
-///   - `/** @var list<Pen> */`                    → `None`
-///
-/// Only looks at the `@var` line itself.  For multi-line docblocks where
-/// the description precedes the `@var` tag, use `extract_docblock_description`.
-pub(crate) fn extract_var_description(docblock: &str) -> Option<String> {
-    let inner = docblock
-        .trim()
-        .strip_prefix("/**")
-        .unwrap_or(docblock)
-        .strip_suffix("*/")
-        .unwrap_or(docblock);
+///   - `@var list<Pen> The batches`       → `Some("The batches")`
+///   - `@var list<Pen> $batch The batches` → `Some("The batches")`
+///   - `@var list<Pen>`                    → `None`
+pub(crate) fn extract_var_description_from_info(info: &DocblockInfo) -> Option<String> {
+    use mago_docblock::document::TagKind;
 
-    for line in inner.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        if let Some(rest) = trimmed.strip_prefix("@var") {
-            let rest = rest.trim_start();
-            if rest.is_empty() {
-                return None;
-            }
-            // Skip past the type token (respecting `<…>` nesting).
-            let after_type = skip_type_token(rest);
-            let after_type = after_type.trim_start();
-            if after_type.is_empty() {
-                return None;
-            }
-            // Skip an optional `$variable` name.
-            let after_var = if after_type.starts_with('$') {
-                after_type
-                    .split_once(|c: char| c.is_whitespace())
-                    .map(|(_, rest)| rest.trim_start())
-                    .unwrap_or("")
-            } else {
-                after_type
-            };
-            if after_var.is_empty() {
-                return None;
-            }
-            return Some(after_var.to_string());
-        }
+    let tag = info.first_tag_by_kind(TagKind::Var)?;
+    let desc = tag.description.trim();
+    if desc.is_empty() {
+        return None;
     }
-    None
+    // Skip past the type token (respecting `<…>` nesting).
+    let after_type = skip_type_token(desc);
+    let after_type = after_type.trim_start();
+    if after_type.is_empty() {
+        return None;
+    }
+    // Skip an optional `$variable` name.
+    let after_var = if after_type.starts_with('$') {
+        after_type
+            .split_once(|c: char| c.is_whitespace())
+            .map(|(_, rest)| rest.trim_start())
+            .unwrap_or("")
+    } else {
+        after_type
+    };
+    if after_var.is_empty() {
+        return None;
+    }
+    Some(after_var.to_string())
 }
 
 /// Skip past a type token in a docblock string, respecting `<…>` nesting.
@@ -502,59 +491,39 @@ fn skip_type_token(s: &str) -> &str {
     &s[end..]
 }
 
+/// Convert basic HTML markup in docblock text to Markdown equivalents.
+///
+/// Handles `<b>`, `<i>`, `<code>`, `<br>`, and `<p>` tags.  This is a
+/// simple string-replacement pass, not a full HTML parser.
+pub(crate) fn html_to_markdown(text: &str) -> String {
+    text.replace("<b>", "**")
+        .replace("</b>", "**")
+        .replace("<i>", "*")
+        .replace("</i>", "*")
+        .replace("<code>", "`")
+        .replace("</code>", "`")
+        .replace("<br />", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br>", "\n")
+        .replace("<p>", "\n\n")
+        .replace("</p>", "")
+}
+
+/// Extract the description from a pre-parsed [`DocblockInfo`], applying
+/// HTML-to-Markdown conversion.
+pub(crate) fn extract_description_from_info(info: &DocblockInfo) -> Option<String> {
+    info.description.as_deref().map(html_to_markdown)
+}
+
 /// Extract the human-readable description text from a raw docblock string.
 ///
-/// Strips the `/**` and `*/` delimiters, leading `*` characters, and all
-/// `@tag` lines. Returns `None` if no description text remains.
+/// Parses the docblock with `mago-docblock` and returns the free-text
+/// content before the first `@tag`, with basic HTML converted to Markdown.
+/// Returns `None` if no description text is present.
 pub(crate) fn extract_docblock_description(docblock: Option<&str>) -> Option<String> {
     let raw = docblock?;
-    let inner = raw
-        .trim()
-        .strip_prefix("/**")
-        .unwrap_or(raw)
-        .strip_suffix("*/")
-        .unwrap_or(raw);
-
-    let mut lines = Vec::new();
-    for line in inner.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-
-        // Skip empty lines at the very start
-        if lines.is_empty() && trimmed.is_empty() {
-            continue;
-        }
-
-        // Stop at the first @tag
-        if trimmed.starts_with('@') {
-            break;
-        }
-
-        lines.push(trimmed.to_string());
-    }
-
-    // Trim trailing empty lines
-    while lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        let result = lines.join("\n");
-        let result = result
-            .replace("<b>", "**")
-            .replace("</b>", "**")
-            .replace("<i>", "*")
-            .replace("</i>", "*")
-            .replace("<code>", "`")
-            .replace("</code>", "`")
-            .replace("<br />", "\n")
-            .replace("<br/>", "\n")
-            .replace("<br>", "\n")
-            .replace("<p>", "\n\n")
-            .replace("</p>", "");
-        Some(result)
-    }
+    let info = parse_docblock_for_tags(raw)?;
+    extract_description_from_info(&info)
 }
 
 /// Shorten all namespace-qualified class names in a type string to their

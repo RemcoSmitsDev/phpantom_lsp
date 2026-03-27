@@ -1723,11 +1723,15 @@ impl Backend {
                             tpl_bindings,
                         )
                     } else {
+                        // No docblock, but we still need to check for
+                        // #[Deprecated] attribute on the method itself.
+                        let depr_info =
+                            merge_deprecation_info(None, &method.attribute_lists, doc_ctx);
                         (
                             native_return_type.clone(),
                             None,
-                            None,
-                            None,
+                            depr_info.message,
+                            depr_info.replacement,
                             Vec::new(),
                             HashMap::new(),
                             Vec::new(),
@@ -1875,12 +1879,9 @@ impl Backend {
 
                     // Extract description, return description, link, and
                     // per-parameter descriptions from the method's docblock.
-                    // The raw text is still needed for
-                    // `extract_docblock_description` which does its own
-                    // free-text parsing; the structured `info` is used
-                    // for all tag-based extractions.
-                    let method_description = method_docblock_text
-                        .and_then(|doc| crate::hover::extract_docblock_description(Some(doc)));
+                    let method_description = method_docblock_info
+                        .as_ref()
+                        .and_then(crate::hover::extract_description_from_info);
 
                     let return_description = method_docblock_info
                         .as_ref()
@@ -2021,9 +2022,13 @@ impl Backend {
                                 );
                             }
                         }
-                        let description =
-                            crate::hover::extract_docblock_description(Some(doc_text))
-                                .or_else(|| crate::hover::extract_var_description(doc_text));
+                        let description = info
+                            .as_ref()
+                            .and_then(crate::hover::extract_description_from_info)
+                            .or_else(|| {
+                                info.as_ref()
+                                    .and_then(crate::hover::extract_var_description_from_info)
+                            });
                         if description.is_some() {
                             for prop in &mut prop_infos {
                                 prop.description = description.clone();
@@ -2073,8 +2078,9 @@ impl Backend {
                         .as_ref()
                         .map(docblock::extract_see_references_from_info)
                         .unwrap_or_default();
-                    let const_description = const_docblock_text
-                        .and_then(|doc| crate::hover::extract_docblock_description(Some(doc)));
+                    let const_description = const_docblock_info
+                        .as_ref()
+                        .and_then(crate::hover::extract_description_from_info);
                     for item in constant.items.iter() {
                         let value = doc_ctx.and_then(|ctx| {
                             let start = item.value.span().start.offset as usize;

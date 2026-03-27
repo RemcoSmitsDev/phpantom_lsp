@@ -353,17 +353,18 @@ fn docblock_already_has_throws(info: &DocblockInfo, short_name: &str) -> bool {
     if !info.has_docblock {
         return false;
     }
+    let parsed = match crate::docblock::parser::parse_docblock_for_tags(&info.text) {
+        Some(parsed) => parsed,
+        None => return false,
+    };
     let lower = short_name.to_lowercase();
-    for line in info.text.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        if let Some(rest) = trimmed.strip_prefix("@throws") {
-            let rest = rest.trim_start();
-            if let Some(type_name) = rest.split_whitespace().next() {
-                let short = type_name.trim_start_matches('\\');
-                let short = short.rsplit('\\').next().unwrap_or(short);
-                if short.eq_ignore_ascii_case(&lower) {
-                    return true;
-                }
+    for tag in parsed.tags_by_kind(mago_docblock::document::TagKind::Throws) {
+        let rest = tag.description.trim();
+        if let Some(type_name) = rest.split_whitespace().next() {
+            let short = type_name.trim_start_matches('\\');
+            let short = short.rsplit('\\').next().unwrap_or(short);
+            if short.eq_ignore_ascii_case(&lower) {
+                return true;
             }
         }
     }

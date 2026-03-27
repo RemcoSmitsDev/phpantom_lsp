@@ -301,8 +301,8 @@ pub(crate) fn find_declaring_class(
 
 // Re-export `pub(crate)` items so external callers keep using `crate::hover::`.
 pub(crate) use formatting::{
-    extract_docblock_description, extract_var_description, hover_for_function, shorten_type_string,
-    types_equivalent,
+    extract_description_from_info, extract_docblock_description, extract_var_description_from_info,
+    hover_for_function, shorten_type_string, types_equivalent,
 };
 
 /// Result of searching for a member on a [`ClassInfo`] for hover purposes.

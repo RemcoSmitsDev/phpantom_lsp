@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bumpalo::Bump;
+use mago_docblock::document::TagKind;
 use mago_span::HasSpan;
 use mago_syntax::ast::class_like::member::ClassLikeMember;
 use mago_syntax::ast::*;
@@ -26,6 +27,7 @@ use crate::Backend;
 use crate::completion::phpdoc::generation::enrichment_plain;
 use crate::completion::source::throws_analysis::{self, ThrowsContext};
 use crate::docblock::is_compatible_refinement;
+use crate::docblock::parser::{DocblockInfo, parse_docblock_for_tags};
 use crate::docblock::type_strings::{split_type_token, split_union_depth0};
 use crate::types::{ClassInfo, FunctionLoader};
 use crate::util::offset_to_position;
@@ -402,10 +404,17 @@ fn build_info_for_function_like<'a>(
     // Extract return type.
     let sig_return = return_type_hint.map(|rth| extract_hint_string_local(&rth.hint, content));
 
-    // Parse existing docblock tags.
-    let doc_params = parse_doc_params(&docblock_text, docblock_start);
-    let doc_return = parse_doc_return(&docblock_text, docblock_start);
-    let doc_throws = parse_doc_throws(&docblock_text);
+    // Parse existing docblock tags with a single parse pass.
+    let docblock_info = parse_docblock_for_tags(&docblock_text);
+    let doc_params = docblock_info
+        .as_ref()
+        .map(parse_doc_params_from_info)
+        .unwrap_or_default();
+    let doc_return = docblock_info.as_ref().and_then(parse_doc_return_from_info);
+    let doc_throws = docblock_info
+        .as_ref()
+        .map(parse_doc_throws_from_info)
+        .unwrap_or_default();
 
     // Detect indentation.
     let indent = detect_indent(content, docblock_start);
@@ -429,152 +438,94 @@ fn build_info_for_function_like<'a>(
 
 // ── Docblock parsing ────────────────────────────────────────────────────────
 
-/// Parse all `@param` tags from a docblock.
-fn parse_doc_params(docblock: &str, _base_offset: usize) -> Vec<DocParam> {
-    let inner = docblock
-        .trim()
-        .strip_prefix("/**")
-        .unwrap_or(docblock)
-        .strip_suffix("*/")
-        .unwrap_or(docblock);
-
+/// Parse all `@param` tags from a pre-parsed [`DocblockInfo`].
+fn parse_doc_params_from_info(info: &DocblockInfo) -> Vec<DocParam> {
     let mut results = Vec::new();
-    let lines: Vec<&str> = inner.lines().collect();
-    let mut i = 0;
 
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed = line.trim().trim_start_matches('*').trim();
-
-        if let Some(rest) = trimmed.strip_prefix("@param") {
-            let rest = rest.trim_start();
-
-            if rest.is_empty() {
-                i += 1;
-                continue;
-            }
-
-            // When the first token starts with `$` (or `...$` for variadic),
-            // there is no type — the token is the parameter name directly.
-            let first_token = rest.split_whitespace().next().unwrap_or("");
-            let is_name_first = first_token.starts_with('$') || first_token.starts_with("...$");
-
-            let (type_str, name_token, after_params) = if is_name_first {
-                ("", first_token, &rest[first_token.len()..])
-            } else {
-                // Extract type token.
-                let (type_str, remainder) = split_type_token(rest);
-                let remainder = remainder.trim_start();
-
-                // Extract parameter name.
-                let name_token = remainder.split_whitespace().next().unwrap_or("");
-                let after_params = remainder.get(name_token.len()..).unwrap_or("");
-                (type_str, name_token, after_params)
-            };
-
-            if name_token.is_empty() || (!name_token.contains('$')) {
-                i += 1;
-                continue;
-            }
-
-            let name = name_token.to_string();
-
-            // Extract description (rest of line after name).
-            let after_name = after_params.trim_start();
-            let mut description = after_name.to_string();
-
-            // Collect continuation lines.
-            let mut j = i + 1;
-            while j < lines.len() {
-                let cont = lines[j].trim().trim_start_matches('*').trim();
-                if cont.is_empty() || cont.starts_with('@') {
-                    break;
-                }
-                if !description.is_empty() {
-                    description.push(' ');
-                }
-                description.push_str(cont);
-                j += 1;
-            }
-
-            results.push(DocParam {
-                type_str: type_str.to_string(),
-                name,
-                description,
-            });
-
-            i = j;
-        } else {
-            i += 1;
+    for tag in info.tags_by_kind(TagKind::Param) {
+        let rest = tag.description.trim();
+        if rest.is_empty() {
+            continue;
         }
+
+        // When the first token starts with `$` (or `...$` for variadic),
+        // there is no type — the token is the parameter name directly.
+        let first_token = rest.split_whitespace().next().unwrap_or("");
+        let is_name_first = first_token.starts_with('$') || first_token.starts_with("...$");
+
+        let (type_str, name_token, after_params) = if is_name_first {
+            ("", first_token, &rest[first_token.len()..])
+        } else {
+            // Extract type token.
+            let (type_str, remainder) = split_type_token(rest);
+            let remainder = remainder.trim_start();
+
+            // Extract parameter name.
+            let name_token = remainder.split_whitespace().next().unwrap_or("");
+            let after_params = remainder.get(name_token.len()..).unwrap_or("");
+            (type_str, name_token, after_params)
+        };
+
+        if name_token.is_empty() || (!name_token.contains('$')) {
+            continue;
+        }
+
+        let name = name_token.to_string();
+
+        // mago-docblock joins continuation lines with \n; collapse to spaces
+        // for the description to match the old behaviour.
+        let description = after_params
+            .trim()
+            .lines()
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        results.push(DocParam {
+            type_str: type_str.to_string(),
+            name,
+            description,
+        });
     }
 
     results
 }
 
-/// Parse the `@return` tag from a docblock.
-fn parse_doc_return(docblock: &str, _base_offset: usize) -> Option<DocReturn> {
-    let inner = docblock
-        .trim()
-        .strip_prefix("/**")
-        .unwrap_or(docblock)
-        .strip_suffix("*/")
-        .unwrap_or(docblock);
-
-    let lines: Vec<&str> = inner.lines().collect();
-    let mut i = 0;
-
-    while i < lines.len() {
-        let line = lines[i];
-        let trimmed = line.trim().trim_start_matches('*').trim();
-
-        if let Some(rest) = trimmed.strip_prefix("@return") {
-            let rest = rest.trim_start();
-
-            if rest.is_empty() {
-                i += 1;
-                continue;
-            }
-
-            // Skip conditional return types.
-            if rest.starts_with('(') {
-                i += 1;
-                continue;
-            }
-
-            let (type_str, remainder) = split_type_token(rest);
-            let description = remainder.trim().to_string();
-
-            return Some(DocReturn {
-                type_str: type_str.to_string(),
-                description,
-            });
+/// Parse the `@return` tag from a pre-parsed [`DocblockInfo`].
+fn parse_doc_return_from_info(info: &DocblockInfo) -> Option<DocReturn> {
+    for tag in info.tags_by_kind(TagKind::Return) {
+        let rest = tag.description.trim();
+        if rest.is_empty() {
+            continue;
         }
-        i += 1;
+
+        // Skip conditional return types.
+        if rest.starts_with('(') {
+            continue;
+        }
+
+        let (type_str, remainder) = split_type_token(rest);
+        let description = remainder.trim().to_string();
+
+        return Some(DocReturn {
+            type_str: type_str.to_string(),
+            description,
+        });
     }
 
     None
 }
 
-/// Parse `@throws` tags from a docblock, returning the exception type names.
-fn parse_doc_throws(docblock: &str) -> Vec<String> {
-    let inner = docblock
-        .trim()
-        .strip_prefix("/**")
-        .unwrap_or(docblock)
-        .strip_suffix("*/")
-        .unwrap_or(docblock);
-
+/// Parse `@throws` tags from a pre-parsed [`DocblockInfo`], returning
+/// the exception type names.
+fn parse_doc_throws_from_info(info: &DocblockInfo) -> Vec<String> {
     let mut results = Vec::new();
-    for line in inner.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        if let Some(rest) = trimmed.strip_prefix("@throws") {
-            let rest = rest.trim_start();
-            if let Some(type_name) = rest.split_whitespace().next()
-                && !type_name.is_empty()
-            {
-                results.push(type_name.to_string());
-            }
+    for tag in info.tags_by_kind(TagKind::Throws) {
+        let rest = tag.description.trim();
+        if let Some(type_name) = rest.split_whitespace().next()
+            && !type_name.is_empty()
+        {
+            results.push(type_name.to_string());
         }
     }
     results
@@ -1925,12 +1876,20 @@ class Foo {
 
     // ── @param with no type ─────────────────────────────────────────
 
+    /// Helper: parse a docblock string into params via `_from_info`.
+    fn test_parse_params(docblock: &str) -> Vec<DocParam> {
+        match parse_docblock_for_tags(docblock) {
+            Some(info) => parse_doc_params_from_info(&info),
+            None => Vec::new(),
+        }
+    }
+
     #[test]
     fn parse_param_no_type_recognised() {
         let docblock = r#"/**
      * @param $name The user name
      */"#;
-        let params = parse_doc_params(docblock, 0);
+        let params = test_parse_params(docblock);
         assert_eq!(params.len(), 1, "should parse one param: {:?}", params);
         assert_eq!(params[0].name, "$name");
         assert_eq!(params[0].type_str, "");
@@ -1942,7 +1901,7 @@ class Foo {
         let docblock = r#"/**
      * @param ...$args The arguments
      */"#;
-        let params = parse_doc_params(docblock, 0);
+        let params = test_parse_params(docblock);
         assert_eq!(params.len(), 1, "should parse one param: {:?}", params);
         assert_eq!(params[0].name, "...$args");
         assert_eq!(params[0].type_str, "");
@@ -1954,7 +1913,7 @@ class Foo {
         let docblock = r#"/**
      * @param $name
      */"#;
-        let params = parse_doc_params(docblock, 0);
+        let params = test_parse_params(docblock);
         assert_eq!(params.len(), 1, "should parse one param: {:?}", params);
         assert_eq!(params[0].name, "$name");
         assert_eq!(params[0].type_str, "");
@@ -1967,7 +1926,7 @@ class Foo {
      * @param $b Second
      * @param int $c Third
      */"#;
-        let params = parse_doc_params(docblock, 0);
+        let params = test_parse_params(docblock);
         assert_eq!(params.len(), 3, "should parse three params: {:?}", params);
         assert_eq!(params[0].name, "$a");
         assert_eq!(params[0].type_str, "string");

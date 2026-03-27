@@ -475,17 +475,21 @@ fn line_has_function_keyword(line: &str) -> bool {
 /// Check whether `scope` (typically a single docblock) contains
 /// `@throws <short_name>` (case-insensitive).
 fn scope_has_throws_tag(scope: &str, short_name: &str) -> bool {
+    use mago_docblock::document::TagKind;
+
+    let info = match crate::docblock::parser::parse_docblock_for_tags(scope) {
+        Some(info) => info,
+        None => return false,
+    };
+
     let lower = short_name.to_lowercase();
-    for line in scope.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        if let Some(rest) = trimmed.strip_prefix("@throws") {
-            let rest = rest.trim_start();
-            if let Some(tag_type) = rest.split_whitespace().next() {
-                let tag_short = tag_type.trim_start_matches('\\');
-                let tag_short = tag_short.rsplit('\\').next().unwrap_or(tag_short);
-                if tag_short.to_lowercase() == lower {
-                    return true;
-                }
+    for tag in info.tags_by_kind(TagKind::Throws) {
+        let rest = tag.description.trim();
+        if let Some(tag_type) = rest.split_whitespace().next() {
+            let tag_short = tag_type.trim_start_matches('\\');
+            let tag_short = tag_short.rsplit('\\').next().unwrap_or(tag_short);
+            if tag_short.to_lowercase() == lower {
+                return true;
             }
         }
     }

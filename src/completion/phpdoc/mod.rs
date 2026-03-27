@@ -76,6 +76,8 @@ pub use context::{
 /// Collect the names of parameters already documented with `@param` tags
 /// in the current docblock above the cursor.
 pub fn find_existing_param_tags(content: &str, position: Position) -> Vec<String> {
+    use mago_docblock::document::TagKind;
+
     let byte_offset = position_to_byte_offset(content, position);
     let before_cursor = &content[..byte_offset.min(content.len())];
 
@@ -87,17 +89,19 @@ pub fn find_existing_param_tags(content: &str, position: Position) -> Vec<String
 
     let docblock_so_far = &before_cursor[open_pos..];
 
+    let info = match crate::docblock::parser::parse_docblock_for_tags_lossy(docblock_so_far) {
+        Some(info) => info,
+        None => return Vec::new(),
+    };
+
     let mut existing = Vec::new();
-    for line in docblock_so_far.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        if let Some(rest) = trimmed.strip_prefix("@param") {
-            let rest = rest.trim();
-            // @param may have: Type $name desc  or just $name
-            for word in rest.split_whitespace() {
-                if word.starts_with('$') {
-                    existing.push(word.to_string());
-                    break;
-                }
+    for tag in info.tags_by_kind(TagKind::Param) {
+        let rest = tag.description.trim();
+        // @param may have: Type $name desc  or just $name
+        for word in rest.split_whitespace() {
+            if word.starts_with('$') {
+                existing.push(word.to_string());
+                break;
             }
         }
     }
@@ -107,6 +111,8 @@ pub fn find_existing_param_tags(content: &str, position: Position) -> Vec<String
 
 /// Check whether `@return` is already documented in the current docblock.
 fn has_existing_return_tag(content: &str, position: Position) -> bool {
+    use mago_docblock::document::TagKind;
+
     let byte_offset = position_to_byte_offset(content, position);
     let before_cursor = &content[..byte_offset.min(content.len())];
 
@@ -116,10 +122,11 @@ fn has_existing_return_tag(content: &str, position: Position) -> bool {
     };
 
     let docblock_so_far = &before_cursor[open_pos..];
-    docblock_so_far.lines().any(|line| {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        trimmed.starts_with("@return")
-    })
+
+    match crate::docblock::parser::parse_docblock_for_tags_lossy(docblock_so_far) {
+        Some(info) => info.tags_by_kind(TagKind::Return).next().is_some(),
+        None => false,
+    }
 }
 
 /// Collect exception type names already documented with `@throws` tags
@@ -128,6 +135,8 @@ fn has_existing_return_tag(content: &str, position: Position) -> bool {
 /// Returns short type names as written in the docblock (e.g.
 /// `"InvalidArgumentException"`, `"\\RuntimeException"`).
 pub fn find_existing_throws_tags(content: &str, position: Position) -> Vec<String> {
+    use mago_docblock::document::TagKind;
+
     let byte_offset = position_to_byte_offset(content, position);
     let before_cursor = &content[..byte_offset.min(content.len())];
 
@@ -145,16 +154,18 @@ pub fn find_existing_throws_tags(content: &str, position: Position) -> Vec<Strin
         &content[open_pos..byte_offset.min(content.len())]
     };
 
+    let info = match crate::docblock::parser::parse_docblock_for_tags_lossy(docblock) {
+        Some(info) => info,
+        None => return Vec::new(),
+    };
+
     let mut existing = Vec::new();
-    for line in docblock.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim();
-        if let Some(rest) = trimmed.strip_prefix("@throws") {
-            let rest = rest.trim();
-            if let Some(type_name) = rest.split_whitespace().next() {
-                let clean = type_name.trim_start_matches('\\');
-                if !clean.is_empty() {
-                    existing.push(clean.to_string());
-                }
+    for tag in info.tags_by_kind(TagKind::Throws) {
+        let rest = tag.description.trim();
+        if let Some(type_name) = rest.split_whitespace().next() {
+            let clean = type_name.trim_start_matches('\\');
+            if !clean.is_empty() {
+                existing.push(clean.to_string());
             }
         }
     }

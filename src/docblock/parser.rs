@@ -23,7 +23,7 @@
 //! the arena directly.
 
 use bumpalo::Bump;
-use mago_docblock::document::{Element, TagKind};
+use mago_docblock::document::{Element, TagKind, TextSegment};
 use mago_span::Span;
 
 /// Owned snapshot of a parsed tag from a `mago-docblock` `Document`.
@@ -40,15 +40,28 @@ pub struct TagInfo {
     /// `@param string $foo A description`, this would be
     /// `"string $foo A description"`.
     pub description: String,
+    /// The span of the entire tag (from `@` to the end of the description)
+    /// in the source file.
+    pub span: Span,
+    /// The span of just the description portion of the tag.
+    pub description_span: Span,
 }
 
 /// Owned snapshot of a parsed docblock.
 ///
-/// Contains just the tag information extracted from the `Document`.
-/// Text elements, code blocks, and annotations are discarded for now
-/// since our existing code does not use them.
+/// Contains the free-text description (before the first tag) and all
+/// structured tag entries extracted from the `Document`.
 #[derive(Debug, Clone)]
 pub struct DocblockInfo {
+    /// The free-text description that appears before the first `@tag`.
+    ///
+    /// This captures `Element::Text` content from the mago-docblock
+    /// `Document`, joining paragraph segments with inline code (wrapped
+    /// in backticks) and inline tags (wrapped in `{@tag ...}`).
+    ///
+    /// Returns `None` when the docblock has no text before the first tag
+    /// (e.g. `/** @return string */`).
+    pub description: Option<String>,
     /// All tags found in the docblock, in source order.
     pub tags: Vec<TagInfo>,
 }
@@ -97,21 +110,52 @@ pub fn parse_docblock(docblock: &str, base_span: Span) -> Option<DocblockInfo> {
 }
 
 /// Walk a parsed `Document` and collect all `Tag` elements into owned
-/// [`TagInfo`] values.
+/// [`TagInfo`] values, and extract the free-text description from
+/// `Text` elements that appear before the first tag.
 fn collect_tags(document: &mago_docblock::document::Document<'_>) -> DocblockInfo {
     let mut tags = Vec::new();
+    let mut description_parts: Vec<String> = Vec::new();
+    let mut seen_tag = false;
 
     for element in &document.elements {
-        if let Element::Tag(tag) = element {
-            tags.push(TagInfo {
-                name: tag.name.to_owned(),
-                kind: tag.kind,
-                description: tag.description.to_owned(),
-            });
+        match element {
+            Element::Tag(tag) => {
+                seen_tag = true;
+                tags.push(TagInfo {
+                    name: tag.name.to_owned(),
+                    kind: tag.kind,
+                    description: tag.description.to_owned(),
+                    span: tag.span,
+                    description_span: tag.description_span,
+                });
+            }
+            Element::Text(text) if !seen_tag => {
+                for seg in &text.segments {
+                    match seg {
+                        TextSegment::Paragraph { content, .. } => {
+                            description_parts.push((*content).to_owned());
+                        }
+                        TextSegment::InlineCode(code) => {
+                            description_parts.push(format!("`{}`", code.content));
+                        }
+                        TextSegment::InlineTag(tag) => {
+                            description_parts
+                                .push(format!("{{@{} {}}}", tag.name, tag.description));
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    DocblockInfo { tags }
+    let description = if description_parts.is_empty() {
+        None
+    } else {
+        Some(description_parts.join(""))
+    };
+
+    DocblockInfo { description, tags }
 }
 
 /// Collapse `\n` (and any surrounding horizontal whitespace) into a
@@ -160,6 +204,10 @@ pub fn collapse_newlines(s: &str) -> String {
 /// receive a raw `&str` docblock.  The span is set to cover the entire
 /// string starting at offset 0, which is correct for standalone extraction
 /// (the spans are only meaningful when the caller needs source positions).
+///
+/// Returns `None` if the string is not a valid docblock or parsing fails.
+/// For partial docblocks (e.g. during completion when `*/` is missing),
+/// use [`parse_docblock_for_tags_lossy`] instead.
 pub fn parse_docblock_for_tags(docblock: &str) -> Option<DocblockInfo> {
     use mago_database::file::FileId;
     use mago_span::Position;
@@ -170,6 +218,53 @@ pub fn parse_docblock_for_tags(docblock: &str) -> Option<DocblockInfo> {
         Position::new(docblock.len() as u32),
     );
     parse_docblock(docblock, span)
+}
+
+/// Like [`parse_docblock_for_tags`], but attempts to fix up partial
+/// docblocks before parsing.
+///
+/// When the standard parse returns `None` (e.g. because the closing `*/`
+/// is missing while the user is still typing), this function appends
+/// `*/` and retries.  This makes it suitable for completion-time tag
+/// detection where the docblock is incomplete.
+///
+/// Callers that need accurate span information should prefer
+/// [`parse_docblock_for_tags`] since the appended `*/` shifts nothing
+/// but may produce a slightly different parse tree.
+pub fn parse_docblock_for_tags_lossy(docblock: &str) -> Option<DocblockInfo> {
+    // Try the normal parse first.
+    if let Some(info) = parse_docblock_for_tags(docblock) {
+        return Some(info);
+    }
+
+    // The docblock contains something mago-docblock can't handle (most
+    // commonly a bare `@` where the user is still typing a tag name).
+    // Try removing bare `@` tokens and re-parsing.
+
+    // Strip lines that are just ` * @` (bare @ with no tag name).
+    // This handles both complete docblocks (`*/` present) and partial
+    // ones (`*/` missing).
+    let cleaned: String = docblock
+        .lines()
+        .filter(|line| {
+            let t = line.trim().trim_start_matches('*').trim();
+            t != "@"
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if let Some(info) = parse_docblock_for_tags(&cleaned) {
+        return Some(info);
+    }
+
+    // If the docblock is still missing `*/`, append it.
+    let trimmed = cleaned.trim_end();
+    if trimmed.ends_with("*/") {
+        return None;
+    }
+
+    let fixed = format!("{}\n */", trimmed);
+    parse_docblock_for_tags(&fixed)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -481,6 +576,182 @@ mod tests {
             tag.description.contains("the user data"),
             "should contain description after type: {:?}",
             tag.description
+        );
+    }
+
+    #[test]
+    fn description_extracted_from_text_elements() {
+        let doc = "/**\n * This is a description.\n * Second line.\n *\n * @return string\n */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        assert_eq!(
+            info.description.as_deref(),
+            Some("This is a description.\nSecond line.")
+        );
+        assert_eq!(info.tags.len(), 1);
+        assert_eq!(info.tags[0].kind, TagKind::Return);
+    }
+
+    #[test]
+    fn description_none_when_tags_only() {
+        let doc = "/** @return string */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        assert_eq!(info.description, None);
+    }
+
+    #[test]
+    fn description_with_inline_code() {
+        let doc = "/**\n * Use `code` here.\n * @return void\n */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        assert_eq!(info.description.as_deref(), Some("Use `code` here."));
+    }
+
+    #[test]
+    fn description_with_inline_link_tag() {
+        let doc = "/**\n * See {@link https://php.net} for details.\n * @return void\n */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        assert_eq!(
+            info.description.as_deref(),
+            Some("See {@link https://php.net} for details.")
+        );
+    }
+
+    #[test]
+    fn description_with_html_tags_preserved() {
+        let doc = "/**\n * Use <b>bold</b> text.\n * @param string $x\n */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        let desc = info
+            .description
+            .as_deref()
+            .expect("should have description");
+        assert!(
+            desc.contains("<b>bold</b>"),
+            "HTML tags should be preserved in raw description: {desc}"
+        );
+    }
+
+    #[test]
+    fn tag_spans_are_populated() {
+        let doc = "/** @return string The result */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        let tag = &info.tags[0];
+        // The span should cover the @return tag
+        assert!(
+            tag.span.start.offset < tag.span.end.offset,
+            "tag span should be non-empty"
+        );
+        // The description_span should cover "string The result"
+        assert!(
+            tag.description_span.start.offset < tag.description_span.end.offset,
+            "description span should be non-empty"
+        );
+    }
+
+    #[test]
+    fn description_only_docblock() {
+        let doc = "/**\n * Just a description, no tags.\n */";
+        let info = parse_docblock_for_tags(doc).expect("should parse");
+        assert_eq!(
+            info.description.as_deref(),
+            Some("Just a description, no tags.")
+        );
+        assert!(info.tags.is_empty());
+    }
+
+    #[test]
+    fn partial_docblock_without_closing_delimiter() {
+        // When the user is still typing, the docblock may not have a
+        // closing `*/`.  Verify that mago-docblock either parses what
+        // it can or returns None gracefully (no panic).
+        let doc = "/**\n * @param string $name\n * @return ";
+        let result = parse_docblock_for_tags(doc);
+        // Whether it succeeds or returns None is fine — the important
+        // thing is that it does not panic.
+        if let Some(info) = result {
+            // If it does parse, the tags should be reasonable.
+            assert!(
+                !info.tags.is_empty(),
+                "partial parse should find at least one tag"
+            );
+            // Verify the @param tag was parsed correctly.
+            let params: Vec<_> = info.tags_by_kind(TagKind::Param).collect();
+            assert_eq!(params.len(), 1, "should find one @param tag");
+            assert!(
+                params[0].description.contains("$name"),
+                "param description should contain $name: {:?}",
+                params[0].description
+            );
+        }
+    }
+
+    #[test]
+    fn partial_docblock_with_trailing_at_sign() {
+        // Simulates a completion scenario: the user has typed `@` on a
+        // new line but hasn't finished the tag yet.  The docblock has
+        // no closing `*/` because the cursor is mid-edit.
+        let doc = "/**\n * @param string $name\n * @";
+        // Without fix-up, mago-docblock may return None for partial input.
+        let result = parse_docblock_for_tags(doc);
+        assert!(
+            result.is_none(),
+            "bare partial docblock with trailing @ returns None"
+        );
+
+        // With the fix-up helper, the bare `@` line is stripped and `*/`
+        // is appended, making the docblock parseable.
+        let fixed = parse_docblock_for_tags_lossy(doc);
+        let info = fixed.expect("fix-up should make partial docblock parseable");
+        let params: Vec<_> = info.tags_by_kind(TagKind::Param).collect();
+        assert_eq!(
+            params.len(),
+            1,
+            "should find @param after fix-up: tags={:?}",
+            info.tags.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
+        assert!(
+            params[0].description.contains("$name"),
+            "param should contain $name: {:?}",
+            params[0].description
+        );
+    }
+
+    #[test]
+    fn lossy_parse_already_complete_docblock() {
+        // When the docblock is already complete, lossy parse behaves
+        // identically to the normal parse.
+        let doc = "/**\n * @param int $x\n * @return string\n */";
+        let info = parse_docblock_for_tags_lossy(doc).expect("should parse");
+        assert_eq!(info.tags.len(), 2);
+        assert_eq!(info.tags[0].kind, TagKind::Param);
+        assert_eq!(info.tags[1].kind, TagKind::Return);
+    }
+
+    #[test]
+    fn complete_docblock_with_bare_at_mid_body() {
+        // Simulates the throws-completion scenario: the docblock has a
+        // closing `*/` but contains a bare `@` where the user is typing.
+        // `parse_docblock_for_tags` (strict) may fail on the bare `@`;
+        // `parse_docblock_for_tags_lossy` must still find the @throws tag.
+        let doc = "/**\n * @throws RuntimeException\n * @\n */";
+
+        // Strict parse fails because of the bare `@`.
+        assert!(parse_docblock_for_tags(doc).is_none());
+
+        // Lossy strips the bare-@ line and succeeds.
+        let info = parse_docblock_for_tags_lossy(doc).expect("lossy should parse");
+        let throws: Vec<_> = info.tags_by_kind(TagKind::Throws).collect();
+        assert_eq!(
+            throws.len(),
+            1,
+            "should find @throws despite bare @: tags={:?}",
+            info.tags
+                .iter()
+                .map(|t| format!("@{}", t.name))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            throws[0].description.contains("RuntimeException"),
+            "throws tag should contain RuntimeException: {:?}",
+            throws[0].description
         );
     }
 }

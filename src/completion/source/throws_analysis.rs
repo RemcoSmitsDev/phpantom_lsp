@@ -390,14 +390,10 @@ pub(crate) fn find_inline_throws_annotations(body: &str) -> Vec<ThrowInfo> {
 
             if let Some(end) = doc_end {
                 let docblock = &body[doc_start..end];
-                for line in docblock.lines() {
-                    let trimmed = line
-                        .trim()
-                        .trim_start_matches('/')
-                        .trim_start_matches('*')
-                        .trim();
-                    if let Some(rest) = trimmed.strip_prefix("@throws") {
-                        let rest = rest.trim();
+                if let Some(info) = crate::docblock::parser::parse_docblock_for_tags(docblock) {
+                    use mago_docblock::document::TagKind;
+                    for tag in info.tags_by_kind(TagKind::Throws) {
+                        let rest = tag.description.trim();
                         if let Some(type_name) = rest.split_whitespace().next() {
                             let clean = type_name
                                 .trim_start_matches('\\')
@@ -538,14 +534,10 @@ pub(crate) fn find_method_throws_tags(file_content: &str, method_name: &str) -> 
             && let Some(doc_start) = before.rfind("/**")
         {
             let docblock = &before[doc_start..];
-            for line in docblock.lines() {
-                let trimmed = line
-                    .trim()
-                    .trim_start_matches('/')
-                    .trim_start_matches('*')
-                    .trim();
-                if let Some(rest) = trimmed.strip_prefix("@throws") {
-                    let rest = rest.trim();
+            if let Some(info) = crate::docblock::parser::parse_docblock_for_tags(docblock) {
+                use mago_docblock::document::TagKind;
+                for tag in info.tags_by_kind(TagKind::Throws) {
+                    let rest = tag.description.trim();
                     if let Some(type_str) = rest.split_whitespace().next() {
                         let clean = type_str
                             .trim_end_matches('/')

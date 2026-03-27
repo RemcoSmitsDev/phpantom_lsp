@@ -47,38 +47,39 @@ adopted the centralised `DocblockInfo` / `parse_docblock_for_tags`
 infrastructure in `src/docblock/parser.rs`.
 
 **Why it matters:** The core `src/docblock/` module is fully migrated,
-but at least **8 other modules** still contain hand-rolled docblock
-parsers — each reimplementing the same `trim_start_matches('*')` +
-`strip_prefix("@tag")` pattern. This creates maintenance burden,
-inconsistent behaviour, and missed bug fixes (e.g. multi-line tag
-handling, `@phpstan-*` variant support).
+and the majority of hand-rolled docblock parsers across the project
+have been replaced with structured `DocblockInfo` access. The remaining
+items are either high-effort (`symbol_map/docblock.rs`) or low-impact
+(position-finding code in `file_lookup.rs`).
 
 **Relationship to M3/M4:** Independent. Can be done before, after, or
 in parallel with either. Items are ordered by impact.
 
-### Cross-cutting prerequisites
+### Remaining items
 
-These changes to `DocblockInfo` / `TagInfo` in `src/docblock/parser.rs`
-unlock multiple items below and should be done first.
+1. **Migrate `symbol_map/docblock.rs` (~1,360 lines).**
+   Impact: **High**.  Effort: **High**.
 
-A. **Extend `DocblockInfo` with description text.**
-   `collect_tags()` currently discards `Element::Text` from the
-   mago-docblock `Document`. Add a `description: Option<String>`
-   field that captures the free-text content before the first tag.
-   This eliminates the most widely used manual parser
-   (`extract_docblock_description` in `hover/formatting.rs`, called
-   from 6+ sites).  The HTML-to-Markdown conversion (`<b>` → `**`
-   etc.) remains as a ~10-line post-processing step.
+   The single largest manual docblock parser in the project. It
+   reimplements line-by-line tag scanning for ~26 tag names,
+   multi-line type joining with offset maps, tag position validation,
+   and a 423-line recursive type string decomposer (`emit_type_spans`)
+   — all to produce `SymbolSpan` entries with file-level byte offsets
+   for go-to-definition and semantic tokens within docblocks.
 
-B. **Extend `TagInfo` with span information.**
-   Add `span: Span` to `TagInfo` by preserving it from
-   `mago_docblock::document::Tag`. This is the key enabler for
-   migrating `symbol_map/docblock.rs` — the module needs precise
-   byte offsets for every type reference within docblocks so that
-   go-to-definition, find-references, and semantic tokens work
-   inside `/** */` comments.
+   `TagInfo` now has `span` and `description_span` fields (added as
+   part of the prerequisites). This module could parse docblocks with
+   `parse_docblock()` (which already calls
+   `mago_docblock::parse_phpdoc_with_span`) and iterate the
+   structured `TagInfo` entries instead of scanning raw lines.
+   The `emit_type_spans` function would remain largely unchanged
+   (it parses type *strings*, which is an M4 concern), but the
+   ~400 lines of tag scanning, `is_tag_position`, and
+   `join_multiline_type` would be eliminated.
 
-C. **Consolidate docblock locators.**
+2. **Consolidate docblock locators.**
+   Impact: **Medium**.  Effort: **Medium**.
+
    There are **5 separate implementations** of "find the docblock
    for this function/node":
 
@@ -91,117 +92,35 @@ C. **Consolidate docblock locators.**
    Variants #3–5 exist because their callers start from a byte
    offset or diagnostic line rather than an AST node. A shared
    utility that can work from either starting point would eliminate
-   this duplication. Also unify the three incompatible docblock-info
-   structs (`FunctionWithDocblock`, `DocblockInfo` in add_throws,
-   `DocblockAbove`) into the canonical `DocblockInfo` from
-   `parser.rs`.
+   this duplication.
 
-### High-impact items
-
-1. **Migrate `symbol_map/docblock.rs` (~1,360 lines).**
-   Impact: **High**.  Effort: **High**.  Depends on: prerequisite B.
-
-   The single largest manual docblock parser in the project. It
-   reimplements line-by-line tag scanning for ~26 tag names,
-   multi-line type joining with offset maps, tag position validation,
-   and a 423-line recursive type string decomposer (`emit_type_spans`)
-   — all to produce `SymbolSpan` entries with file-level byte offsets
-   for go-to-definition and semantic tokens within docblocks.
-
-   After prerequisite B adds spans to `TagInfo`, this module could
-   parse docblocks with `parse_docblock()` (which already calls
-   `mago_docblock::parse_phpdoc_with_span`) and iterate the
-   structured `TagInfo` entries instead of scanning raw lines.
-   The `emit_type_spans` function would remain largely unchanged
-   (it parses type *strings*, which is an M4 concern), but the
-   ~400 lines of tag scanning, `is_tag_position`, and
-   `join_multiline_type` would be eliminated.
-
-2. **Migrate `code_actions/update_docblock.rs` (~660 lines of parsing).**
-   Impact: **High**.  Effort: **Medium**.  Depends on: prerequisite A.
-
-   The "Update docblock to match signature" code action has its own
-   complete docblock parser:
-   - `parse_doc_params()` (~80 lines) — hand-parses `@param` tags
-   - `parse_doc_return()` (~40 lines) — hand-parses `@return`
-   - `parse_doc_throws()` (~20 lines) — hand-parses `@throws`
-   - `parse_docblock_lines()` (~80 lines) — categorizes lines into
-     a `DocLine` enum (Open, Close, Text, Param, Return, OtherTag)
-   - `find_docblock_start_for_node()` — duplicates
-     `get_docblock_text_for_node`
-
-   The parsing functions can be replaced with
-   `parse_docblock_for_tags()` + `_from_info` variants.
-   `parse_docblock_lines` can be replaced by iterating
-   `DocblockInfo.tags` plus the new `description` field from
-   prerequisite A. Docblock *generation/rebuilding* (~200 lines)
-   would still need custom code, but operating on a structured model
-   would make it more robust than the current `prev_was_param` /
-   `prev_was_text_or_empty` boolean tracking.
-
-3. **Migrate `hover/formatting.rs` — `extract_docblock_description`.**
-   Impact: **High** (called from 6+ sites).  Effort: **Low**.
-   Depends on: prerequisite A.
-
-   Currently does manual `/** */` stripping, line-by-line `*`-prefix
-   scanning, and collects free text before the first `@tag`. After
-   prerequisite A adds `description` to `DocblockInfo`, this becomes
-   a simple field read + the existing HTML-to-Markdown conversion.
-
-   Also migrate `extract_var_description` — can use `TagKind::Var` +
-   `tag.description` to eliminate the stripping/scanning; splitting
-   type from description still needs `skip_type_token` until M4.
-
-### Medium-impact items
-
-4. **Migrate `code_actions/phpstan/add_throws.rs` & `remove_throws.rs`.**
-   Impact: **Medium**.  Effort: **Medium**.  Depends on: prerequisite C.
-
-   Each file has its own backward-scanning docblock locator and its
-   own incompatible docblock-info struct. Manual `@throws` tag
-   scanning can be replaced with `parse_docblock_for_tags()` +
-   `extract_throws_tags_from_info()`.
-
-   Docblock *generation* (inserting a `@throws` line into an
-   existing docblock, creating a new docblock, converting
-   single-line → multi-line, removing a specific `@throws` line)
-   still needs custom code, but the *reading* side becomes trivial.
-
-5. **Migrate `completion/phpdoc/mod.rs` — existing tag detection.**
-   Impact: **Medium**.  Effort: **Low**.
-
-   Three functions (`find_existing_param_tags`,
-   `has_existing_return_tag`, `find_existing_throws_tags`) manually
-   scan docblocks for existing tags to avoid duplicates during
-   completion. Once the raw `/** … */` text is obtained, use
-   `parse_docblock_for_tags()` instead of line-by-line scanning.
-
-   **Caveat:** These operate on *incomplete* docblocks (the user is
-   still typing; `*/` may not exist yet). Need to verify
-   mago-docblock handles partial input gracefully or keep a fallback.
-
-6. **Migrate `completion/source/throws_analysis.rs` — `@throws` extraction.**
-   Impact: **Medium**.  Effort: **Low**.
-
-   `find_inline_throws_annotations` and `find_method_throws_tags`
-   locate docblocks by byte offset (custom scanning — must stay),
-   then manually parse `@throws` tags. The tag extraction can
-   delegate to `extract_throws_tags_from_info()`.
-
-7. **Migrate `diagnostics/mod.rs` — `scope_has_throws_tag`.**
-   Impact: **Medium**.  Effort: **Low**.
-
-   Manual line-by-line `@throws` scanning within an already-extracted
-   docblock string. Direct replacement with
-   `parse_docblock_for_tags()` +
-   `extract_throws_tags_from_info()`.
-
-8. **Migrate `definition/member/file_lookup.rs` — `@property`/`@method` position lookup.**
+3. **Migrate `definition/member/file_lookup.rs` — `@property`/`@method` position lookup.**
    Impact: **Low-Medium**.  Effort: **Low**.
 
    Manual `trim_start_matches('*')` + `starts_with("@property-read")`
-   for finding member definition positions in docblocks. Could use
-   `parse_docblock_for_tags()` with `TagKind::PropertyRead` etc.
+   for finding member definition positions in docblocks. The line-scanning
+   serves a dual purpose (finding positions AND verifying tag type), so
+   the benefit from structured parsing is limited.
+
+4. **Migrate `code_actions/update_docblock.rs` — `parse_docblock_lines` and rebuild.**
+   Impact: **Low-Medium**.  Effort: **Medium**.
+
+   The `parse_doc_params`, `parse_doc_return`, and `parse_doc_throws`
+   functions have been migrated to `_from_info` variants. The remaining
+   hand-rolled code is `parse_docblock_lines` (~80 lines, categorises
+   lines into a `DocLine` enum for the rebuild pipeline) and
+   `find_docblock_start_for_node` (duplicate of the canonical
+   `get_docblock_text_for_node`). The rebuild pipeline operates on
+   raw text lines for surgical editing, so it benefits less from
+   structured parsing.
+
+5. **Migrate `code_actions/phpstan/remove_throws.rs` — `build_remove_throws_edit`.**
+   Impact: **Low-Medium**.  Effort: **Low**.
+
+   The `@throws` tag *detection* in `add_throws.rs` has been migrated.
+   The remaining code in `remove_throws.rs` does line-level text editing
+   (finding which raw line to delete, handling blank-line cleanup) which
+   inherently needs to work with raw text.
 
 ### Not applicable
 
@@ -223,17 +142,14 @@ C. **Consolidate docblock locators.**
 
 ### Effort estimate
 
-| Prerequisite / Item | Lines eliminated (approx.) | Effort |
-| -------------------- | ------------------------- | ------ |
-| A. Description in `DocblockInfo` | — (enabler) | Low |
-| B. Spans in `TagInfo` | — (enabler) | Low |
-| C. Consolidate locators | ~150 | Medium |
+| Item | Lines eliminated (approx.) | Effort |
+| ---- | ------------------------- | ------ |
 | 1. `symbol_map/docblock.rs` | ~800 | High |
-| 2. `update_docblock.rs` | ~300 | Medium |
-| 3. `hover/formatting.rs` | ~100 | Low |
-| 4. `add_throws.rs` + `remove_throws.rs` | ~200 | Medium |
-| 5–8. Smaller targets | ~150 | Low each |
-| **Total** | **~1,700** | **Medium-High** |
+| 2. Consolidate locators | ~150 | Medium |
+| 3. `file_lookup.rs` | ~20 | Low |
+| 4. `update_docblock.rs` rebuild | ~160 | Medium |
+| 5. `remove_throws.rs` edit | ~30 | Low |
+| **Total remaining** | **~1,160** | **Medium-High** |
 
 ### Implementation notes
 
@@ -242,9 +158,12 @@ C. **Consolidate docblock locators.**
   skipping insertion next to structural delimiters `<>{}()`.
 - `@phpstan-extends`, `@phpstan-implements`, `@phpstan-use`, and
   `@removed` are `TagKind::Other`; matched by `tag.name` fallback.
-- The `_from_info` API (already in place) eliminates redundant
-  parsing by sharing a single `DocblockInfo` across multiple
-  extractions from the same docblock.
+- The `_from_info` API eliminates redundant parsing by sharing a
+  single `DocblockInfo` across multiple extractions from the same
+  docblock.
+- `parse_docblock_for_tags_lossy` appends `*/` and strips trailing
+  bare `@` to handle partial docblocks during completion. Used by
+  `completion/phpdoc/mod.rs` for existing-tag detection.
 
 ---
 
