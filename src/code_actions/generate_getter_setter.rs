@@ -93,6 +93,7 @@ impl Backend {
             CursorContext::InClassLike {
                 member: MemberContext::Property(prop),
                 all_members,
+                ..
             } => (*prop, *all_members),
             _ => return,
         };

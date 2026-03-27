@@ -16,6 +16,19 @@ use mago_syntax::ast::*;
 
 // ── Public types ────────────────────────────────────────────────────────────
 
+/// Which kind of class-like declaration the cursor is inside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClassLikeContextKind {
+    /// A `class` declaration (concrete or abstract).
+    Class,
+    /// An `interface` declaration.
+    Interface,
+    /// A `trait` declaration.
+    Trait,
+    /// An `enum` declaration.
+    Enum,
+}
+
 /// Which member the cursor is on, together with its byte span.
 #[derive(Debug)]
 pub(crate) enum MemberContext<'a> {
@@ -40,6 +53,12 @@ pub(crate) enum MemberContext<'a> {
 pub(crate) enum CursorContext<'a> {
     /// The cursor is inside a class-like body.
     InClassLike {
+        /// What kind of class-like declaration this is.
+        kind: ClassLikeContextKind,
+        /// Whether the class-like declaration has the `readonly` modifier
+        /// (PHP 8.2+ `readonly class`).  Always `false` for interfaces,
+        /// traits, and enums.
+        class_readonly: bool,
         /// The specific member under the cursor (if any).
         member: MemberContext<'a>,
         /// All members of the class-like, for actions that need to
@@ -100,6 +119,8 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
             if cursor >= span.start.offset && cursor <= span.end.offset {
                 let member = find_member_at_cursor(class.members.iter(), cursor);
                 CursorContext::InClassLike {
+                    kind: ClassLikeContextKind::Class,
+                    class_readonly: class.modifiers.contains_readonly(),
                     member,
                     all_members: &class.members,
                 }
@@ -112,6 +133,8 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
             if cursor >= span.start.offset && cursor <= span.end.offset {
                 let member = find_member_at_cursor(iface.members.iter(), cursor);
                 CursorContext::InClassLike {
+                    kind: ClassLikeContextKind::Interface,
+                    class_readonly: false,
                     member,
                     all_members: &iface.members,
                 }
@@ -124,6 +147,8 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
             if cursor >= span.start.offset && cursor <= span.end.offset {
                 let member = find_member_at_cursor(tr.members.iter(), cursor);
                 CursorContext::InClassLike {
+                    kind: ClassLikeContextKind::Trait,
+                    class_readonly: false,
                     member,
                     all_members: &tr.members,
                 }
@@ -136,6 +161,8 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
             if cursor >= span.start.offset && cursor <= span.end.offset {
                 let member = find_member_at_cursor(en.members.iter(), cursor);
                 CursorContext::InClassLike {
+                    kind: ClassLikeContextKind::Enum,
+                    class_readonly: false,
                     member,
                     all_members: &en.members,
                 }

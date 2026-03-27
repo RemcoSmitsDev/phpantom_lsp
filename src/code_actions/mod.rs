@@ -37,6 +37,11 @@
 //!   declaration, offer to generate `getX()` / `setX()` accessor
 //!   methods (or `isX()` for `bool` properties).  Readonly properties
 //!   only get a getter.  Static properties generate static methods.
+//! - **Generate property hooks** — when the cursor is on a property
+//!   declaration (PHP 8.4+), offer to generate `get` and/or `set`
+//!   hooks inline on the property.  Static properties are skipped.
+//!   Readonly properties only get a `get` hook.  Interface properties
+//!   generate abstract hook signatures without bodies.
 
 mod change_visibility;
 pub(crate) mod cursor_context;
@@ -44,6 +49,7 @@ mod extract_function;
 mod extract_variable;
 mod generate_constructor;
 mod generate_getter_setter;
+mod generate_property_hooks;
 pub(crate) mod implement_methods;
 mod import_class;
 mod inline_variable;
@@ -98,6 +104,9 @@ impl Backend {
 
         // ── Generate getter/setter ──────────────────────────────────────────
         self.collect_generate_getter_setter_actions(uri, content, params, &mut actions);
+
+        // ── Generate property hooks (PHP 8.4+) ─────────────────────────────
+        self.collect_generate_property_hook_actions(uri, content, params, &mut actions);
 
         // ── Extract variable ────────────────────────────────────────────
         self.collect_extract_variable_actions(uri, content, params, &mut actions);

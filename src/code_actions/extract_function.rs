@@ -180,6 +180,7 @@ fn find_enclosing_context(content: &str, offset: u32, uses_this: bool) -> Option
         CursorContext::InClassLike {
             member,
             all_members,
+            ..
         } => {
             if let MemberContext::Method(method, true) = member {
                 let is_static = method.modifiers.iter().any(|m| m.is_static());

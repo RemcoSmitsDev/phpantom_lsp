@@ -81,6 +81,7 @@ impl Backend {
             CursorContext::InClassLike {
                 member: MemberContext::Property(prop),
                 all_members,
+                ..
             } => {
                 // Only offer on non-static properties — static properties
                 // won't be included in the generated constructor.

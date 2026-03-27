@@ -2460,6 +2460,36 @@ class GenerateGetterSetterDemo
 }
 
 
+// ── Generate Property Hooks (Code Action, PHP 8.4+) ────────────────────────
+// Place the cursor on a property declaration below and trigger "Code Action"
+// to see "Generate get hook", "Generate set hook", and "Generate get and set
+// hooks".  The property declaration is rewritten to include hook blocks
+// inline.  Readonly properties are skipped (PHP 8.4 forbids hooks on readonly
+// properties).  Static properties are also skipped.  Interface
+// properties generate abstract hook signatures without bodies.  Properties
+// that already have one hook only offer the missing one.
+
+class GeneratePropertyHooksDemo
+{
+    // Cursor here → all three hook actions offered
+    public string $title;
+
+    // Cursor here → no hook actions (readonly properties cannot have hooks)
+    public readonly int $id;
+
+    // Cursor here → no hook actions (static)
+    public static int $counter;
+
+    // Cursor here → only "Generate set hook" (get already exists)
+    public string $label {
+        get => $this->label;
+    }
+
+    // Default values are preserved when hooks are added
+    public string $status = 'draft';
+}
+
+
 // ── Property-Level Narrowing ────────────────────────────────────────────────
 
 class PropertyNarrowingDemo
