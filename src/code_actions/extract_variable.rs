@@ -212,25 +212,34 @@ fn is_entire_assignment_rhs(content: &str, start: usize, end: usize) -> bool {
 /// is just `<indent><expression>;`).  Extracting such a selection into
 /// a variable would produce a useless `$var;` statement.
 fn is_entire_expression_statement(content: &str, start: usize, end: usize) -> bool {
-    // Find the start of the line containing `start`.
-    let before = &content[..start];
-    let line_start = match before.rfind('\n') {
-        Some(pos) => pos + 1,
-        None => 0,
-    };
+    let selected = content[start..end].trim();
+    if selected.is_empty() {
+        return false;
+    }
 
-    // Find the end of the line containing `end`.
+    // Strip a trailing semicolon if present — `var_dump($value);` and
+    // `var_dump($value)` should both be recognised as standalone
+    // expression statements.
+    let expr = selected.strip_suffix(';').unwrap_or(selected).trim();
+    if expr.is_empty() {
+        return false;
+    }
+
+    // Find the source line that contains the expression.  Use `end - 1`
+    // so a selection ending right after `;\n` still lands on the correct
+    // line.
+    let expr_end = end.saturating_sub(1).max(start);
+    let line_start = content[..expr_end].rfind('\n').map_or(0, |pos| pos + 1);
     let line_end = content[end..]
         .find('\n')
         .map_or(content.len(), |pos| end + pos);
 
-    let line = &content[line_start..line_end];
-    let line_trimmed = line.trim();
+    let line_trimmed = content[line_start..line_end].trim();
 
-    // The line (after trimming whitespace) should be exactly the
-    // selected text followed by a semicolon.
-    let selected = content[start..end].trim();
-    line_trimmed == format!("{};", selected) || line_trimmed == selected
+    // The line (after trimming whitespace) is exactly `expr;` — the
+    // selection covers the whole expression statement.
+    let with_semi = format!("{};", expr);
+    line_trimmed == with_semi || line_trimmed == expr
 }
 
 /// Generate a variable name (without `$` prefix) from the selected
@@ -1524,6 +1533,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extract_variable_not_offered_for_standalone_statement_multiline_selection() {
+        // Selecting from end of a comment line through `var_dump($value);`
+        // should not offer extract variable — the call is a standalone
+        // expression statement used for side effects, not a value.
+        let backend = crate::Backend::new_test();
+        let uri = "file:///test.php";
+        let content = "\
+<?php
+class Test {
+    public function dump($value): void
+    {
+        // select from here
+        var_dump($value);
+        // to here
+    }
+}
+";
+
+        backend.update_ast(uri, content);
+
+        // Select from end of comment line (line 4, col 27) to end of
+        // var_dump line (line 5, col 25) — mimics dragging from the
+        // end of one line to the end of the next.
+        let comment_line = "        // select from here";
+        let vardump_line = "        var_dump($value);";
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier {
+                uri: uri.parse().unwrap(),
+            },
+            range: Range {
+                start: Position::new(4, comment_line.len() as u32),
+                end: Position::new(5, vardump_line.len() as u32),
+            },
+            context: CodeActionContext {
+                diagnostics: vec![],
+                only: None,
+                trigger_kind: None,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let actions = backend.handle_code_action(uri, content, &params);
+        let extract_actions: Vec<_> = actions
+            .iter()
+            .filter(|a| match a {
+                CodeActionOrCommand::CodeAction(ca) => ca.title.contains("Extract to variable"),
+                _ => false,
+            })
+            .collect();
+
+        assert!(
+            extract_actions.is_empty(),
+            "should not offer extract variable for standalone statement selected across lines: {:?}",
+            extract_actions
+                .iter()
+                .map(|a| match a {
+                    CodeActionOrCommand::CodeAction(ca) => &ca.title,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
     // ── is_entire_assignment_rhs tests ──────────────────────────────
 
     #[test]
@@ -1583,6 +1657,16 @@ mod tests {
         let start = content.find("count").unwrap();
         let end = content.find("($items)").unwrap() + 8;
         assert!(!is_entire_expression_statement(content, start, end));
+    }
+
+    #[test]
+    fn is_entire_statement_true_for_multiline_selection_with_comment() {
+        // Selecting from end of a comment line through `var_dump($value);`
+        // should still be detected as a standalone expression statement.
+        let content = "<?php\nfunction test($value) {\n    // comment\n    var_dump($value);\n}\n";
+        let start = content.find("// comment").unwrap() + "// comment".len();
+        let end = content.find("var_dump($value);").unwrap() + "var_dump($value);".len();
+        assert!(is_entire_expression_statement(content, start, end));
     }
 
     // ── is_valid_expression tests ───────────────────────────────────

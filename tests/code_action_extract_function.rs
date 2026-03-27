@@ -258,7 +258,8 @@ class Validator {
 
     // Call site should use the bool-flag pattern with false.
     // Parameter order depends on the scope classifier (first-use order).
-    let has_bool_guard_call = result.contains("if (!$this->validateGuard($dog, $cat)) return false;")
+    let has_bool_guard_call = result
+        .contains("if (!$this->validateGuard($dog, $cat)) return false;")
         || result.contains("if (!$this->validateGuard($cat, $dog)) return false;");
     assert!(
         has_bool_guard_call,
@@ -732,12 +733,12 @@ class Calculator {
 
     // The call site should use $this->
     assert!(
-        result.contains("$this->extracted()"),
+        result.contains("$this->renderCompute()"),
         "should call via $this->: {result}"
     );
     // The method should be private.
     assert!(
-        result.contains("private function extracted()"),
+        result.contains("private function renderCompute()"),
         "extracted method should be private: {result}"
     );
 }
@@ -992,7 +993,7 @@ class Foo {
     // The extracted method must be indented at the same level as sibling
     // methods (4 spaces), NOT at the body level (8 spaces).
     assert!(
-        result.contains("\n    private function extracted()"),
+        result.contains("\n    private function renderBar()"),
         "extracted method should be indented at member level (4 spaces), got:\n{result}"
     );
     // The body inside the extracted method should be 8 spaces.

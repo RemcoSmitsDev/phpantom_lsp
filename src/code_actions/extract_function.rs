@@ -491,12 +491,20 @@ struct NamingContext<'a> {
 ///    `printf`/`var_dump`): `render{Enclosing}`.
 /// 6. **Single return variable**: `compute{VarName}` — the user
 ///    extracted a calculation into its own function.
-/// 7. **Fallback**: `"extracted"`.
+/// 7. **Body ends with output** (setup assignments followed by
+///    `echo`/`print`): `render{Enclosing}`.
+/// 8. **Single delegating call** (`$this->foo(…)`, `doWork(…)`):
+///    the name of the called method/function.
+/// 9. **Fallback**: `"extracted"`.
 ///
 /// After choosing a base name, the function deduplicates against
 /// existing names in the appropriate scope (class members for methods,
 /// file-level `function` declarations for standalone functions).
-fn generate_function_name(content: &str, enclosing_ctx: &EnclosingContext, naming: &NamingContext) -> String {
+fn generate_function_name(
+    content: &str,
+    enclosing_ctx: &EnclosingContext,
+    naming: &NamingContext,
+) -> String {
     let base = derive_base_name(naming);
 
     // Deduplicate against the right scope.
@@ -562,7 +570,19 @@ fn derive_base_name(ctx: &NamingContext) -> String {
         }
     }
 
-    // 7. Fallback
+    // 7. Ends with output (setup + echo/print) → render{Enclosing}
+    if ends_with_output(ctx.body_text) && !enc.is_empty() {
+        return format!("render{}", capitalise(enc));
+    }
+
+    // 8. Single method/function call → {calledName}
+    if let Some(name) = detect_single_call(ctx.body_text)
+        && !name.is_empty()
+    {
+        return name;
+    }
+
+    // 9. Fallback
     "extracted".to_string()
 }
 
@@ -578,34 +598,134 @@ fn capitalise(s: &str) -> String {
     }
 }
 
-/// Detect if the body text is a factory pattern: it contains `new ClassName`
-/// and the last non-empty statement is a `return`.
+/// Detect if the body text is a factory pattern: the extracted code
+/// constructs an object and returns it.
 ///
-/// Returns the class name if a factory pattern is detected.
+/// Returns a name suitable for `create{Name}`.
+///
+/// When the body assigns `$var = new X(…)` and later returns `$var`,
+/// the variable name is used (e.g. `$users` → `"Users"`).  This
+/// produces `createUsers` rather than `createCollection`, which
+/// matches how developers think about the domain object.
+///
+/// When the body does `return new ClassName(…)` directly, the class
+/// name is used instead (there is no variable to take a hint from).
 fn detect_factory_pattern(body: &str) -> Option<String> {
-    // Look for `new ClassName` patterns.
-    let mut class_name = None;
-    for (i, _) in body.match_indices("new ") {
-        let after = &body[i + 4..];
-        let name: String = after
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\\')
-            .collect();
-        if !name.is_empty() && name.starts_with(|c: char| c.is_ascii_uppercase()) {
-            class_name = Some(name);
+    let mut returned_class: Option<String> = None;
+    let mut returned_var: Option<String> = None;
+    let mut assigned_var: Option<String> = None;
+    let mut assigned_class: Option<String> = None;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        // Check for `return new ClassName(…)` — direct return.
+        if let Some(after_return) = trimmed.strip_prefix("return ")
+            && let Some(name) = extract_new_class_name(after_return.trim_start())
+        {
+            returned_class = Some(name);
+        }
+        // Check for `return $var;` — returning a variable.
+        if let Some(after_return) = trimmed.strip_prefix("return ") {
+            let var = after_return.trim().trim_end_matches(';').trim();
+            if var.starts_with('$') && var[1..].chars().all(|c| c.is_alphanumeric() || c == '_') {
+                returned_var = Some(var.to_string());
+            }
+        }
+        // Check for `$var = new ClassName(…)` (direct assignment).
+        if let Some(eq_pos) = trimmed.find('=') {
+            // Make sure it's `=` not `==` / `===` / `!=` etc.
+            let before_eq = &trimmed[..eq_pos];
+            let after_eq = &trimmed[eq_pos + 1..];
+            let var_name = before_eq.trim();
+            if var_name.starts_with('$')
+                && !after_eq.starts_with('=')
+                && !before_eq.ends_with('!')
+                && !before_eq.ends_with('<')
+                && !before_eq.ends_with('>')
+                && let Some(class_name) = extract_new_class_name(after_eq.trim_start())
+            {
+                assigned_var = Some(var_name.to_string());
+                assigned_class = Some(class_name);
+            }
         }
     }
 
-    // Only use the factory name if the body actually returns something
-    // (the TrailingReturn strategy already guarantees this, but let's
-    // verify the `new` is the thing being constructed and returned).
-    if let Some(name) = class_name {
-        // Strip namespace prefix, keep only the short class name.
+    // Best case: `$var = new X(…); ... return $var;` — use the
+    // variable name because it carries domain meaning (e.g. `$users`
+    // → `createUsers`).  Fall back to the class name when the variable
+    // is too short to be meaningful (`$u`, `$x`, etc.).
+    if let Some(ref ret_var) = returned_var
+        && let Some(ref asgn_var) = assigned_var
+        && ret_var == asgn_var
+    {
+        let var_clean = ret_var.trim_start_matches('$');
+        if var_clean.len() > 2 {
+            return Some(capitalise(var_clean));
+        }
+        // Short variable — prefer the class name.
+        if let Some(ref name) = assigned_class {
+            let short = name.rsplit('\\').next().unwrap_or(name);
+            return Some(short.to_string());
+        }
+    }
+
+    // `return new ClassName(…)` — use the class name.
+    if let Some(name) = returned_class {
+        let short = name.rsplit('\\').next().unwrap_or(&name);
+        return Some(short.to_string());
+    }
+
+    // `$var = new ClassName(…)` without an explicit return — use the
+    // variable name if long enough, otherwise the class name.
+    if let Some(ref var) = assigned_var {
+        let var_clean = var.trim_start_matches('$');
+        if var_clean.len() > 2 {
+            return Some(capitalise(var_clean));
+        }
+    }
+    if let Some(name) = assigned_class {
         let short = name.rsplit('\\').next().unwrap_or(&name);
         return Some(short.to_string());
     }
 
     None
+}
+
+/// Extract a class name from text starting with `new ClassName`.
+///
+/// Returns `None` if the text doesn't start with `new ` followed by
+/// an uppercase identifier.
+fn extract_new_class_name(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("new ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\\')
+        .collect();
+    if !name.is_empty() && name.starts_with(|c: char| c.is_ascii_uppercase()) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Output-statement prefixes shared by the pure/trailing output checks.
+const OUTPUT_PREFIXES: &[&str] = &[
+    "echo ",
+    "echo(",
+    "echo \"",
+    "echo '",
+    "print ",
+    "print(",
+    "printf(",
+    "var_dump(",
+    "print_r(",
+    "var_export(",
+];
+
+/// Returns `true` when `line` (trimmed, without trailing `;`) looks
+/// like an output statement.
+fn is_output_line(line: &str) -> bool {
+    OUTPUT_PREFIXES.iter().any(|p| line.starts_with(p))
 }
 
 /// Check whether every statement in the body is a pure output statement
@@ -616,25 +736,132 @@ fn is_pure_output(body: &str) -> bool {
         return false;
     }
 
-    let output_prefixes = [
-        "echo ", "echo(", "print ", "print(",
-        "printf(", "var_dump(", "print_r(", "var_export(",
-    ];
-
     for line in trimmed.lines() {
         let line = line.trim().trim_end_matches(';').trim();
         if line.is_empty() || line.starts_with("//") || line.starts_with('#') {
             continue;
         }
-        let is_output = output_prefixes.iter().any(|p| line.starts_with(p));
-        // Also match string interpolation in echo: echo "..."
-        let is_echo_string = line.starts_with("echo \"") || line.starts_with("echo '");
-        if !is_output && !is_echo_string {
+        if !is_output_line(line) {
             return false;
         }
     }
 
     true
+}
+
+/// Check whether the body *ends* with one or more output statements
+/// but also contains non-output setup lines (assignments, calls, etc.).
+///
+/// This catches the common "compute then display" pattern:
+/// ```php
+/// $first = $users->first();
+/// echo $first->name;
+/// ```
+fn ends_with_output(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(|l| l.trim().trim_end_matches(';').trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with('#'))
+        .collect();
+
+    if lines.len() < 2 {
+        return false;
+    }
+
+    // The last line must be output.
+    if !is_output_line(lines[lines.len() - 1]) {
+        return false;
+    }
+
+    // At least one earlier line must NOT be output (otherwise
+    // `is_pure_output` already matched).
+    lines[..lines.len() - 1].iter().any(|l| !is_output_line(l))
+}
+
+/// Detect when the body is a single method call or function call
+/// statement (no assignment, no return).  Returns a name derived from
+/// the called method/function.
+///
+/// Examples:
+/// - `$this->execute($fn)` → `"execute"`
+/// - `self::validate($x)`  → `"validate"`
+/// - `doSomething($x)`     → `"doSomething"`
+fn detect_single_call(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+
+    // Must be a single non-comment line.
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("//") && !l.starts_with('#'))
+        .collect();
+    if lines.len() != 1 {
+        return None;
+    }
+
+    let line = lines[0].strip_suffix(';').unwrap_or(lines[0]).trim();
+
+    // Must not be an assignment.
+    if line.contains('=') {
+        // Allow `==`, `!=`, `===`, `!==`, `>=`, `<=` inside expressions,
+        // but reject bare `$var = ...` assignments.
+        if let Some(eq_pos) = line.find('=') {
+            let before = &line[..eq_pos];
+            let after = &line[eq_pos + 1..];
+            if before.trim().starts_with('$')
+                && !after.starts_with('=')
+                && !before.ends_with('!')
+                && !before.ends_with('<')
+                && !before.ends_with('>')
+            {
+                return None;
+            }
+        }
+    }
+
+    // Extract the method/function name from the call.
+    // `$this->foo(...)` or `$var->foo(...)`
+    if let Some(arrow_pos) = line.rfind("->") {
+        let after = &line[arrow_pos + 2..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && after[name.len()..].starts_with('(') {
+            return Some(name);
+        }
+    }
+    // `self::foo(...)` or `static::foo(...)` or `ClassName::foo(...)`
+    if let Some(colon_pos) = line.rfind("::") {
+        let after = &line[colon_pos + 2..];
+        let name: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if !name.is_empty() && after[name.len()..].starts_with('(') {
+            return Some(name);
+        }
+    }
+    // `functionName(...)` — bare function call
+    let name: String = line
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\\')
+        .collect();
+    if !name.is_empty()
+        && name.starts_with(|c: char| c.is_ascii_lowercase() || c == '\\')
+        && line[name.len()..].starts_with('(')
+    {
+        // Use the short name (after last backslash).
+        let short = name.rsplit('\\').next().unwrap_or(&name);
+        return Some(short.to_string());
+    }
+
+    None
 }
 
 /// Deduplicate a base name against existing names in the appropriate scope.
@@ -2022,7 +2249,8 @@ impl Backend {
         // We don't have the trailing return type yet (it's resolved
         // below), but the naming heuristic only uses it for
         // TrailingReturn, which we can approximate here.
-        let pre_trailing_return_type = if matches!(return_strategy, ReturnStrategy::TrailingReturn) {
+        let pre_trailing_return_type = if matches!(return_strategy, ReturnStrategy::TrailingReturn)
+        {
             resolve_enclosing_return_type(content, start as u32)
         } else {
             String::new()
@@ -3102,6 +3330,170 @@ mod tests {
             enclosing_name: "build",
             return_strategy: &ReturnStrategy::TrailingReturn,
             body_text: "$u = new User('Alice');\nreturn $u;",
+            return_var_names: &[],
+            trailing_return_type: "",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        // Variable `$u` is too short (≤2 chars) → falls back to class name
+        assert_eq!(name, "createUser");
+    }
+
+    #[test]
+    fn name_ends_with_output() {
+        let content = "<?php\nclass Foo { function process() {} }\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Method,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "process".to_string(),
+            sibling_method_names: vec!["process".to_string()],
+        };
+        let naming = NamingContext {
+            enclosing_name: "process",
+            return_strategy: &ReturnStrategy::None,
+            body_text: "$first = $users->first();\necho $first->name;",
+            return_var_names: &[],
+            trailing_return_type: "",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        assert_eq!(name, "renderProcess");
+    }
+
+    #[test]
+    fn name_single_method_call() {
+        let content = "<?php\nclass Foo { function run() {} }\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Method,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "run".to_string(),
+            sibling_method_names: vec!["run".to_string()],
+        };
+        let naming = NamingContext {
+            enclosing_name: "run",
+            return_strategy: &ReturnStrategy::None,
+            body_text: "$this->execute($fn);",
+            return_var_names: &[],
+            trailing_return_type: "",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        assert_eq!(name, "execute");
+    }
+
+    #[test]
+    fn name_single_function_call() {
+        let content = "<?php\nfunction foo() {}\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Function,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "foo".to_string(),
+            sibling_method_names: Vec::new(),
+        };
+        let naming = NamingContext {
+            enclosing_name: "foo",
+            return_strategy: &ReturnStrategy::None,
+            body_text: "doSomething($x);",
+            return_var_names: &[],
+            trailing_return_type: "",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        assert_eq!(name, "doSomething");
+    }
+
+    #[test]
+    fn name_single_call_with_assignment_is_not_detected() {
+        // `$result = $this->execute($fn)` is an assignment, not a
+        // pure delegation — should fall through.
+        let content = "<?php\nclass Foo { function run() {} }\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Method,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "run".to_string(),
+            sibling_method_names: vec!["run".to_string()],
+        };
+        let naming = NamingContext {
+            enclosing_name: "run",
+            return_strategy: &ReturnStrategy::None,
+            body_text: "$result = $this->execute($fn);",
+            return_var_names: &["$result".to_string()],
+            trailing_return_type: "",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        // Single return var → computeResult (not "execute")
+        assert_eq!(name, "computeResult");
+    }
+
+    #[test]
+    fn name_factory_prefers_assigned_over_nested() {
+        // `new User('Alice')` is an argument to ->add(), not the thing
+        // being constructed.  The variable `$users` is what gets
+        // returned, so the name should be `createUsers`.
+        let content = "<?php\nclass Foo { function getUsers() {} }\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Method,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "getUsers".to_string(),
+            sibling_method_names: vec!["getUsers".to_string()],
+        };
+        let naming = NamingContext {
+            enclosing_name: "getUsers",
+            return_strategy: &ReturnStrategy::TrailingReturn,
+            body_text: "$users = new Collection();\n$users->add(new User('Alice'));\nreturn $users;",
+            return_var_names: &[],
+            trailing_return_type: "Collection",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        assert_eq!(name, "createUsers");
+    }
+
+    #[test]
+    fn name_factory_prefers_return_new_over_assignment() {
+        // `return new Product(…)` is a direct return — no variable to
+        // take a name from, so the class name is used.
+        let content = "<?php\nclass Foo { function build() {} }\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Method,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "build".to_string(),
+            sibling_method_names: vec!["build".to_string()],
+        };
+        let naming = NamingContext {
+            enclosing_name: "build",
+            return_strategy: &ReturnStrategy::TrailingReturn,
+            body_text: "$tmp = new Builder();\nreturn new Product($tmp);",
+            return_var_names: &[],
+            trailing_return_type: "",
+        };
+        let name = generate_function_name(content, &ctx, &naming);
+        assert_eq!(name, "createProduct");
+    }
+
+    #[test]
+    fn name_factory_direct_return_new_uses_class_name() {
+        // `return new User(…)` with no variable — class name is used.
+        let content = "<?php\nclass Foo { function make() {} }\n";
+        let ctx = EnclosingContext {
+            target: ExtractionTarget::Method,
+            insert_offset: content.len(),
+            body_start: 20,
+            is_static: false,
+            enclosing_name: "make".to_string(),
+            sibling_method_names: vec!["make".to_string()],
+        };
+        let naming = NamingContext {
+            enclosing_name: "make",
+            return_strategy: &ReturnStrategy::TrailingReturn,
+            body_text: "return new User('Alice');",
             return_var_names: &[],
             trailing_return_type: "",
         };
