@@ -759,6 +759,48 @@ essentially free for both eager and deferred indexing paths.
 
 ---
 
+## P17. `mago-names` resolution on the parse hot path
+
+**Impact: Medium · Effort: Low**
+
+The `mago-names` name resolver runs synchronously inside
+`update_ast_inner`, adding a full AST walk plus an owned `HashMap`
+copy on every `didChange` event. Measured regression from `6a0737a`
+("Migrate to use mago-names"):
+
+| Benchmark        | Before | After | Δ    |
+| ---------------- | ------ | ----- | ---- |
+| with_narrowing   | 12 ms  | 15 ms | +25% |
+| 5_methods_chain  | 8 ms   | 10 ms | +25% |
+| carbon_class     | 250 ms | 340 ms | +36% |
+| large_file       | 150 ms | 210 ms | +40% |
+
+The resolved names are currently consumed only by diagnostics (which
+run asynchronously) and `FileContext::resolve_name_at()`. Nothing on
+the completion hot path requires this data to be computed eagerly.
+
+### Fix
+
+Defer name resolution out of `update_ast_inner`. Options:
+
+- **Lazy resolution:** compute `OwnedResolvedNames` on first access
+  per file version, invalidate on the next `update_ast`. Moves the
+  cost off the typing hot path entirely.
+- **Diagnostic-worker resolution:** run the resolver in the
+  diagnostic worker clone of `Backend`, since diagnostics are the
+  primary consumer.
+
+### When to implement
+
+Low priority. The M3 migration (see `docs/todo/mago.md`) is still
+in progress and will restructure how resolved names are stored and
+consumed. Further refactoring (removing the legacy `use_map`,
+migrating more consumers to byte-offset lookups) will change the
+access patterns. Optimizing now would likely be reworked. Revisit
+once M3 step 6 (remove `use_map`) is complete.
+
+---
+
 ## Appendix: Profiling
 
 ### Commands

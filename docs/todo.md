@@ -176,6 +176,7 @@ unlikely to move the needle for most users.
 | P7   | `diag_pending_uris` uses `Vec::contains` for dedup                                                                                                                          | Low         | Low            |
 | P8   | `find_class_in_ast_map` linear fallback scan                                                                                                                                | Low         | Low            |
 | P12  | [`find_or_load_function` Phase 1.75 serial bottleneck](todo/performance.md#p12-find_or_load_function-phase-175-serial-bottleneck)                                           | Low         | Low            |
+| P17  | [`mago-names` resolution on the parse hot path](todo/performance.md#p17-mago-names-resolution-on-the-parse-hot-path)                                                        | Medium      | Low            |
 |      | **[Indexing](todo/indexing.md)**                                                                                                                                            |             |                |
 | X1   | Staleness detection and auto-refresh                                                                                                                                        | Medium      | Medium         |
 | X3   | Completion item detail on demand (`completionItem/resolve`)                                                                                                                 | Medium      | Medium         |
