@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Remove `#[Override]` code action.** When PHPStan reports `method.override`, `property.override`, or `property.overrideAttribute` (the attribute is present but the member does not actually override anything, or `#[Override]` on properties is not supported in the current PHP version), a quickfix removes the `#[Override]` attribute. If the attribute shares a line with other attributes, only the `Override` token is removed. The diagnostic is eagerly cleared once the attribute is gone.
 - **Add `#[\ReturnTypeWillChange]` code action.** When PHPStan reports `method.tentativeReturnType`, a quickfix inserts `#[\ReturnTypeWillChange]` above the method declaration with correct indentation. The diagnostic is eagerly cleared once the attribute is present.
 - **Simplify with null coalescing / null-safe operator.** Ternary expressions that guard against `null` are detected and a code action offers to rewrite them. `isset($x) ? $x : $default` and `$x !== null ? $x : $default` become `$x ?? $default`. `$x !== null ? $x->foo() : null` becomes `$x?->foo()` (PHP 8.0+ only).
+- **Completion and signature help for `new self`, `new static`, and `new parent`.** Inside a class, typing `new sel` offers `self` and `static` as keyword completions with constructor parameter snippets. `parent` is offered when the class has a parent. Signature help triggers when typing inside the parentheses of `new self(`, `new static(`, or `new parent(`.
 
 ### Changed
 
