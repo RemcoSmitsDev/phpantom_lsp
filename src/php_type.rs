@@ -354,7 +354,7 @@ impl PhpType {
                 }
             }
             PhpType::Generic(name, args) if !args.is_empty() => {
-                let value = if name == "Generator" {
+                let value = if Self::short_name_of(name) == "Generator" {
                     // Generator<TKey, TValue, TSend, TReturn>: value is
                     // the 2nd param (index 1). When only one param is
                     // given, treat it as the value type.
