@@ -1100,9 +1100,11 @@ impl Backend {
         &self,
         prefix: &str,
         current_class: Option<&ClassInfo>,
-    ) -> Option<CompletionItem> {
+    ) -> Vec<CompletionItem> {
+        let mut items = Vec::new();
+
         let Some(current_class) = current_class else {
-            return None;
+            return items;
         };
 
         let prefix_lower = prefix.to_lowercase();
@@ -1115,9 +1117,9 @@ impl Backend {
             let mut item = CompletionItem {
                 label: keyword.to_string(),
                 kind: Some(CompletionItemKind::KEYWORD),
-                detail: Some(format!("Instantiate current class")),
+                detail: Some("Instantiate current class".to_string()),
                 filter_text: Some(keyword.to_string()),
-                sort_text: Some(format!("0_{}", keyword)),
+                sort_text: Some(format!("0_{keyword}")),
                 ..CompletionItem::default()
             };
 
@@ -1136,7 +1138,7 @@ impl Backend {
                 item.insert_text_format = Some(InsertTextFormat::SNIPPET);
             }
 
-            return Some(item);
+            items.push(item);
         }
 
         // `parent` - reference the parent class
@@ -1170,10 +1172,10 @@ impl Backend {
                 item.insert_text_format = Some(InsertTextFormat::SNIPPET);
             }
 
-            return Some(item);
+            items.push(item);
         }
 
-        None
+        items
     }
 
     /// Try to offer class name, constant, and function completions.
