@@ -411,7 +411,7 @@ async fn test_snippet_user_function_multiple_required() {
 /// Non-namespaced classes in the same file are available via ast_map (source 2),
 /// so they get constructor params included in the snippet.
 #[tokio::test]
-async fn test_snippet_new_class_non_namespaced_gets_empty_parens() {
+async fn test_snippet_new_class_non_namespaced_with_constructor_params() {
     let backend = create_test_backend();
     let uri = Url::parse("file:///snip_new.php").unwrap();
     let text = concat!(
