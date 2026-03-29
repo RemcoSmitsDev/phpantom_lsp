@@ -239,6 +239,8 @@ impl Backend {
             "phpstan.newStatic.addTag"
             | "phpstan.newStatic.finalClass"
             | "phpstan.newStatic.finalConstructor" => self.resolve_new_static(&data, &content),
+            // ── Change visibility (parent-aware) ────────────────────
+            "refactor.changeVisibility" => self.resolve_change_visibility(&data, &content),
             // ── Unused import quickfixes ─────────────────────────────
             "quickfix.removeUnusedImport" | "quickfix.removeAllUnusedImports" => {
                 self.resolve_remove_unused_import(&data, &content, action.diagnostics.as_deref())
@@ -272,7 +274,9 @@ impl Backend {
             && !diags.is_empty()
             && action.edit.is_some()
         {
-            if data.action_kind.starts_with("phpstan.") {
+            if data.action_kind.starts_with("phpstan.")
+                || data.action_kind == "refactor.changeVisibility"
+            {
                 // PHPStan diagnostics live in a separate cache.
                 self.clear_phpstan_diagnostics_after_resolve(&data.uri, diags);
             }

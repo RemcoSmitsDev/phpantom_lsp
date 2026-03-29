@@ -96,6 +96,7 @@ impl Backend {
 
         // ── Fix PHPDoc type mismatch (@return, @param, @var) ────────
         self.collect_fix_phpdoc_type_actions(uri, content, params, out);
+
     }
 }
 
