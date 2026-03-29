@@ -1427,8 +1427,7 @@ impl Backend {
             if class_ctx.is_new() {
                 let cursor_offset = position_to_offset(content, position);
                 let current_class = find_class_at_offset(&ctx.classes, cursor_offset);
-                let keyword_items =
-                    self.build_class_keyword_completions(&partial, current_class.as_deref());
+                let keyword_items = self.build_class_keyword_completions(&partial, current_class);
                 items.extend(keyword_items);
             }
 

@@ -281,7 +281,7 @@ impl Backend {
             // ── Constructor: `new ClassName` or `new ClassName()` ────
             SubjectExpr::NewExpr { class_name } => {
                 let resolved_class_name =
-                    Self::resolve_class_name_keyword(class_name, rctx.current_class.as_deref());
+                    Self::resolve_class_name_keyword(class_name, rctx.current_class);
                 Self::resolve_constructor_callable(
                     &resolved_class_name,
                     &class_loader,
