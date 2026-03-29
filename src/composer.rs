@@ -944,4 +944,113 @@ mod tests {
         let p = pkg(r#"{"config": {"bin-dir": "bin/"}}"#);
         assert_eq!(get_bin_dir(&p), "bin");
     }
+
+    // ── detect_drupal_web_root ──────────────────────────────────────
+
+    #[test]
+    fn drupal_not_detected_without_drupal_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = pkg(r#"{"require": {"php": "^8.1", "some/package": "^1.0"}}"#);
+        assert!(detect_drupal_web_root(dir.path(), &p).is_none());
+    }
+
+    #[test]
+    fn drupal_detected_via_drupal_core() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create web/core/lib/Drupal.php for the filesystem fallback
+        let web = dir.path().join("web").join("core").join("lib");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("Drupal.php"), "<?php\nclass Drupal {}").unwrap();
+
+        let p = pkg(r#"{"require": {"drupal/core": "^10.0"}}"#);
+        let result = detect_drupal_web_root(dir.path(), &p);
+        assert_eq!(result, Some(dir.path().join("web")));
+    }
+
+    #[test]
+    fn drupal_detected_via_core_recommended_in_require_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        let docroot = dir.path().join("docroot").join("core").join("lib");
+        std::fs::create_dir_all(&docroot).unwrap();
+        std::fs::write(docroot.join("Drupal.php"), "<?php").unwrap();
+
+        let p = pkg(r#"{"require-dev": {"drupal/core-recommended": "^10.0"}}"#);
+        let result = detect_drupal_web_root(dir.path(), &p);
+        assert_eq!(result, Some(dir.path().join("docroot")));
+    }
+
+    #[test]
+    fn drupal_detected_via_core_dev() {
+        let dir = tempfile::tempdir().unwrap();
+        let web = dir.path().join("web").join("core").join("lib");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("Drupal.php"), "<?php").unwrap();
+
+        let p = pkg(r#"{"require-dev": {"drupal/core-dev": "^10.0"}}"#);
+        let result = detect_drupal_web_root(dir.path(), &p);
+        assert_eq!(result, Some(dir.path().join("web")));
+    }
+
+    #[test]
+    fn drupal_web_root_from_scaffold_config() {
+        let dir = tempfile::tempdir().unwrap();
+        // No filesystem dirs needed — scaffold config takes priority
+        let p = pkg(r#"{
+            "require": {"drupal/core": "^10.0"},
+            "extra": {
+                "drupal-scaffold": {
+                    "locations": {
+                        "web-root": "docroot/"
+                    }
+                }
+            }
+        }"#);
+        let result = detect_drupal_web_root(dir.path(), &p);
+        // Trailing slash should be stripped
+        assert_eq!(result, Some(dir.path().join("docroot")));
+    }
+
+    #[test]
+    fn drupal_scaffold_config_takes_priority_over_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create web/core/lib/Drupal.php so filesystem fallback would find "web"
+        let web = dir.path().join("web").join("core").join("lib");
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("Drupal.php"), "<?php").unwrap();
+
+        let p = pkg(r#"{
+            "require": {"drupal/core": "^10.0"},
+            "extra": {
+                "drupal-scaffold": {
+                    "locations": {
+                        "web-root": "custom_root"
+                    }
+                }
+            }
+        }"#);
+        let result = detect_drupal_web_root(dir.path(), &p);
+        // Scaffold config wins over filesystem fallback
+        assert_eq!(result, Some(dir.path().join("custom_root")));
+    }
+
+    #[test]
+    fn drupal_filesystem_fallback_tries_candidates_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        // Only create public/core/lib/Drupal.php (third candidate)
+        let public = dir.path().join("public").join("core").join("lib");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(public.join("Drupal.php"), "<?php").unwrap();
+
+        let p = pkg(r#"{"require": {"drupal/core": "^10.0"}}"#);
+        let result = detect_drupal_web_root(dir.path(), &p);
+        assert_eq!(result, Some(dir.path().join("public")));
+    }
+
+    #[test]
+    fn drupal_returns_none_when_no_web_root_found() {
+        let dir = tempfile::tempdir().unwrap();
+        // Drupal package present but no scaffold config and no matching dirs
+        let p = pkg(r#"{"require": {"drupal/core": "^10.0"}}"#);
+        assert!(detect_drupal_web_root(dir.path(), &p).is_none());
+    }
 }

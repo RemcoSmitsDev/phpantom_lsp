@@ -2521,4 +2521,183 @@ function realFunc(): void {}
             "hidden dir functions should be excluded"
         );
     }
+
+    // ── is_drupal_php_file ──────────────────────────────────────────
+
+    #[test]
+    fn drupal_php_file_accepts_php() {
+        assert!(is_drupal_php_file(Path::new("module.php")));
+    }
+
+    #[test]
+    fn drupal_php_file_accepts_module() {
+        assert!(is_drupal_php_file(Path::new("mymodule.module")));
+    }
+
+    #[test]
+    fn drupal_php_file_accepts_install() {
+        assert!(is_drupal_php_file(Path::new("mymodule.install")));
+    }
+
+    #[test]
+    fn drupal_php_file_accepts_theme() {
+        assert!(is_drupal_php_file(Path::new("mytheme.theme")));
+    }
+
+    #[test]
+    fn drupal_php_file_accepts_profile() {
+        assert!(is_drupal_php_file(Path::new("myprofile.profile")));
+    }
+
+    #[test]
+    fn drupal_php_file_accepts_inc() {
+        assert!(is_drupal_php_file(Path::new("helpers.inc")));
+    }
+
+    #[test]
+    fn drupal_php_file_accepts_engine() {
+        assert!(is_drupal_php_file(Path::new("phptemplate.engine")));
+    }
+
+    #[test]
+    fn drupal_php_file_rejects_txt() {
+        assert!(!is_drupal_php_file(Path::new("README.txt")));
+    }
+
+    #[test]
+    fn drupal_php_file_rejects_yml() {
+        assert!(!is_drupal_php_file(Path::new("mymodule.info.yml")));
+    }
+
+    #[test]
+    fn drupal_php_file_rejects_no_extension() {
+        assert!(!is_drupal_php_file(Path::new("Makefile")));
+    }
+
+    // ── scan_drupal_directories ─────────────────────────────────────
+
+    #[test]
+    fn scan_drupal_directories_finds_php_and_module_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let web_root = dir.path();
+
+        // core/lib/Drupal/Core/Entity
+        let entity_dir = web_root.join("core/lib/Drupal/Core/Entity");
+        std::fs::create_dir_all(&entity_dir).unwrap();
+        std::fs::write(
+            entity_dir.join("EntityInterface.php"),
+            "<?php\nnamespace Drupal\\Core\\Entity;\ninterface EntityInterface {}",
+        )
+        .unwrap();
+
+        // modules/contrib/token
+        let token_dir = web_root.join("modules/contrib/token/src");
+        std::fs::create_dir_all(&token_dir).unwrap();
+        std::fs::write(
+            token_dir.join("TokenService.php"),
+            "<?php\nnamespace Drupal\\token;\nclass TokenService {}",
+        )
+        .unwrap();
+
+        // A .module file in modules/custom
+        let custom_dir = web_root.join("modules/custom/mymod");
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        std::fs::write(
+            custom_dir.join("mymod.module"),
+            "<?php\nfunction mymod_help() {}",
+        )
+        .unwrap();
+
+        let result = scan_drupal_directories(web_root);
+        assert!(
+            result
+                .classmap
+                .contains_key("Drupal\\Core\\Entity\\EntityInterface"),
+            "should index core PHP files; keys: {:?}",
+            result.classmap.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            result.classmap.contains_key("Drupal\\token\\TokenService"),
+            "should index contrib module PHP files; keys: {:?}",
+            result.classmap.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            result.function_index.contains_key("mymod_help"),
+            "should index .module files; functions: {:?}",
+            result.function_index.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn scan_drupal_directories_skips_test_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let web_root = dir.path();
+
+        let test_dir = web_root.join("modules/contrib/token/tests/src");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        std::fs::write(
+            test_dir.join("TokenTest.php"),
+            "<?php\nnamespace Drupal\\Tests\\token;\nclass TokenTest {}",
+        )
+        .unwrap();
+
+        // Also test the "Tests" casing
+        let test_dir2 = web_root.join("core/Tests");
+        std::fs::create_dir_all(&test_dir2).unwrap();
+        std::fs::write(
+            test_dir2.join("CoreTest.php"),
+            "<?php\nnamespace Drupal\\Tests;\nclass CoreTest {}",
+        )
+        .unwrap();
+
+        let result = scan_drupal_directories(web_root);
+        assert!(
+            !result
+                .classmap
+                .contains_key("Drupal\\Tests\\token\\TokenTest"),
+            "should skip tests/ directories"
+        );
+        assert!(
+            !result.classmap.contains_key("Drupal\\Tests\\CoreTest"),
+            "should skip Tests/ directories"
+        );
+    }
+
+    #[test]
+    fn scan_drupal_directories_skips_nonexistent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Empty web root — none of the expected subdirectories exist
+        let result = scan_drupal_directories(dir.path());
+        assert!(result.classmap.is_empty());
+        assert!(result.function_index.is_empty());
+        assert!(result.constant_index.is_empty());
+    }
+
+    #[test]
+    fn scan_drupal_directories_ignores_non_php_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let web_root = dir.path();
+
+        let core_dir = web_root.join("core");
+        std::fs::create_dir_all(&core_dir).unwrap();
+        std::fs::write(core_dir.join("core.services.yml"), "services: {}").unwrap();
+        std::fs::write(core_dir.join("README.txt"), "Drupal core").unwrap();
+        std::fs::write(
+            core_dir.join("install.php"),
+            "<?php\nfunction install_begin() {}",
+        )
+        .unwrap();
+
+        let result = scan_drupal_directories(web_root);
+        // Only the .php file should be indexed
+        assert!(
+            result.function_index.contains_key("install_begin"),
+            "should index .php files"
+        );
+        assert_eq!(
+            result.classmap.len() + result.function_index.len() + result.constant_index.len(),
+            1,
+            "should not index .yml or .txt files"
+        );
+    }
 }
