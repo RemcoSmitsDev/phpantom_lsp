@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::php_type::PhpType;
+
 // ─── SharedVec ──────────────────────────────────────────────────────────────
 
 /// A cheap-to-clone vector backed by `Arc<Vec<T>>`.
@@ -347,6 +349,13 @@ pub struct ParameterInfo {
     /// than the native PHP type hint, this holds the docblock type.
     /// Otherwise it holds the native type hint unchanged.
     pub type_hint: Option<String>,
+    /// Structured representation of [`type_hint`](Self::type_hint), produced
+    /// by [`PhpType::parse`] at extraction time.
+    ///
+    /// `None` when `type_hint` is `None`.  Consumers that need to
+    /// inspect the type structurally should prefer this field over
+    /// string manipulation on `type_hint`.
+    pub type_hint_parsed: Option<PhpType>,
     /// The native PHP type hint as written in source code (e.g. "array", "string").
     ///
     /// Preserved separately so that hover can show the actual PHP declaration
@@ -415,6 +424,13 @@ pub struct MethodInfo {
     /// than the native PHP return type hint, this holds the docblock type.
     /// Otherwise it holds the native type hint unchanged.
     pub return_type: Option<String>,
+    /// Structured representation of [`return_type`](Self::return_type), produced
+    /// by [`PhpType::parse`] at extraction time.
+    ///
+    /// `None` when `return_type` is `None`.  Consumers that need to
+    /// inspect the return type structurally should prefer this field over
+    /// string manipulation on `return_type`.
+    pub return_type_parsed: Option<PhpType>,
     /// The native PHP return type hint as written in source code (e.g. "array", "self").
     ///
     /// Preserved separately so that hover can show the actual PHP declaration
@@ -587,6 +603,7 @@ impl MethodInfo {
             name_offset: 0,
             parameters: Vec::new(),
             return_type: return_type.map(|s| s.to_string()),
+            return_type_parsed: return_type.map(PhpType::parse),
             native_return_type: None,
             description: None,
             return_description: None,
@@ -627,6 +644,13 @@ pub struct PropertyInfo {
     /// than the native PHP type hint, this holds the docblock type.
     /// Otherwise it holds the native type hint unchanged.
     pub type_hint: Option<String>,
+    /// Structured representation of [`type_hint`](Self::type_hint), produced
+    /// by [`PhpType::parse`] at extraction time.
+    ///
+    /// `None` when `type_hint` is `None`.  Consumers that need to
+    /// inspect the type structurally should prefer this field over
+    /// string manipulation on `type_hint`.
+    pub type_hint_parsed: Option<PhpType>,
     /// The native PHP type hint as written in source code (e.g. "array", "string").
     ///
     /// Preserved separately so that hover can show the actual PHP declaration
@@ -705,6 +729,7 @@ impl PropertyInfo {
             name: name.to_string(),
             name_offset: 0,
             type_hint: type_hint.map(|s| s.to_string()),
+            type_hint_parsed: type_hint.map(PhpType::parse),
             native_type_hint: None,
             description: None,
             is_static: false,
@@ -730,6 +755,13 @@ pub struct ConstantInfo {
     pub name_offset: u32,
     /// Optional type hint string (e.g. "string", "int").
     pub type_hint: Option<String>,
+    /// Structured representation of [`type_hint`](Self::type_hint), produced
+    /// by [`PhpType::parse`] at extraction time.
+    ///
+    /// `None` when `type_hint` is `None`.  Consumers that need to
+    /// inspect the type structurally should prefer this field over
+    /// string manipulation on `type_hint`.
+    pub type_hint_parsed: Option<PhpType>,
     /// Visibility of the constant (public, protected, or private).
     pub visibility: Visibility,
     /// Deprecation message from the `@deprecated` PHPDoc tag.
@@ -1916,6 +1948,7 @@ mod tests {
             name: name.to_string(),
             name_offset: 0,
             type_hint: Some("string".to_string()),
+            type_hint_parsed: None,
             visibility: Visibility::Public,
             deprecation_message: None,
             deprecated_replacement: None,
@@ -1934,6 +1967,7 @@ mod tests {
             name: name.to_string(),
             is_required: true,
             type_hint: Some(type_hint.to_string()),
+            type_hint_parsed: None,
             native_type_hint: None,
             description: None,
             default_value: None,

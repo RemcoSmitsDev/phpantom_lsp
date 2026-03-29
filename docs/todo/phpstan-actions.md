@@ -7,103 +7,13 @@ modifies the source code to resolve the issue.
 
 ## Prerequisites — Infrastructure improvements
 
-Before diving into new actions, these small improvements will pay dividends
-across the board.
-
-### R1. Parse and store `ignorable` from PHPStan output
-
-PHPStan's JSON output includes an `"ignorable"` field per message, but
-`parse_phpstan_message()` in `phpstan.rs` currently ignores it. We should:
-
-1. Store `ignorable` in `Diagnostic.data` as a JSON boolean.
-2. In `phpstan_ignore.rs`, skip the "Add `@phpstan-ignore`" action when
-   `ignorable` is `false`. This prevents offering an ignore comment for
-   errors like `method.visibility` that PHPStan will not honour.
-
-This is referenced by H11 and is generally good hygiene.
-
-### R2. Extract `ranges_overlap` into a shared utility
-
-Every code action file has its own private `ranges_overlap` function. Move
-it to `crate::util` and import it everywhere. This avoids drift and
-makes new actions slightly less boilerplate.
-
-### R3. Shared tip extraction helper
-
-Tips are available in `Diagnostic.message` — they're appended after a `\n`
-by `parse_phpstan_message()`. Add a small helper:
-
-```rust
-/// Split a PHPStan diagnostic message into the primary message and optional tip.
-fn split_phpstan_tip(message: &str) -> (&str, Option<&str>) {
-    match message.split_once('\n') {
-        Some((msg, tip)) => (msg, Some(tip)),
-        None => (message, None),
-    }
-}
-```
-
-This is used by H4, H5, H12, H14, H15, H20.
+No outstanding items.
 
 ---
 
 ## Tier 1 — Trivial (no message parsing or simple static message)
 
-### H1. `new.static` — Unsafe usage of `new static()`
-
-**Identifier:** `new.static`
-**Message:** `Unsafe usage of new static().`
-
-No data to extract from the message. The diagnostic line is inside the class
-that needs fixing. Offer three quickfixes:
-
-1. **Add `@phpstan-consistent-constructor`** — add the tag to the class-level
-   docblock (or create one). This is the least invasive option and should be
-   marked `is_preferred`.
-2. **Add `final` to class** — insert `final ` before the `class` keyword.
-3. **Add `final` to constructor** — find `__construct` in the same class and
-   insert `final ` before the visibility modifier (or `function` if no
-   visibility is present).
-
-Walk backward from the diagnostic line to find the enclosing class declaration.
-The same `find_enclosing_docblock` pattern from `add_throws.rs` works here.
-
-**Stale detection:** the diagnostic is stale when the class has `final` keyword,
-the constructor has `final` keyword, or the class docblock contains
-`@phpstan-consistent-constructor`.
-
-**Reference:** https://phpstan.org/blog/solving-phpstan-error-unsafe-usage-of-new-static
-
----
-
-### H3. `method.override` / `property.override` — Remove `#[Override]` attribute
-
-**Identifiers:** `method.override`, `property.override`
-**Messages:**
-- `Method Foo::bar() has #[\Override] attribute but does not override any method.`
-- `Property Foo::$baz has #[\Override] attribute but does not override any property.`
-
-Find and remove the `#[Override]` or `#[\Override]` attribute above the
-declaration. If the attribute is on its own line (the common case), remove
-the entire line including the trailing newline. If it shares a line with other
-attributes (e.g. `#[Override, SomeOther]`), remove just the `Override,` or
-`,Override` token — but start with the own-line case only.
-
-**Stale detection:** no `#[Override]` attribute found within a few lines above
-the diagnostic line.
-
----
-
-### H5. `method.tentativeReturnType` — Add `#[\ReturnTypeWillChange]`
-
-**Identifier:** `method.tentativeReturnType`
-**Tip (in message):** `Make it covariant, or use the #[\ReturnTypeWillChange] attribute to temporarily suppress the error.`
-
-Same insertion pattern as P2: add `#[\ReturnTypeWillChange]` on the line
-before the method declaration. Reuse the same attribute-insertion logic.
-
-**Stale detection:** a line above the method contains `#[\ReturnTypeWillChange]`
-or `#[ReturnTypeWillChange]`.
+No outstanding items.
 
 ---
 
@@ -533,17 +443,14 @@ the list.
 Based on effort-to-value ratio and shared infrastructure:
 
 1. **R1, R2, R3** — prerequisites (small, unblocks everything)
-2. **H3** — `#[Override]` remove (shares logic with H2, already shipped)
-3. **H5** — `#[\ReturnTypeWillChange]` (reuses attribute insertion pattern)
-4. **H1** — `new.static` (three fixes, but each is simple)
-5. **H7, H8, H9** — PHPDoc type mismatch family (implement together)
-6. **H11** — visibility fix (leverages existing `change_visibility.rs`)
-7. **H14** — narrow `@throws` (extends existing `remove_throws.rs`)
-8. **H6** — return type update
-9. **H10** — remove unused union member
-10. **H12** — prefixed class name
-11. **H4** — unset by-ref foreach variable
-12. Everything else based on user demand
+2. **H7, H8, H9** — PHPDoc type mismatch family (implement together)
+3. **H11** — visibility fix (leverages existing `change_visibility.rs`)
+4. **H14** — narrow `@throws` (extends existing `remove_throws.rs`)
+5. **H6** — return type update
+6. **H10** — remove unused union member
+7. **H12** — prefixed class name
+8. **H4** — unset by-ref foreach variable
+9. Everything else based on user demand
 
 ---
 
@@ -578,7 +485,7 @@ let (message, tip) = match diag.message.split_once('\n') {
 };
 ```
 
-Actions that depend on tip text (H4, H5, H12, H14, H15, H20) should use this
+Actions that depend on tip text (H4, H12, H14, H15, H20) should use this
 pattern. The tip text has ANSI/HTML tags already stripped by `strip_ansi_tags`.
 
 ### Stale diagnostic detection
@@ -604,19 +511,12 @@ Each action needs tests following the existing pattern:
 - Stale detection tests that construct `Diagnostic` objects and call
   `is_stale_phpstan_diagnostic`
 
-### Attribute insertion pattern (H3, H5)
+### Attribute insertion pattern (H3, H5) — Implemented
 
-H3 and H5 both need to insert or remove an attribute on the line before a
-method. Factor this into a shared helper (H2 is already implemented in
-`add_override.rs` and can serve as a reference):
-
-```rust
-/// Insert an attribute line before the declaration at `line`.
-fn build_insert_attribute_edit(content: &str, line: u32, attribute: &str) -> TextEdit { ... }
-
-/// Remove an attribute line containing `attribute` near `line`.
-fn build_remove_attribute_edit(content: &str, line: u32, attribute: &str) -> Option<TextEdit> { ... }
-```
+H3 (`remove_override.rs`) and H5 (`add_return_type_will_change.rs`) are now
+implemented. Each module contains its own `find_method_insertion_point` and
+attribute detection helpers, following the same pattern as `add_override.rs`.
+Future attribute-related actions can reference any of these three modules.
 
 ### PHPDoc type mismatch pattern (H7, H8, H9)
 

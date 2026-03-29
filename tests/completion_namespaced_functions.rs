@@ -848,6 +848,7 @@ async fn test_use_function_namespaced_detail_shows_signature() {
                         name: "$value".to_string(),
                         is_required: true,
                         type_hint: Some("mixed".to_string()),
+                        type_hint_parsed: None,
                         native_type_hint: Some("mixed".to_string()),
                         description: None,
                         default_value: None,

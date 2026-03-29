@@ -115,6 +115,7 @@ use tower_lsp::lsp_types::*;
 
 use crate::Backend;
 use crate::phpstan;
+use crate::util::ranges_overlap;
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -247,6 +248,40 @@ fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
     // by `codeAction/resolve` when the user picks a PHPStan quickfix
     // (see `clear_phpstan_diagnostics_after_resolve` in code_actions).
     // The `@phpstan-ignore` check above still covers manual edits.
+
+    // ── method.override / property.override / property.overrideAttribute ─
+    // The user may remove the attribute by hand, so check whether
+    // `#[Override]` is still present near the diagnostic line.
+    if identifier == "method.override"
+        || identifier == "property.override"
+        || identifier == "property.overrideAttribute"
+    {
+        return crate::code_actions::phpstan::remove_override::is_remove_override_stale(
+            content,
+            diag.range.start.line as usize,
+        );
+    }
+
+    // ── method.tentativeReturnType — #[\ReturnTypeWillChange] added ─
+    // The user may add the attribute by hand, so check whether it is
+    // now present near the diagnostic line.
+    if identifier == "method.tentativeReturnType" {
+        return crate::code_actions::phpstan::add_return_type_will_change::is_add_return_type_will_change_stale(
+            content,
+            diag.range.start.line as usize,
+        );
+    }
+
+    // ── new.static — check if the user manually fixed the class ─────
+    // Unlike the actions above, `new.static` fixes are commonly applied
+    // by hand (adding `final` to the class or constructor), so we keep
+    // a content-based heuristic here.
+    if identifier == "new.static" {
+        return crate::code_actions::phpstan::new_static::is_new_static_stale(
+            content,
+            diag.range.start.line as usize,
+        );
+    }
 
     false
 }
@@ -1134,15 +1169,6 @@ fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
 /// produce these ranges because they don't report column information.
 fn is_full_line_range(range: &Range) -> bool {
     range.start.line == range.end.line && range.start.character == 0 && range.end.character >= 1000
-}
-
-/// Check whether two LSP ranges overlap.
-fn ranges_overlap(a: &Range, b: &Range) -> bool {
-    // Two ranges overlap if neither ends before the other starts.
-    !(a.end.line < b.start.line
-        || (a.end.line == b.start.line && a.end.character <= b.start.character)
-        || b.end.line < a.start.line
-        || (b.end.line == a.start.line && b.end.character <= a.start.character))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

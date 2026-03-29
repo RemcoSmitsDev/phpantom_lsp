@@ -451,7 +451,9 @@ impl Backend {
                     let arg_raw_type = Self::resolve_inline_arg_raw_type(&first_arg, ctx);
 
                     if let Some(ref raw) = arg_raw_type
-                        && let Some(element_type) = docblock::types::extract_generic_value_type(raw)
+                        && let Some(element_type) = crate::php_type::PhpType::parse(raw)
+                            .extract_value_type(true)
+                            .map(|t| t.to_string())
                     {
                         let owner_name = ctx.current_class.map(|c| c.name.as_str()).unwrap_or("");
                         let classes: Vec<Arc<ClassInfo>> =

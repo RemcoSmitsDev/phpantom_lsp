@@ -365,7 +365,9 @@ fn walk_array_segments_and_resolve(
                 current_type = docblock::extract_array_shape_value_type(&current_type, key)?;
             }
             BracketSegment::ElementAccess => {
-                current_type = docblock::types::extract_generic_value_type(&current_type)?;
+                current_type = crate::php_type::PhpType::parse(&current_type)
+                    .extract_value_type(true)
+                    .map(|t| t.to_string())?;
             }
         }
 
@@ -383,14 +385,17 @@ fn walk_array_segments_and_resolve(
         }
     }
 
-    let cleaned = docblock::clean_type(&current_type);
-    let base_name = docblock::types::strip_generics(&cleaned);
-    if base_name.is_empty() || docblock::types::is_scalar(&base_name) {
+    // Check whether the type has any class-like (non-scalar) component
+    // worth resolving.  `type_hint_to_classes` handles unions,
+    // intersections, generics, nullable, etc. — so we pass the full
+    // type string and only bail out when the entire type is scalar.
+    let parsed = crate::php_type::PhpType::parse(&current_type);
+    if parsed.is_scalar() {
         return None;
     }
 
     let classes = crate::completion::type_resolution::type_hint_to_classes(
-        &cleaned,
+        &current_type,
         current_class_name,
         all_classes,
         class_loader,

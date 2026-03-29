@@ -2510,7 +2510,10 @@ pub(in crate::completion) fn resolve_arg_raw_type<'b>(
         );
         if !resolved.is_empty() {
             let raw = crate::types::ResolvedType::type_strings_joined(&resolved);
-            if docblock::types::extract_generic_value_type(&raw).is_some() {
+            if crate::php_type::PhpType::parse(&raw)
+                .extract_value_type(true)
+                .is_some()
+            {
                 return Some(raw);
             }
         }

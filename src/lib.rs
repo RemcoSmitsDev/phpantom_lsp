@@ -116,6 +116,7 @@ mod inlay_hints;
 pub(crate) mod names;
 mod parser;
 pub(crate) mod phar;
+pub mod php_type;
 mod phpstan;
 mod references;
 mod rename;

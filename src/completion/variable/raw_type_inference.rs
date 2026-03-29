@@ -50,7 +50,9 @@ pub(in crate::completion) fn infer_array_literal_raw_type<'b>(
                 // Spread: `...$other` — try to resolve iterable element type.
                 if let Some(raw) =
                     super::foreach_resolution::resolve_expression_type_string(v.value, ctx)
-                    && let Some(elem) = docblock::types::extract_generic_value_type(&raw)
+                    && let Some(elem) = crate::php_type::PhpType::parse(&raw)
+                        .extract_value_type(true)
+                        .map(|t| t.to_string())
                     && !types.contains(&elem)
                 {
                     types.push(elem);
@@ -176,7 +178,10 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
         // so downstream `extract_generic_value_type` can extract the
         // element type.  Otherwise it's a plain class name and we
         // can't infer element type.
-        if docblock::types::extract_generic_value_type(&raw).is_some() {
+        if crate::php_type::PhpType::parse(&raw)
+            .extract_value_type(true)
+            .is_some()
+        {
             return Some(raw);
         }
     }
@@ -195,7 +200,10 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
     if func_name.eq_ignore_ascii_case("iterator_to_array") {
         let iter_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(iter_expr, ctx)?;
-        if docblock::types::extract_generic_value_type(&raw).is_some() {
+        if crate::php_type::PhpType::parse(&raw)
+            .extract_value_type(true)
+            .is_some()
+        {
             return Some(raw);
         }
     }
@@ -208,7 +216,10 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
     {
         let arr_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-        if docblock::types::extract_generic_value_type(&raw).is_some() {
+        if crate::php_type::PhpType::parse(&raw)
+            .extract_value_type(true)
+            .is_some()
+        {
             return Some(raw);
         }
     }
@@ -235,7 +246,9 @@ pub(in crate::completion) fn resolve_array_func_element_type(
     {
         let arr_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-        return docblock::types::extract_generic_value_type(&raw);
+        return crate::php_type::PhpType::parse(&raw)
+            .extract_value_type(true)
+            .map(|t| t.to_string());
     }
 
     // array_map: callback return type is the element type.
@@ -247,7 +260,9 @@ pub(in crate::completion) fn resolve_array_func_element_type(
     if func_name.eq_ignore_ascii_case("iterator_to_array") {
         let iter_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(iter_expr, ctx)?;
-        return docblock::types::extract_generic_value_type(&raw);
+        return crate::php_type::PhpType::parse(&raw)
+            .extract_value_type(true)
+            .map(|t| t.to_string());
     }
 
     None
@@ -298,16 +313,18 @@ fn extract_array_map_element_type(
     };
 
     if let Some(hint) = return_hint {
-        let cleaned = docblock::clean_type(&hint);
-        if !cleaned.is_empty() && !docblock::types::is_scalar(&cleaned) {
-            return Some(cleaned);
+        let parsed = crate::php_type::PhpType::parse(&hint);
+        if let Some(name) = parsed.base_name() {
+            return Some(name.to_string());
         }
     }
 
     // Fallback: use the input array's element type.
     let arr_expr = super::resolution::nth_arg_expr(args, 1)?;
     let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-    docblock::types::extract_generic_value_type(&raw)
+    crate::php_type::PhpType::parse(&raw)
+        .extract_value_type(true)
+        .map(|t| t.to_string())
 }
 
 /// Reverse-infer a variable's type from `yield $var` statements when

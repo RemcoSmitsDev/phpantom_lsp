@@ -1211,6 +1211,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mago-type-syntax"
+version = "1.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e06b6b5a641b949a29197f67f0ecd6cf7eb8db11e2f3e7d9dd09ea6b003208f2"
+dependencies = [
+ "mago-database",
+ "mago-span",
+ "mago-syntax-core",
+ "ordered-float",
+ "serde",
+ "strum 0.28.0",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1375,6 +1389,7 @@ dependencies = [
  "mago-php-version",
  "mago-span",
  "mago-syntax",
+ "mago-type-syntax",
  "memchr",
  "parking_lot",
  "serde",

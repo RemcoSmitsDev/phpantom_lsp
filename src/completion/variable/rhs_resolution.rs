@@ -622,7 +622,10 @@ pub(crate) fn classify_template_binding(
         if let Some(open) = part.find('<')
             && let Some(close) = part.rfind('>')
         {
-            let wrapper_name = crate::docblock::types::clean_type(&part[..open]);
+            let wrapper_name = crate::php_type::PhpType::parse(&part[..open])
+                .base_name()
+                .unwrap_or("")
+                .to_string();
             let generic_part = &part[open + 1..close];
             let hint_args: Vec<&str> = generic_part.split(',').map(|s| s.trim()).collect();
             for (i, arg) in hint_args.iter().enumerate() {
@@ -785,21 +788,23 @@ fn resolve_rhs_array_access<'b>(
                     docblock::types::extract_array_shape_value_type(&current_type, key)
                 {
                     current_type = value_type;
-                } else if let Some(element_type) =
-                    docblock::types::extract_generic_value_type(&current_type)
-                {
-                    // Fallback: generic element type (e.g. `array<string, Foo>`
-                    // accessed with a string key).
-                    current_type = element_type;
                 } else {
-                    return vec![];
+                    let parsed = crate::php_type::PhpType::parse(&current_type);
+                    if let Some(element_type_ref) = parsed.extract_value_type(true) {
+                        // Fallback: generic element type (e.g. `array<string, Foo>`
+                        // accessed with a string key).
+                        let element_type = element_type_ref.to_string();
+                        current_type = element_type;
+                    } else {
+                        return vec![];
+                    }
                 }
             }
             ArrayBracketSegment::ElementAccess => {
                 // Numeric / variable index → generic element type.
-                if let Some(element_type) =
-                    docblock::types::extract_generic_value_type(&current_type)
-                {
+                let parsed = crate::php_type::PhpType::parse(&current_type);
+                if let Some(element_type_ref) = parsed.extract_value_type(true) {
+                    let element_type = element_type_ref.to_string();
                     current_type = element_type;
                 } else {
                     return vec![];
@@ -1702,7 +1707,10 @@ fn resolve_rhs_property_access(
             _ => None,
         };
         if let Some(class_name) = class_name {
-            let resolved_name = crate::docblock::types::clean_type(&class_name);
+            let resolved_name = crate::php_type::PhpType::parse(&class_name)
+                .base_name()
+                .unwrap_or(&class_name)
+                .to_string();
             let target_classes = crate::completion::type_resolution::type_hint_to_classes(
                 &resolved_name,
                 current_class_name,

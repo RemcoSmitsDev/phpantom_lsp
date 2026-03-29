@@ -8,10 +8,9 @@ within the same impact tier.
 | **Impact** | **Critical**, **High**, **Medium-High**, **Medium**, **Low-Medium**, **Low**                                           |
 | **Effort** | **Low** (≤ 1 day), **Medium** (2-5 days), **Medium-High** (1-2 weeks), **High** (2-4 weeks), **Very High** (> 1 month) |
 
-**Refactoring code actions overview:** A2 (Extract Function), A6
-(Inline Function/Method), and A7 (Extract Constant) depend on
-forward-pass variable usage tracking with byte offsets across function
-scopes.
+**Refactoring code actions overview:** A2 (Extract Function) and A6
+(Inline Function/Method) depend on forward-pass variable usage tracking
+with byte offsets across function scopes.
 
 ## A3. Switch → match conversion
 
@@ -153,80 +152,6 @@ When the callee has multiple statements:
 
 ---
 
-## A7. Extract Constant
-
-**Impact: Medium · Effort: Medium**
-
-Select a literal value (string, integer, float, boolean) inside a class
-and extract it into a class constant. This pairs naturally with Extract
-Variable (A5) and shares the same "select, name, replace" workflow.
-
-### Behaviour
-
-- **Trigger:** The user selects a literal expression inside a class
-  method or property default. The code action introduces a new class
-  constant with a generated name, assigns the literal value, and
-  replaces the selection (and optionally all identical occurrences in
-  the class) with `self::CONSTANT_NAME`.
-- **Code action kind:** `refactor.extract`.
-
-### What can be extracted
-
-- String literals: `'pending'`, `"active"`.
-- Integer literals: `200`, `0xFF`.
-- Float literals: `3.14`.
-- Boolean literals: `true`, `false` (less common but valid).
-- Concatenated string expressions: `'prefix_' . 'suffix'` — extract the
-  whole expression as a single constant.
-
-Array literals and class instantiations are out of scope (PHP const
-expressions are limited).
-
-### Name generation
-
-Generate a default name from the value:
-
-- String: `'pending'` → `PENDING`. `'order_status'` → `ORDER_STATUS`.
-- Number: `200` → `STATUS_200` or `VALUE_200`.
-- Boolean: `true` → `IS_ENABLED` (weak heuristic, user will rename).
-- Fallback: `CONSTANT` with a numeric suffix if needed.
-
-Use `SCREAMING_SNAKE_CASE` per PHP convention. If the generated name
-collides with an existing constant in the class, append a numeric suffix.
-
-### Insertion point
-
-Insert the new constant declaration at the top of the class body, after
-any existing constant declarations (to keep constants grouped). Use the
-visibility of the surrounding context as a hint: if the literal appears
-in a public method, default to `public const`; otherwise `private const`.
-
-### Duplicate replacement
-
-Same approach as Extract Variable (A5): offer "this occurrence only"
-and "all N occurrences in this class". Textual equality is sufficient
-for literals.
-
-### Implementation
-
-- Verify the selection is a literal expression node inside a class body.
-- Find the class declaration node and scan for existing constants.
-- Generate the constant name and check for collisions.
-- Determine the insertion point (after last existing constant, or at
-  the top of the class body if none exist).
-- Build a `WorkspaceEdit` that:
-  1. Inserts `{visibility} const NAME = {value};\n` at the insertion
-     point with correct indentation.
-  2. Replaces the selected literal with `self::NAME`.
-  3. Optionally replaces other identical literals in the class.
-
-### Prerequisites
-
-| Feature              | What it contributes                                        |
-| -------------------- | ---------------------------------------------------------- |
-| ScopeCollector (A11) | Class body traversal and constant name collision detection |
-
----
 
 ## A8. Update Docblock to Match Signature
 

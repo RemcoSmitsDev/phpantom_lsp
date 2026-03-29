@@ -183,11 +183,13 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
     });
 
     // Extract the generic element type (e.g. `list<User>` → `User`).
-    if let Some(ref rt) = raw_type
-        && let Some(element_type) = docblock::types::extract_generic_value_type(rt)
-    {
-        push_foreach_resolved_types(&element_type, ctx, results, conditional);
-        return;
+    if let Some(ref rt) = raw_type {
+        let parsed = crate::php_type::PhpType::parse(rt);
+        if let Some(element_type) = parsed.extract_value_type(true) {
+            let element_str = element_type.to_string();
+            push_foreach_resolved_types(&element_str, ctx, results, conditional);
+            return;
+        }
     }
 
     // ── Fallback: resolve the iterated expression to ClassInfo and
@@ -344,11 +346,13 @@ pub(in crate::completion) fn try_resolve_foreach_key_type<'b>(
     });
 
     // Extract the generic key type (e.g. `array<Request, Response>` → `Request`).
-    if let Some(ref rt) = raw_type
-        && let Some(key_type) = docblock::types::extract_generic_key_type(rt)
-    {
-        push_foreach_resolved_types(&key_type, ctx, results, conditional);
-        return;
+    if let Some(ref rt) = raw_type {
+        let parsed = crate::php_type::PhpType::parse(rt);
+        if let Some(key_type) = parsed.extract_key_type(true) {
+            let key_str = key_type.to_string();
+            push_foreach_resolved_types(&key_str, ctx, results, conditional);
+            return;
+        }
     }
 
     // ── Fallback: resolve the iterated expression to ClassInfo and
@@ -696,15 +700,17 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
             }
         }
 
-        if let Some(element_type) = docblock::types::extract_generic_value_type(&var_type) {
+        let var_parsed = crate::php_type::PhpType::parse(&var_type);
+        if let Some(element_type) = var_parsed.extract_value_type(true) {
+            let element_str = element_type.to_string();
             let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &element_type,
+                &element_str,
                 current_class_name,
                 all_classes,
                 class_loader,
             );
             if !resolved.is_empty() {
-                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &element_type);
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &element_str);
                 if !conditional {
                     results.clear();
                 }
@@ -754,15 +760,17 @@ pub(in crate::completion) fn try_resolve_destructured_type<'b>(
         }
 
         // Fall back to generic element type extraction.
-        if let Some(element_type) = docblock::types::extract_generic_value_type(raw) {
+        let raw_parsed = crate::php_type::PhpType::parse(raw);
+        if let Some(element_type) = raw_parsed.extract_value_type(true) {
+            let element_str = element_type.to_string();
             let resolved = crate::completion::type_resolution::type_hint_to_classes(
-                &element_type,
+                &element_str,
                 current_class_name,
                 all_classes,
                 class_loader,
             );
             if !resolved.is_empty() {
-                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &element_type);
+                let resolved_types = ResolvedType::from_classes_with_hint(resolved, &element_str);
                 if !conditional {
                     results.clear();
                 }

@@ -746,6 +746,7 @@ fn make_class_with_throws(name: &str, methods: Vec<(&str, Vec<&str>)>) -> Arc<Cl
             name_offset: 0,
             parameters: Vec::new(),
             return_type: None,
+            return_type_parsed: None,
             native_return_type: None,
             description: None,
             return_description: None,

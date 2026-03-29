@@ -23,6 +23,7 @@ use std::sync::Arc;
 use crate::docblock;
 use crate::inheritance;
 use crate::inheritance::ClassRef;
+use crate::php_type::PhpType;
 use crate::types::{
     ClassInfo, ConstantInfo, MAX_INHERITANCE_DEPTH, MAX_MIXIN_DEPTH, MethodInfo, PropertyInfo,
     Visibility,
@@ -212,14 +213,16 @@ impl VirtualMemberProvider for PHPDocProvider {
 
             for (name, type_str) in docblock::extract_property_tags(doc_text) {
                 seen_props.insert(name.clone());
+                let type_hint: Option<String> = if type_str.is_empty() {
+                    None
+                } else {
+                    Some(type_str)
+                };
                 properties.push(PropertyInfo {
                     name,
                     name_offset: 0,
-                    type_hint: if type_str.is_empty() {
-                        None
-                    } else {
-                        Some(type_str)
-                    },
+                    type_hint: type_hint.clone(),
+                    type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                     native_type_hint: None,
                     description: None,
                     is_static: false,
@@ -257,14 +260,16 @@ impl VirtualMemberProvider for PHPDocProvider {
 
                 for (name, type_str) in docblock::extract_property_tags(doc_text) {
                     if seen_props.insert(name.clone()) {
+                        let type_hint: Option<String> = if type_str.is_empty() {
+                            None
+                        } else {
+                            Some(type_str)
+                        };
                         properties.push(PropertyInfo {
                             name,
                             name_offset: 0,
-                            type_hint: if type_str.is_empty() {
-                                None
-                            } else {
-                                Some(type_str)
-                            },
+                            type_hint: type_hint.clone(),
+                            type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                             native_type_hint: None,
                             description: None,
                             is_static: false,
@@ -313,14 +318,16 @@ impl VirtualMemberProvider for PHPDocProvider {
 
                     for (name, type_str) in docblock::extract_property_tags(doc_text) {
                         if seen_props.insert(name.clone()) {
+                            let type_hint: Option<String> = if type_str.is_empty() {
+                                None
+                            } else {
+                                Some(type_str)
+                            };
                             properties.push(PropertyInfo {
                                 name,
                                 name_offset: 0,
-                                type_hint: if type_str.is_empty() {
-                                    None
-                                } else {
-                                    Some(type_str)
-                                },
+                                type_hint: type_hint.clone(),
+                                type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                                 native_type_hint: None,
                                 description: None,
                                 is_static: false,

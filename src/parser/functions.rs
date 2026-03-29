@@ -8,6 +8,7 @@ use mago_syntax::ast::*;
 
 use crate::Backend;
 use crate::docblock;
+use crate::php_type::PhpType;
 use crate::types::*;
 
 use super::{
@@ -323,10 +324,12 @@ impl Backend {
                             if !parameters.iter().any(|p| p.name == tag_name) {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
+                                let type_hint = Some(tag_type);
                                 parameters.push(ParameterInfo {
                                     name: tag_name,
                                     is_required: false,
-                                    type_hint: Some(tag_type),
+                                    type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
+                                    type_hint,
                                     native_type_hint: None,
                                     description,
                                     default_value: None,

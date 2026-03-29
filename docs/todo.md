@@ -23,10 +23,7 @@ within the same impact tier.
 
 | #   | Item                                                                                                                                             | Impact   | Effort      |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | ----------- |
-| M3  | ✅ [Migrate to mago-names](todo/mago.md#m3-mago-names)                                                                                           | High     | Medium-High |
-| M4  | [Migrate to mago-type-syntax](todo/mago.md#m4-mago-type-syntax)                                                                                  | Critical | Very High   |
-| F4  | [`codeAction/resolve` — deferred edit computation](todo/lsp-features.md#f4-codeactionresolve--deferred-edit-computation-and-diagnostic-clearing) | High     | Medium      |
-| A7  | [Extract constant](todo/actions.md#a7-extract-constant)                                                                                          | Medium   | Medium      |
+| M4  | [Migrate to mago-type-syntax](todo/mago.md#m4-mago-type-syntax)                                                                                 | Critical | Very High   |
 |     | **Release 0.7.0**                                                                                                                                |          |             |
 
 ## Sprint 5 — Polish for office adoption
@@ -113,9 +110,6 @@ unlikely to move the needle for most users.
 | A10  | [Generate interface from class](todo/actions.md#a10-generate-interface-from-class)                                                                                          | Low-Medium  | Medium         |
 | A3   | Switch → match conversion                                                                                                                                                   | Low         | Medium         |
 |      | **[PHPStan Code Actions](todo/phpstan-actions.md)**                                                                                                                         |             |                |
-| H1   | `new.static` — add `final` or `@phpstan-consistent-constructor`                                                                                                             | Medium      | Low            |
-| H3   | `method.override` / `property.override` — remove `#[Override]`                                                                                                              | Medium      | Low            |
-| H5   | `method.tentativeReturnType` — add `#[\ReturnTypeWillChange]`                                                                                                               | Medium      | Low            |
 | H7   | `return.phpDocType` — fix `@return` to match native type                                                                                                                    | Medium      | Low            |
 | H8   | `parameter.phpDocType` — fix `@param` to match native type                                                                                                                  | Medium      | Low            |
 | H9   | `property.phpDocType` — fix property docblock type                                                                                                                          | Medium      | Low            |

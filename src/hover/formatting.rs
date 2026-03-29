@@ -7,6 +7,7 @@
 use tower_lsp::lsp_types::*;
 
 use crate::docblock::parser::{DocblockInfo, parse_docblock_for_tags};
+use crate::php_type::PhpType;
 use crate::symbol_map::SymbolSpan;
 use crate::types::*;
 use crate::util::offset_to_position;
@@ -125,8 +126,12 @@ pub(super) fn build_var_annotation(
     if native.is_none() && eff == "mixed" {
         return None;
     }
-    if native.is_some_and(|n| types_equivalent(n, eff)) {
-        return None;
+    if let Some(n) = native {
+        let eff_parsed = PhpType::parse(eff);
+        let nat_parsed = PhpType::parse(n);
+        if eff_parsed.equivalent(&nat_parsed) {
+            return None;
+        }
     }
     Some(format!("@var {}", shorten_type_string(eff)))
 }
@@ -168,7 +173,7 @@ pub(super) fn build_param_return_section(
 
     for p in params {
         let type_differs = match (p.type_hint.as_deref(), p.native_type_hint.as_deref()) {
-            (Some(eff), Some(nat)) => !types_equivalent(eff, nat),
+            (Some(eff), Some(nat)) => !PhpType::parse(eff).equivalent(&PhpType::parse(nat)),
             (Some(eff), None) => eff != "mixed",
             _ => false,
         };
@@ -200,7 +205,7 @@ pub(super) fn build_param_return_section(
 
     // return entry
     let ret_type_differs = match (effective_return, native_return) {
-        (Some(eff), Some(nat)) => !types_equivalent(eff, nat),
+        (Some(eff), Some(nat)) => !PhpType::parse(eff).equivalent(&PhpType::parse(nat)),
         (Some(eff), None) => eff != "mixed",
         _ => false,
     };

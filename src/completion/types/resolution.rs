@@ -24,6 +24,7 @@ use crate::docblock::types::{
     parse_generic_args, split_intersection_depth0, split_union_depth0, strip_generics,
 };
 use crate::inheritance::apply_generic_args;
+use crate::php_type::PhpType;
 use crate::types::*;
 use crate::util::{find_class_by_name, short_name};
 use crate::virtual_members::{self, laravel};
@@ -174,7 +175,8 @@ fn type_hint_to_classes_depth(
                 .map(|e| PropertyInfo {
                     name: e.key,
                     name_offset: 0,
-                    type_hint: Some(e.value_type),
+                    type_hint: Some(e.value_type.clone()),
+                    type_hint_parsed: Some(e.value_type).as_deref().map(PhpType::parse),
                     native_type_hint: None,
                     description: None,
                     is_static: false,

@@ -22,6 +22,7 @@ mod use_statements;
 use mago_span::HasSpan;
 use mago_syntax::ast::*;
 
+use crate::php_type::PhpType;
 use crate::types::*;
 
 /// Context for resolving PHPDoc type annotations from docblock comments.
@@ -911,6 +912,7 @@ pub(crate) fn extract_parameters(
                 name,
                 is_required,
                 native_type_hint: native_type_hint.clone(),
+                type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                 type_hint,
                 description: None,
                 default_value,
@@ -965,6 +967,7 @@ pub(crate) fn extract_property_info(property: &Property) -> Vec<PropertyInfo> {
                 name,
                 name_offset: var.span.start.offset,
                 type_hint: type_hint.clone(),
+                type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                 native_type_hint: type_hint.clone(),
                 description: None,
                 is_static,

@@ -13,6 +13,7 @@ use mago_docblock::document::TagKind;
 
 use super::parser::parse_docblock_for_tags;
 use super::types::{clean_type, split_type_token};
+use crate::php_type::PhpType;
 use crate::types::{MethodInfo, ParameterInfo, Visibility};
 
 // ─── @property Tags ─────────────────────────────────────────────────────────
@@ -189,6 +190,7 @@ pub fn extract_method_tags(docblock: &str) -> Vec<MethodInfo> {
             name: method_name.to_string(),
             name_offset: 0,
             parameters,
+            return_type_parsed: return_type.as_deref().map(PhpType::parse),
             return_type,
             native_return_type: None,
             description: None,
@@ -276,6 +278,7 @@ fn parse_method_tag_params(params_str: &str) -> Vec<ParameterInfo> {
         result.push(ParameterInfo {
             name: param_name,
             is_required,
+            type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
             type_hint: type_hint.clone(),
             native_type_hint: type_hint,
             description: None,

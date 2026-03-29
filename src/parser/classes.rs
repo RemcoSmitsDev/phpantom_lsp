@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::php_type::PhpType;
 use mago_span::HasSpan;
 use mago_syntax::ast::attribute::AttributeList;
 use mago_syntax::ast::class_like::enum_case::EnumCaseItem;
@@ -1898,6 +1899,7 @@ impl Backend {
                                     name: prop_name,
                                     name_offset: prop_name_offset,
                                     native_type_hint: saved_native_hint,
+                                    type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                                     type_hint,
                                     description: None,
                                     is_static: false,
@@ -1965,10 +1967,12 @@ impl Backend {
                             if !parameters.iter().any(|p| p.name == tag_name) {
                                 let description =
                                     docblock::extract_param_description_from_info(info, &tag_name);
+                                let type_hint = Some(tag_type);
                                 parameters.push(ParameterInfo {
                                     name: tag_name,
                                     is_required: false,
-                                    type_hint: Some(tag_type),
+                                    type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
+                                    type_hint,
                                     native_type_hint: None,
                                     description,
                                     default_value: None,
@@ -2032,6 +2036,7 @@ impl Backend {
                         name_offset,
                         parameters,
                         native_return_type: native_return_type.clone(),
+                        return_type_parsed: return_type.as_deref().map(PhpType::parse),
                         return_type,
                         description: method_description,
                         return_description,
@@ -2195,6 +2200,7 @@ impl Backend {
                         constants.push(ConstantInfo {
                             name: item.name.value.to_string(),
                             name_offset: item.name.span.start.offset,
+                            type_hint_parsed: type_hint.as_deref().map(PhpType::parse),
                             type_hint: type_hint.clone(),
                             visibility,
                             deprecation_message: deprecation_message.clone(),
@@ -2224,6 +2230,7 @@ impl Backend {
                         name: case_name,
                         name_offset: case_name_offset,
                         type_hint: None,
+                        type_hint_parsed: None,
                         visibility: Visibility::Public,
                         deprecation_message: None,
                         deprecated_replacement: None,

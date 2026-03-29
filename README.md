@@ -38,7 +38,7 @@ PHPantom focuses on deep type intelligence. Here's how it compares:
 | **Refactoring**                      |          |              |            |             |             |
 | Rename                               | ✅       | 💰           | 💰         | ✅          | ✅          |
 | Common refactorings<sup>3</sup>      | ✅       | ❌           | 💰         | ✅          | ✅          |
-| Extract constant                     | ❌       | ❌           | ❌         | ✅          | ✅          |
+| Extract constant                     | ✅       | ❌           | ❌         | ✅          | ✅          |
 | Promote constructor parameter        | ✅       | ❌           | ❌         | ❌          | ✅          |
 | Simplify expressions                 | ✅       | ❌           | 💰         | ❌          | ✅          |
 | **Performance**                      |          |              |            |             |             |

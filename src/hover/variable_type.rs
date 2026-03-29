@@ -625,11 +625,15 @@ fn find_type_in_foreach(
             // Extract value type: `list<User>` → `User`,
             // `Generator<int, Pencil>` → `Pencil`,
             // `User[]` → `User`
-            if let Some(element_type) = docblock::types::extract_generic_value_type(rt) {
-                return Some(element_type);
+            let parsed = crate::php_type::PhpType::parse(rt);
+            if let Some(element_type) = parsed.extract_value_type(true) {
+                return Some(element_type.to_string());
             }
-        } else if is_key_var && let Some(key_type) = docblock::types::extract_generic_key_type(rt) {
-            return Some(key_type);
+        } else if is_key_var {
+            let parsed = crate::php_type::PhpType::parse(rt);
+            if let Some(key_type) = parsed.extract_key_type(true) {
+                return Some(key_type.to_string());
+            }
         }
     }
 

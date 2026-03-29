@@ -17,7 +17,7 @@ use tower_lsp::lsp_types::*;
 use crate::Backend;
 use crate::completion::resolver::ResolutionCtx;
 use crate::docblock::extract_template_params_full;
-
+use crate::php_type::PhpType;
 use crate::symbol_map::{SymbolKind, SymbolSpan, VarDefKind};
 use crate::types::*;
 use crate::util::{find_class_at_offset, position_to_offset};
@@ -1012,7 +1012,7 @@ impl Backend {
         let def = map.find_template_def(name, cursor_offset)?;
 
         let bound_display = if let Some(ref bound) = def.bound {
-            format!(" of `{}`", shorten_type_string(bound))
+            format!(" of `{}`", PhpType::parse(bound).shorten())
         } else {
             String::new()
         };
@@ -1371,7 +1371,7 @@ impl Backend {
                 .into_iter()
                 .map(|(name, bound, variance)| {
                     let bound_display = bound
-                        .map(|b| format!(" of `{}`", shorten_type_string(&b)))
+                        .map(|b| format!(" of `{}`", PhpType::parse(&b).shorten()))
                         .unwrap_or_default();
                     format!("**{}** `{}`{}", variance.tag_name(), name, bound_display)
                 })
@@ -1428,25 +1428,20 @@ fn build_variable_hover_body(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     template_line: Option<&str>,
 ) -> String {
-    // Split the type string on `|` at the top level (respecting
-    // angle brackets so that `Generator<int, Foo>|null` is not
-    // split inside the generic parameters).
-    let parts = split_top_level_union(type_str);
+    let parsed = PhpType::parse(type_str);
+    let members = parsed.union_members();
 
-    // Count how many parts are non-trivial class types (not scalars,
+    // Count how many members are non-trivial class types (not scalars,
     // not `null`, not `void`, etc.).  Only render separate blocks when
     // there are 2+ class-like types; a simple `Foo|null` should stay
     // in one block.
-    let class_like_count = parts
-        .iter()
-        .filter(|p| !crate::docblock::type_strings::is_scalar(p) && **p != "null" && **p != "void")
-        .count();
+    let class_like_count = members.iter().filter(|m| !m.is_scalar()).count();
 
     // When there is only one component, or only one class-like type
     // (the rest being scalars / null), render a single code block.
-    if parts.len() <= 1 || class_like_count < 2 {
-        let short_type = shorten_type_string(type_str);
-        let ns = resolve_type_namespace(type_str, class_loader);
+    if members.len() <= 1 || class_like_count < 2 {
+        let short_type = parsed.shorten().to_string();
+        let ns = resolve_type_namespace_structured(&parsed, class_loader);
         let ns_line = namespace_line(&ns);
         let code_block = format!(
             "```php\n<?php\n{}{} = {}\n```",
@@ -1461,10 +1456,10 @@ fn build_variable_hover_body(
 
     // Multiple union branches — render each as its own code block
     // separated by a markdown horizontal rule.
-    let mut blocks: Vec<String> = Vec::with_capacity(parts.len());
-    for part in &parts {
-        let short = shorten_type_string(part);
-        let ns = resolve_type_namespace(part, class_loader);
+    let mut blocks: Vec<String> = Vec::with_capacity(members.len());
+    for member in &members {
+        let short = member.shorten().to_string();
+        let ns = resolve_type_namespace_structured(member, class_loader);
         let ns_line = namespace_line(&ns);
         blocks.push(format!(
             "```php\n<?php\n{}{} = {}\n```",
@@ -1480,43 +1475,14 @@ fn build_variable_hover_body(
     }
 }
 
-/// Split a type string on top-level `|` characters, respecting
-/// angle brackets (`<…>`) and parentheses (`(…)`) so that
-/// `Generator<int, Foo>|null` splits into `["Generator<int, Foo>", "null"]`
-/// rather than breaking inside the generic parameters.
-fn split_top_level_union(type_str: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut depth = 0u32;
-    let mut start = 0;
-    for (i, ch) in type_str.char_indices() {
-        match ch {
-            '<' | '(' | '{' => depth += 1,
-            '>' | ')' | '}' => depth = depth.saturating_sub(1),
-            '|' if depth == 0 => {
-                parts.push(&type_str[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&type_str[start..]);
-    parts
-}
-
-fn resolve_type_namespace(
-    type_str: &str,
+/// Extract the namespace for a structured `PhpType` by looking up its
+/// base class name via the class loader, or by parsing the namespace
+/// from the FQN string itself.
+fn resolve_type_namespace_structured(
+    ty: &PhpType,
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
 ) -> Option<String> {
-    // Find the base type name: take everything before `<`, `|`, `&`,
-    // `?`, or `[`.
-    let base_end = type_str
-        .find(['<', '|', '&', '?', '[', '{'])
-        .unwrap_or(type_str.len());
-    let base = type_str[..base_end].trim();
-
-    if base.is_empty() {
-        return None;
-    }
+    let base = ty.base_name()?;
 
     if let Some(cls) = class_loader(base) {
         return cls
@@ -1580,7 +1546,7 @@ fn find_template_info_in_method(type_str: &str, method: &MethodInfo) -> Option<S
     let bound_display = method
         .template_param_bounds
         .get(name)
-        .map(|b| format!(" of `{}`", shorten_type_string(b)))
+        .map(|b| format!(" of `{}`", PhpType::parse(b).shorten()))
         .unwrap_or_default();
 
     // Method-level templates don't carry variance info (always invariant).
@@ -1609,7 +1575,7 @@ fn find_template_info_in_class(type_str: &str, owner: &ClassInfo) -> Option<Stri
 
     let (tpl_name, bound, variance) = tpl;
     let bound_display = bound
-        .map(|b| format!(" of `{}`", shorten_type_string(&b)))
+        .map(|b| format!(" of `{}`", PhpType::parse(&b).shorten()))
         .unwrap_or_default();
 
     Some(format!(
