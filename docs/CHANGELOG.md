@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Add `#[\ReturnTypeWillChange]` code action.** When PHPStan reports `method.tentativeReturnType`, a quickfix inserts `#[\ReturnTypeWillChange]` above the method declaration with correct indentation. The diagnostic is eagerly cleared once the attribute is present.
 - **Simplify with null coalescing / null-safe operator.** Ternary expressions that guard against `null` are detected and a code action offers to rewrite them. `isset($x) ? $x : $default` and `$x !== null ? $x : $default` become `$x ?? $default`. `$x !== null ? $x->foo() : null` becomes `$x?->foo()` (PHP 8.0+ only).
 - **Completion and signature help for `new self`, `new static`, and `new parent`.** Inside a class, typing `new sel` offers `self` and `static` as keyword completions with constructor parameter snippets. `parent` is offered when the class has a parent. Signature help triggers when typing inside the parentheses of `new self(`, `new static(`, or `new parent(`.
+- **Fix PHPDoc type mismatch code actions.** When PHPStan reports that a `@return`, `@param`, or `@var` tag has a type incompatible with the native type hint (`return.phpDocType`, `parameter.phpDocType`, `property.phpDocType`), two quickfixes are offered: update the tag type to match the native type, or remove the tag entirely. The diagnostic is eagerly cleared after applying either fix.
 
 ### Changed
 

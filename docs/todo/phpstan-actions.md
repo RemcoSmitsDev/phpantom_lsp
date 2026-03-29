@@ -51,66 +51,6 @@ already covers the suppress-with-comment path.
 
 ---
 
-### H7. `return.phpDocType` — Fix `@return` to match native type
-
-**Identifier:** `return.phpDocType`
-**Messages:**
-- `PHPDoc tag @return with type {phpdoc} is incompatible with native type {native}.`
-- `PHPDoc tag @return with type {phpdoc} is not subtype of native type {native}.`
-
-Parse both types. Offer two quickfixes:
-
-1. **Update `@return` to `{native}`** — replace the `@return` type in the
-   docblock.
-2. **Remove `@return` tag** — the native type is authoritative, so just
-   remove the redundant/wrong docblock tag. Mark as `is_preferred`.
-
-Reuse docblock editing from `update_docblock.rs`.
-
-**Stale detection:** the `@return` tag no longer contains `{phpdoc}`, or no
-`@return` tag exists.
-
----
-
-### H8. `parameter.phpDocType` — Fix `@param` to match native type
-
-**Identifier:** `parameter.phpDocType`
-**Messages:**
-- `PHPDoc tag @param for parameter $name with type {phpdoc} is incompatible with native type {native}.`
-- `PHPDoc tag @param for parameter $name with type {phpdoc} is not subtype of native type {native}.`
-
-Parse the parameter name and both types. Offer:
-
-1. **Update `@param $name` to `{native}`**
-2. **Remove `@param $name` tag** — mark as `is_preferred`.
-
-Same docblock editing pattern as P7.
-
-**Stale detection:** `@param` tag for `$name` no longer contains `{phpdoc}`,
-or no such `@param` tag exists.
-
-> **Implementation note:** P7, P8, and P9 share nearly identical logic
-> (parse PHPDoc vs native mismatch, offer update-or-remove). Consider
-> implementing them together with a shared "fix PHPDoc type mismatch" helper
-> that is parameterised by the tag name (`@return`, `@param`, `@var`).
-
----
-
-### H9. `property.phpDocType` — Fix property docblock type
-
-**Identifier:** `property.phpDocType`
-**Messages:**
-- `{desc} for property Foo::$bar with type {phpdoc} is incompatible with native type {native}.`
-- `{desc} for property Foo::$bar with type {phpdoc} is not subtype of native type {native}.`
-
-Parse property name and both types. Offer to update or remove the `@var` tag
-on the property docblock. Same pattern as P7/P8.
-
-**Stale detection:** `@var` tag no longer contains `{phpdoc}`, or no `@var`
-tag exists near the property.
-
----
-
 ### H10. `return.unusedType` — Remove unused type from return union
 
 **Identifier:** `return.unusedType`
@@ -442,8 +382,8 @@ the list.
 
 Based on effort-to-value ratio and shared infrastructure:
 
-1. **R1, R2, R3** — prerequisites (small, unblocks everything)
-2. **H7, H8, H9** — PHPDoc type mismatch family (implement together)
+1. ~~**R1, R2, R3** — prerequisites~~ ✅ Done
+2. ~~**H7, H8, H9** — PHPDoc type mismatch family~~ ✅ Done
 3. **H11** — visibility fix (leverages existing `change_visibility.rs`)
 4. **H14** — narrow `@throws` (extends existing `remove_throws.rs`)
 5. **H6** — return type update
@@ -518,12 +458,10 @@ implemented. Each module contains its own `find_method_insertion_point` and
 attribute detection helpers, following the same pattern as `add_override.rs`.
 Future attribute-related actions can reference any of these three modules.
 
-### PHPDoc type mismatch pattern (H7, H8, H9)
+### PHPDoc type mismatch pattern (H7, H8, H9) — Implemented
 
-These three actions share the same structure:
-1. Parse `{phpdoc}` type and `{native}` type from the message
-2. Offer to update the PHPDoc tag to match native
-3. Offer to remove the PHPDoc tag entirely
-
-Implement a generic helper parameterised by tag name (`@return`, `@param`,
-`@var`) and the tag's identifying context (e.g. `$paramName` for `@param`).
+H7, H8, and H9 are implemented in `fix_phpdoc_type.rs` with a shared
+helper parameterised by tag name (`@return`, `@param`, `@var`). Each
+diagnostic offers two quickfixes: update the tag type to match the
+native type, or remove the tag entirely (preferred). Stale detection
+checks whether the tag still contains the original PHPDoc type.

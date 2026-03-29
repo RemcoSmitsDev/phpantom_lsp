@@ -22,6 +22,11 @@
 //! - **Add `#[\ReturnTypeWillChange]`** — when PHPStan reports
 //!   `method.tentativeReturnType`, offer to insert the attribute
 //!   above the method declaration.
+//! - **Fix PHPDoc type** — when PHPStan reports `return.phpDocType`,
+//!   `parameter.phpDocType`, or `property.phpDocType` (a `@return`,
+//!   `@param`, or `@var` tag whose type is incompatible with the
+//!   native type hint), offer to update the tag type to match the
+//!   native type or remove the tag entirely.
 //! - **PHPStan ignore** — when the cursor is on a line with a PHPStan
 //!   error, offer to add `@phpstan-ignore <identifier>`.  When PHPStan
 //!   reports an unnecessary ignore, offer to remove it.
@@ -29,6 +34,7 @@
 mod add_override;
 pub(crate) mod add_return_type_will_change;
 pub(crate) mod add_throws;
+pub(crate) mod fix_phpdoc_type;
 mod ignore;
 pub(crate) mod new_static;
 pub(crate) mod remove_override;
@@ -87,6 +93,10 @@ impl Backend {
 
         // ── Fix unsafe `new static()` ───────────────────────────────
         self.collect_new_static_actions(uri, content, params, out);
+
+        // ── Fix PHPDoc type mismatch (@return, @param, @var) ────────
+        self.collect_fix_phpdoc_type_actions(uri, content, params, out);
+
     }
 }
 

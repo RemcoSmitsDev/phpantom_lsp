@@ -272,6 +272,20 @@ fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
         );
     }
 
+    // ── PHPDoc type mismatch (return.phpDocType, parameter.phpDocType,
+    //    property.phpDocType) — tag removed or type changed ──────────
+    if identifier == "return.phpDocType"
+        || identifier == "parameter.phpDocType"
+        || identifier == "property.phpDocType"
+    {
+        return crate::code_actions::phpstan::fix_phpdoc_type::is_fix_phpdoc_type_stale(
+            content,
+            diag.range.start.line as usize,
+            &diag.message,
+            identifier,
+        );
+    }
+
     // ── new.static — check if the user manually fixed the class ─────
     // Unlike the actions above, `new.static` fixes are commonly applied
     // by hand (adding `final` to the class or constructor), so we keep
