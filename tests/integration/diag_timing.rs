@@ -15,9 +15,7 @@
 //! invalidation, classes from unedited files stay cached and the second
 //! pass is significantly faster.
 
-use crate::common::{
-    create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs,
-};
+use crate::common::{create_psr4_workspace, create_test_backend_with_full_stubs};
 use std::time::Instant;
 
 /// Regression test for variable-type-caching in deprecated diagnostics.
@@ -53,7 +51,7 @@ async fn deprecated_diagnostics_variable_cache_regression() {
     php.push_str("    }\n}\n");
 
     let uri = "file:///test/service.php";
-    let backend = create_test_backend();
+    let backend = create_test_backend_with_full_stubs();
     backend.update_ast(uri, &php);
 
     let start = Instant::now();
