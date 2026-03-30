@@ -1,7 +1,13 @@
 //! Diagnostic timing tests with self-contained fixtures.
 //!
-//! Run with:
-//!   cargo test --release -p phpantom_lsp --test diag_timing -- --nocapture
+//! The two phpstan-fixture benchmarks are `#[ignore]`d by default because
+//! they take 10-20 s each.  Run them explicitly with:
+//!
+//!   cargo nextest run -E 'test(diag_timing::time_diagnostics)' --run-ignored all
+//!
+//! or with the built-in runner:
+//!
+//!   cargo test --release -p phpantom_lsp --test integration diag_timing -- --ignored --nocapture
 //!
 //! The `warm_cache` tests simulate the real editing scenario: diagnostics
 //! run once (cold, populates the resolved-class cache), then the user
@@ -361,6 +367,7 @@ class UserService {
 }
 
 #[tokio::test]
+#[ignore] // benchmark — takes ~12 s; run with --run-ignored all
 async fn time_diagnostics_on_phpstan_fixture() {
     let path = "benches/fixtures/diagnostics/phpstan.php";
     let content = match std::fs::read_to_string(path) {
@@ -427,6 +434,7 @@ async fn time_diagnostics_on_phpstan_fixture() {
 
 /// Warm-cache test on the phpstan fixture (larger file, more class references).
 #[tokio::test]
+#[ignore] // benchmark — takes ~21 s; run with --run-ignored all
 async fn time_diagnostics_warm_cache_phpstan() {
     let path = "benches/fixtures/diagnostics/phpstan.php";
     let content = match std::fs::read_to_string(path) {
