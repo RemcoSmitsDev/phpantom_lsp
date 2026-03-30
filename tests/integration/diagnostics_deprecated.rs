@@ -2766,3 +2766,121 @@ oldHelper();
         deprecated
     );
 }
+
+// ─── Deprecated class in implements ─────────────────────────────────────────
+
+#[test]
+fn deprecated_class_in_implements() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_implements.php";
+    let text = r#"<?php
+/** @deprecated Use NewContract instead */
+interface OldContract {
+    public function execute(): void;
+}
+
+class Worker implements OldContract {
+    public function execute(): void {}
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    assert!(
+        deprecated.iter().any(|d| d.message.contains("OldContract")),
+        "Expected deprecated diagnostic for OldContract in implements clause, got: {:?}",
+        deprecated
+    );
+}
+
+// ─── Multi-class file: $this resolves to correct class ──────────────────────
+
+#[test]
+fn deprecated_method_this_resolves_correct_class_in_multi_class_file() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_multi_class.php";
+    let text = r#"<?php
+class First {
+    /** @deprecated */
+    public function oldMethod(): void {}
+
+    public function safeMethod(): void {}
+
+    public function callSafe(): void {
+        $this->safeMethod();
+    }
+}
+
+class Second {
+    public function notDeprecated(): void {}
+
+    public function callOwn(): void {
+        $this->notDeprecated();
+    }
+
+    public function callDeprecatedFromFirst(): void {
+        // This should NOT flag — Second does not have oldMethod
+        // $this->oldMethod() would be an unknown member, not deprecated
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    // $this->safeMethod() in First should NOT be flagged
+    // $this->notDeprecated() in Second should NOT be flagged
+    // No deprecated member accesses via $this in this file
+    assert!(
+        deprecated
+            .iter()
+            .all(|d| !d.message.contains("safeMethod") && !d.message.contains("notDeprecated")),
+        "Non-deprecated methods should not be flagged, got: {:?}",
+        deprecated
+    );
+}
+
+#[test]
+fn deprecated_method_this_flags_in_correct_class() {
+    let backend = create_test_backend();
+    let uri = "file:///test_deprecated_multi_class_flag.php";
+    let text = r#"<?php
+class Alpha {
+    /** @deprecated Use newWay() instead */
+    public function oldWay(): void {}
+
+    public function newWay(): void {}
+
+    public function doStuff(): void {
+        $this->oldWay();
+    }
+}
+
+class Beta {
+    public function oldWay(): void {}
+
+    public function doStuff(): void {
+        $this->oldWay();
+    }
+}
+"#;
+
+    let diags = deprecated_diagnostics(&backend, uri, text);
+    let deprecated: Vec<_> = diags.iter().filter(|d| has_deprecated_tag(d)).collect();
+
+    // Alpha::doStuff() calls $this->oldWay() which IS deprecated on Alpha
+    // Beta::doStuff() calls $this->oldWay() which is NOT deprecated on Beta
+    // So we expect exactly one deprecated diagnostic
+    assert_eq!(
+        deprecated.len(),
+        1,
+        "Expected exactly one deprecated diagnostic (from Alpha), got: {:?}",
+        deprecated
+    );
+    assert!(
+        deprecated[0].message.contains("oldWay"),
+        "Expected the deprecated diagnostic to mention oldWay, got: {:?}",
+        deprecated[0].message
+    );
+}

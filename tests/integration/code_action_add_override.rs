@@ -5,68 +5,11 @@
 //! inserts `#[Override]` above the method declaration, adding a
 //! `use Override;` import when the file declares a namespace.
 
-use std::sync::Arc;
-
-use crate::common::create_test_backend;
+use crate::common::{
+    apply_edits, create_test_backend, extract_edits, get_code_actions_at, inject_phpstan_diag,
+    resolve_action,
+};
 use tower_lsp::lsp_types::*;
-
-/// Inject a PHPStan diagnostic into the backend's cache and return it.
-fn inject_phpstan_diag(
-    backend: &phpantom_lsp::Backend,
-    uri: &str,
-    line: u32,
-    message: &str,
-    identifier: &str,
-) -> Diagnostic {
-    let diag = Diagnostic {
-        range: Range {
-            start: Position::new(line, 0),
-            end: Position::new(line, 80),
-        },
-        severity: Some(DiagnosticSeverity::ERROR),
-        code: Some(NumberOrString::String(identifier.to_string())),
-        source: Some("PHPStan".to_string()),
-        message: message.to_string(),
-        ..Default::default()
-    };
-    {
-        let mut cache = backend.phpstan_last_diags().lock();
-        cache.entry(uri.to_string()).or_default().push(diag.clone());
-    }
-    diag
-}
-
-/// Helper: send a code action request at the given line/character.
-fn get_code_actions(
-    backend: &phpantom_lsp::Backend,
-    uri: &str,
-    content: &str,
-    line: u32,
-    character: u32,
-) -> Vec<CodeActionOrCommand> {
-    let params = CodeActionParams {
-        text_document: TextDocumentIdentifier {
-            uri: uri.parse().unwrap(),
-        },
-        range: Range {
-            start: Position::new(line, character),
-            end: Position::new(line, character),
-        },
-        context: CodeActionContext {
-            diagnostics: vec![],
-            only: None,
-            trigger_kind: None,
-        },
-        work_done_progress_params: WorkDoneProgressParams {
-            work_done_token: None,
-        },
-        partial_result_params: PartialResultParams {
-            partial_result_token: None,
-        },
-    };
-
-    backend.handle_code_action(uri, content, &params)
-}
 
 /// Find the "Add #[Override]" code action.
 fn find_add_override_action(actions: &[CodeActionOrCommand]) -> Option<&CodeAction> {
@@ -74,67 +17,6 @@ fn find_add_override_action(actions: &[CodeActionOrCommand]) -> Option<&CodeActi
         CodeActionOrCommand::CodeAction(ca) if ca.title.contains("#[Override]") => Some(ca),
         _ => None,
     })
-}
-
-/// Extract all text edits from a code action's workspace edit.
-/// Resolve a deferred code action by storing file content in open_files
-/// and calling resolve_code_action.
-fn resolve_action(
-    backend: &phpantom_lsp::Backend,
-    uri: &str,
-    content: &str,
-    action: &CodeAction,
-) -> CodeAction {
-    backend
-        .open_files()
-        .write()
-        .insert(uri.to_string(), Arc::new(content.to_string()));
-    let (resolved, _) = backend.resolve_code_action(action.clone());
-    assert!(
-        resolved.edit.is_some(),
-        "resolved action should have an edit, title: {}",
-        resolved.title
-    );
-    resolved
-}
-
-fn extract_edits(action: &CodeAction) -> Vec<TextEdit> {
-    let edit = action.edit.as_ref().expect("action should have an edit");
-    let changes = edit.changes.as_ref().expect("edit should have changes");
-    changes.values().flat_map(|v| v.iter()).cloned().collect()
-}
-
-/// Combine text edits into the original content to produce the result.
-/// Edits are applied in reverse order of their start position so that
-/// earlier edits don't invalidate later offsets.
-fn apply_edits(content: &str, edits: &[TextEdit]) -> String {
-    let mut result = content.to_string();
-    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
-    sorted.sort_by(|a, b| {
-        b.range
-            .start
-            .line
-            .cmp(&a.range.start.line)
-            .then(b.range.start.character.cmp(&a.range.start.character))
-    });
-
-    for edit in sorted {
-        let start = lsp_pos_to_offset(&result, edit.range.start);
-        let end = lsp_pos_to_offset(&result, edit.range.end);
-        result.replace_range(start..end, &edit.new_text);
-    }
-    result
-}
-
-fn lsp_pos_to_offset(content: &str, pos: Position) -> usize {
-    let mut offset = 0;
-    for (i, line) in content.lines().enumerate() {
-        if i == pos.line as usize {
-            return offset + pos.character as usize;
-        }
-        offset += line.len() + 1; // +1 for newline
-    }
-    content.len()
 }
 
 // ── Basic: adds #[Override] to a simple method (no namespace) ───────────────
@@ -158,7 +40,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer Add #[Override] action");
 
     assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
@@ -223,7 +105,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 5, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 5, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -260,7 +142,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 3, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 3, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -298,7 +180,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 4, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 4, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -337,7 +219,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 3, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 3, 10);
     let action = find_add_override_action(&actions);
     assert!(
         action.is_none(),
@@ -367,7 +249,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 3, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 3, 10);
     let action = find_add_override_action(&actions);
     assert!(
         action.is_none(),
@@ -396,7 +278,7 @@ class Foo {
         "return.unusedType",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions);
     assert!(
         action.is_none(),
@@ -425,7 +307,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -460,7 +342,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -495,7 +377,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     assert!(
@@ -538,7 +420,7 @@ class UserController extends Controller {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 4, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 4, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -592,7 +474,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 6, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 6, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -639,7 +521,7 @@ class UserController extends Controller {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 7, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 7, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -679,7 +561,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -726,7 +608,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 6, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 6, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -766,7 +648,7 @@ class Outer {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 3, 12);
+    let actions = get_code_actions_at(&backend, uri, content, 3, 12);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -801,7 +683,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let attached_diags = action
@@ -834,7 +716,7 @@ class Child extends Base {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 3, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 3, 10);
     let action = find_add_override_action(&actions);
     assert!(
         action.is_none(),
@@ -866,7 +748,7 @@ class Child extends Base {
     );
 
     // Request code actions on `bar` (line 3).
-    let actions = get_code_actions(&backend, uri, content, 3, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 3, 10);
     let action = find_add_override_action(&actions);
     assert!(
         action.is_none(),
@@ -874,7 +756,7 @@ class Child extends Base {
     );
 
     // Request code actions on `foo` (line 2).
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions);
     assert!(
         action.is_some(),
@@ -903,7 +785,7 @@ class Foo implements BarInterface {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 2, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 2, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);
@@ -940,7 +822,7 @@ class Handler implements HandlerInterface {
         "method.missingOverride",
     );
 
-    let actions = get_code_actions(&backend, uri, content, 4, 10);
+    let actions = get_code_actions_at(&backend, uri, content, 4, 10);
     let action = find_add_override_action(&actions).expect("should offer action");
 
     let resolved = resolve_action(&backend, uri, content, action);

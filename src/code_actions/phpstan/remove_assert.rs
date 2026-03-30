@@ -250,7 +250,10 @@ fn build_remove_assert_edit(content: &str, diag_line: usize) -> Option<TextEdit>
         // For same-line: use the end line from the statement.
         let end_offset = stmt_end_byte + trailing_space;
         let end_line_num = content[..end_offset].matches('\n').count();
-        let end_line_start = content[..end_offset].rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let end_line_start = content[..end_offset]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let end_col_final = (end_offset - end_line_start) as u32;
 
         Some(TextEdit {

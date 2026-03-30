@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use crate::common::create_test_backend;
+use crate::common::{
+    apply_edits, create_test_backend, extract_edits, lsp_pos_to_offset, resolve_action,
+};
 use tower_lsp::lsp_types::*;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -61,27 +63,6 @@ fn find_visibility_actions(actions: &[CodeActionOrCommand]) -> Vec<&CodeAction> 
         .collect()
 }
 
-/// Resolve a deferred code action by storing file content in open_files
-/// and calling resolve_code_action.
-fn resolve_action(
-    backend: &phpantom_lsp::Backend,
-    uri: &str,
-    content: &str,
-    action: &CodeAction,
-) -> CodeAction {
-    backend
-        .open_files()
-        .write()
-        .insert(uri.to_string(), Arc::new(content.to_string()));
-    let (resolved, _) = backend.resolve_code_action(action.clone());
-    assert!(
-        resolved.edit.is_some(),
-        "resolved action should have an edit, title: {}",
-        resolved.title
-    );
-    resolved
-}
-
 /// Extract the replacement text from a resolved code action's workspace edit.
 fn extract_edit_text(action: &CodeAction) -> String {
     let edit = action.edit.as_ref().expect("action should have an edit");
@@ -89,43 +70,6 @@ fn extract_edit_text(action: &CodeAction) -> String {
     let edits: Vec<&TextEdit> = changes.values().flat_map(|v| v.iter()).collect();
     assert_eq!(edits.len(), 1, "expected exactly one text edit");
     edits[0].new_text.clone()
-}
-
-/// Extract all text edits from a code action's workspace edit.
-fn extract_edits(action: &CodeAction) -> Vec<TextEdit> {
-    let edit = action.edit.as_ref().expect("action should have an edit");
-    let changes = edit.changes.as_ref().expect("edit should have changes");
-    changes.values().flat_map(|v| v.iter()).cloned().collect()
-}
-
-/// Combine text edits into the original content to produce the result.
-fn apply_edits(content: &str, edits: &[TextEdit]) -> String {
-    let mut result = content.to_string();
-    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
-    sorted.sort_by(|a, b| {
-        b.range
-            .start
-            .line
-            .cmp(&a.range.start.line)
-            .then(b.range.start.character.cmp(&a.range.start.character))
-    });
-    for edit in sorted {
-        let start = lsp_pos_to_offset(&result, edit.range.start);
-        let end = lsp_pos_to_offset(&result, edit.range.end);
-        result.replace_range(start..end, &edit.new_text);
-    }
-    result
-}
-
-fn lsp_pos_to_offset(content: &str, pos: Position) -> usize {
-    let mut offset = 0;
-    for (i, line) in content.lines().enumerate() {
-        if i == pos.line as usize {
-            return offset + pos.character as usize;
-        }
-        offset += line.len() + 1;
-    }
-    content.len()
 }
 
 fn line_col_to_offset(content: &str, line: u32, col: u32) -> usize {

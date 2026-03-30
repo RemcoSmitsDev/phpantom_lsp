@@ -208,19 +208,6 @@ literals with consistent value types, offer `@return array<ValueType>`.
 
 ## Tier 5 — Lower priority / more complex
 
-### H18. `deadCode.unreachable` — Remove unreachable code
-
-**Identifier:** `deadCode.unreachable`
-**Message:** `Unreachable statement - code above always terminates.`
-
-Delete the unreachable statement. Start with single-statement removal (delete
-from the diagnostic line to the next `;`). Multi-statement dead code removal
-is hard without an AST.
-
-**Stale detection:** the diagnostic line is now empty or a `}`.
-
----
-
 ### H19. `property.unused` / `method.unused` / `classConstant.unused` — Remove unused member
 
 **Identifiers:** `property.unused`, `method.unused`, `classConstant.unused`
@@ -256,30 +243,6 @@ diagnostic line.
 
 ---
 
-### H21. `return.void` — Remove return value from void function
-
-**Identifier:** `return.void`
-**Message:** `{desc} with return type void returns {type} but should not return anything.`
-
-Replace `return {expr};` with `return;` on the diagnostic line.
-
-**Stale detection:** the diagnostic line contains `return;` (no expression).
-
----
-
-### H22. `return.empty` — Add return value or change return type to void
-
-**Identifier:** `return.empty`
-**Message:** `{desc} should return {type} but empty return statement found.`
-
-Offer two quickfixes:
-1. **Change return type to `void`** — replace the native return type and
-   remove any `@return` tag.
-2. **Add placeholder return** — `return null;` — only valid if `{type}`
-   includes `null`.
-
----
-
 ### H23. `instanceof.alwaysTrue` — Remove redundant instanceof check
 
 **Identifier:** `instanceof.alwaysTrue`
@@ -307,48 +270,14 @@ the list.
 
 ---
 
-### H25. `function.alreadyNarrowedType` — Remove always-true `assert()`
-
-**Identifier:** `function.alreadyNarrowedType`
-**Message:** `Call to function assert() with {type} will always evaluate to true.`
-
-Only match when the message starts with `Call to function assert()`. Other
-functions (`is_bool()`, `instanceof`, etc.) use the same identifier but
-appear inside conditions where removal would change control flow.
-
-Delete the entire `assert(...)` statement line. This is safe because
-`assert()` with an always-true condition is a no-op.
-
-Primary value is for a future CLI batch-fix mode where users can auto-apply
-quickfixes across a codebase.
-
-**Stale detection:** the diagnostic line no longer contains `assert(`.
-
----
-
-### H26. `@phpstan-ignore` action must never be the preferred quickfix
-
-**Identifier:** all
-
-The "Ignore PHPStan error" action currently uses `is_preferred: None`. When
-no other quickfix sets `is_preferred: Some(true)`, some editors treat `None`
-the same as absent, which can cause the ignore action to be applied on the
-keyboard shortcut (e.g. Ctrl+. then Enter).
-
-Change the ignore action to always use `is_preferred: Some(false)` so that
-a real quickfix is always chosen over suppression when available.
-
----
-
 ## Suggested implementation order
 
 Based on effort-to-value ratio and shared infrastructure:
 
 1. **H6** — return type update
-3. **H10** — remove unused union member
-4. **H12** — prefixed class name
-5. **H4** — unset by-ref foreach variable
-6. Everything else based on user demand
+2. **H10** — remove unused union member
+3. **H4** — unset by-ref foreach variable
+4. Everything else based on user demand
 
 ---
 
@@ -395,8 +324,18 @@ next PHPStan run.
 
 The function currently handles:
 - `@phpstan-ignore` coverage (all identifiers)
-- `throws.unusedType` / `throws.notThrowable` — tag removed
-- `missingType.checkedException` — tag added
+- `method.override` / `property.override` / `property.overrideAttribute`
+- `method.tentativeReturnType`
+- `return.phpDocType` / `parameter.phpDocType` / `property.phpDocType`
+- `new.static`
+- `class.prefixed`
+- `function.alreadyNarrowedType` (assert-only)
+- `return.void` / `return.empty`
+- `deadCode.unreachable`
+
+Other identifiers (`throws.unusedType`, `throws.notThrowable`,
+`missingType.checkedException`, `method.missingOverride`) are cleared
+eagerly by `codeAction/resolve` rather than by content heuristics.
 
 New actions should add branches to the `match identifier { ... }` block.
 
@@ -409,17 +348,17 @@ Each action needs tests following the existing pattern:
 - Stale detection tests that construct `Diagnostic` objects and call
   `is_stale_phpstan_diagnostic`
 
-### Attribute insertion pattern (H3, H5) — Implemented
+### Attribute insertion pattern
 
-H3 (`remove_override.rs`) and H5 (`add_return_type_will_change.rs`) are now
-implemented. Each module contains its own `find_method_insertion_point` and
-attribute detection helpers, following the same pattern as `add_override.rs`.
-Future attribute-related actions can reference any of these three modules.
+`remove_override.rs` and `add_return_type_will_change.rs` each contain
+their own `find_method_insertion_point` and attribute detection helpers,
+following the same pattern as `add_override.rs`. Future attribute-related
+actions can reference any of these three modules.
 
-### PHPDoc type mismatch pattern (H7, H8, H9) — Implemented
+### PHPDoc type mismatch pattern
 
-H7, H8, and H9 are implemented in `fix_phpdoc_type.rs` with a shared
-helper parameterised by tag name (`@return`, `@param`, `@var`). Each
-diagnostic offers two quickfixes: update the tag type to match the
-native type, or remove the tag entirely (preferred). Stale detection
-checks whether the tag still contains the original PHPDoc type.
+`fix_phpdoc_type.rs` provides a shared helper parameterised by tag name
+(`@return`, `@param`, `@var`). Each diagnostic offers two quickfixes:
+update the tag type to match the native type, or remove the tag entirely
+(preferred). Stale detection checks whether the tag still contains the
+original PHPDoc type.

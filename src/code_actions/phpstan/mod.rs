@@ -33,6 +33,12 @@
 //! - **Remove always-true `assert()`** — when PHPStan reports
 //!   `function.alreadyNarrowedType` for an `assert()` call, offer to
 //!   delete the no-op statement.
+//! - **Fix return void mismatch** — when PHPStan reports
+//!   `return.void` (void function returns a value) or `return.empty`
+//!   (non-void function has bare return), offer to strip the return
+//!   expression or change the return type to `void`.
+//! - **Remove unreachable statement** — when PHPStan reports
+//!   `deadCode.unreachable`, offer to delete the dead statement.
 //! - **PHPStan ignore** — when the cursor is on a line with a PHPStan
 //!   error, offer to add `@phpstan-ignore <identifier>`.  When PHPStan
 //!   reports an unnecessary ignore, offer to remove it.
@@ -42,11 +48,13 @@ pub(crate) mod add_return_type_will_change;
 pub(crate) mod add_throws;
 pub(crate) mod fix_phpdoc_type;
 pub(crate) mod fix_prefixed_class;
+pub(crate) mod fix_return_type;
 mod ignore;
 pub(crate) mod new_static;
 pub(crate) mod remove_assert;
 pub(crate) mod remove_override;
 mod remove_throws;
+pub(crate) mod remove_unreachable;
 
 use tower_lsp::lsp_types::*;
 
@@ -109,6 +117,12 @@ impl Backend {
 
         // ── Remove always-true assert() ─────────────────────────────
         self.collect_remove_assert_actions(uri, content, params, out);
+
+        // ── Fix return type (return.void / return.empty / return.type / missingType.return) ─
+        self.collect_fix_return_type_actions(uri, content, params, out);
+
+        // ── Remove unreachable statement ────────────────────────────
+        self.collect_remove_unreachable_actions(uri, content, params, out);
     }
 }
 

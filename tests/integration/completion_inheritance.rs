@@ -1,4 +1,6 @@
-use crate::common::{create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs};
+use crate::common::{
+    create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs,
+};
 use tower_lsp::LanguageServer;
 use tower_lsp::lsp_types::*;
 

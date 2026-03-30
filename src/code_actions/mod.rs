@@ -243,6 +243,15 @@ impl Backend {
             "phpstan.fixPrefixedClass" => self.resolve_fix_prefixed_class(&data, &content),
             // ── Remove always-true assert() ─────────────────────────
             "phpstan.removeAssert" => self.resolve_remove_assert(&data, &content),
+            // ── Fix return type ─────────────────────────────────────
+            "phpstan.fixReturnType.stripExpr"
+            | "phpstan.fixReturnType.changeTypeToActual"
+            | "phpstan.fixReturnType.changeType"
+            | "phpstan.fixReturnType.addType" => self.resolve_fix_return_type(&data, &content),
+            // ── Remove unreachable statement ────────────────────────
+            "phpstan.removeUnreachable" => {
+                self.resolve_remove_unreachable(&data, &content)
+            }
             // ── Change visibility (parent-aware) ────────────────────
             "refactor.changeVisibility" => self.resolve_change_visibility(&data, &content),
             // ── Unused import quickfixes ─────────────────────────────

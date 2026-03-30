@@ -64,25 +64,30 @@ the first pass.
 
 ---
 
-## D3. Deprecated rendering
+## D3. Deprecated rendering — chain subject resolution
 
-**Impact: Low-Medium · Effort: Low**
+**Impact: Low-Medium · Effort: Medium**
 
-Deprecated class references (e.g. `new OldHelper()`) currently show a
-hint message but the `DiagnosticTag::DEPRECATED` tag (which renders as
-strikethrough in most editors) may not be applied correctly for all
-deprecated symbol types. Verify that:
+Chain subjects like `getHelper()->deprecatedMethod()` do not produce
+a deprecated diagnostic because `resolve_subject_to_class_name` in
+`diagnostics/deprecated.rs` returns `None` for non-variable,
+non-keyword subjects (the `_ => None` arm). The function call return
+type is never resolved, so the member deprecation check is skipped.
+
+**Fix:** Route chain subjects through the completion/type-inference
+pipeline to resolve the return type of the call before checking the
+member for deprecation. The variable-resolution path already works
+for `$var->deprecatedMethod()` via `resolve_variable_subject`; the
+gap is function-call and method-call return types in subject position.
+
+The following have been verified and are covered by tests:
 
 - Deprecated class references in `new`, type hints, `extends`, and
   `implements` positions all render with strikethrough.
-- Deprecated method calls render with strikethrough.
-- Deprecated property accesses render with strikethrough.
-- The deprecated diagnostic resolver uses offset-based class resolution
-  (not "first class in file") for `$this`/`self`/`static` subjects, so
-  that files with multiple classes resolve correctly.
-- Chain subjects (`getHelper()->deprecatedMethod()`) resolve through
-  the full completion pipeline, not the hand-rolled
-  `resolve_subject_to_class_name` helper that can't handle chains.
+- Deprecated method calls, property accesses, and constants render
+  with strikethrough (via both `$var->` and `ClassName::` subjects).
+- Offset-based class resolution for `$this`/`self`/`static` resolves
+  to the correct class in files with multiple class declarations.
 
 ---
 

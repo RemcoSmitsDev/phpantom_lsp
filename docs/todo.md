@@ -21,11 +21,10 @@ within the same impact tier.
 
 ## Sprint 4 — Refactoring toolkit
 
-| #   | Item                                                                                                                                              | Impact | Effort |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------ |
-| H25 | [`function.alreadyNarrowedType` — remove always-true `assert()`](todo/phpstan-actions.md#h25-functionalreadynarrowedtype--remove-always-true-assert) | Low    | Low    |
-| H26 | [`@phpstan-ignore` action must never be the preferred quickfix](todo/phpstan-actions.md#h26-phpstan-ignore-action-must-never-be-the-preferred-quickfix) | Low    | Low    |
-|     | **Release 0.7.0**                                                                                                                                 |        |        |
+| #   | Item                                                                                                                                       | Impact | Effort |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ------ |
+| H6  | [`return.type` / `return.void` / `missingType.return` — fix return type](todo/phpstan-actions.md#h6-returntype--update-return-type-to-match-actual-returns) | Medium | Low    |
+|     | **Release 0.7.0**                                                                                                                          |        |        |
 
 ## Sprint 5 — Polish for office adoption
 
@@ -112,17 +111,13 @@ unlikely to move the needle for most users.
 | A3   | Switch → match conversion                                                                                                                                                   | Low         | Medium         |
 |      | **[PHPStan Code Actions](todo/phpstan-actions.md)**                                                                                                                         |             |                |
 | H4   | `assign.byRefForeachExpr` — unset by-reference foreach variable                                                                                                             | Medium      | Medium         |
-| H6   | `return.type` — update return type to match actual returns                                                                                                                  | Medium      | Medium         |
 | H10  | `return.unusedType` — remove unused type from return union                                                                                                                  | Medium      | Medium         |
 | H13  | `property.notFound` — declare missing property (same-class)                                                                                                                 | Medium      | Medium         |
 | H15  | Template bound from tip — add `@template T of X`                                                                                                                            | Medium      | Medium         |
 | H16  | `match.unhandled` — add missing match arms                                                                                                                                  | Medium      | Medium         |
 | H17  | `missingType.iterableValue` — add `@return` with inferred element type                                                                                                      | Medium      | High           |
-| H18  | `deadCode.unreachable` — remove unreachable code                                                                                                                            | Low         | Low            |
 | H19  | `property.unused` / `method.unused` — remove unused member                                                                                                                  | Low         | Low            |
 | H20  | `generics.callSiteVarianceRedundant` — remove redundant variance annotation                                                                                                 | Low         | Low            |
-| H21  | `return.void` — remove return value from void function                                                                                                                      | Low         | Low            |
-| H22  | `return.empty` — add return value or change return type to void                                                                                                             | Low         | Low            |
 | H23  | `instanceof.alwaysTrue` — remove redundant instanceof check                                                                                                                 | Low         | Low            |
 | H24  | `catch.neverThrown` — remove unnecessary catch clause                                                                                                                       | Low         | Low            |
 |      | **[LSP Features](todo/lsp-features.md)**                                                                                                                                    |             |                |

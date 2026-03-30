@@ -475,6 +475,83 @@ impl PhpType {
         }
     }
 
+    /// Convert this type to a valid native PHP type hint string.
+    ///
+    /// Returns `None` when the type has no native representation (e.g.
+    /// `array{key: string}`, `callable(int): void`, conditional types).
+    ///
+    /// Rich PHPStan types are simplified to their native equivalents:
+    /// - `list<T>`, `non-empty-list<T>`, `non-empty-array<K,V>`,
+    ///   `array<K,V>`, `associative-array<K,V>` → `array`
+    /// - `Collection<T>` (any generic class) → `Collection`
+    /// - `positive-int`, `negative-int`, `non-negative-int`,
+    ///   `non-positive-int`, `non-zero-int` → `int`
+    /// - `non-empty-string`, `numeric-string`, `class-string`,
+    ///   `literal-string`, etc. → `string`
+    /// - `scalar`, `numeric`, `number` → no native equivalent (`None`)
+    /// - `array-key` → no native equivalent (`None`)
+    /// - Unions/intersections of native types are preserved
+    /// - `?T` → `?NativeT`
+    pub fn to_native_hint(&self) -> Option<String> {
+        match self {
+            PhpType::Named(s) => native_scalar_name(s).map(|n| n.to_string()),
+            PhpType::Generic(name, _) => {
+                // Generic classes: strip the generic params.
+                // `array<K,V>` → `array`, `Collection<T>` → `Collection`
+                native_scalar_name(name)
+                    .map(|n| n.to_string())
+                    .or_else(|| Some(name.clone()))
+            }
+            PhpType::Nullable(inner) => inner.to_native_hint().map(|n| format!("?{}", n)),
+            PhpType::Union(members) => {
+                let native: Vec<String> =
+                    members.iter().filter_map(|m| m.to_native_hint()).collect();
+                if native.len() != members.len() {
+                    return None; // some members have no native form
+                }
+                // Deduplicate (e.g. `list<string>|array<int>` both → `array`)
+                let mut deduped = native;
+                deduped.sort();
+                deduped.dedup();
+                Some(deduped.join("|"))
+            }
+            PhpType::Intersection(members) => {
+                let native: Vec<String> =
+                    members.iter().filter_map(|m| m.to_native_hint()).collect();
+                if native.len() != members.len() {
+                    return None;
+                }
+                Some(native.join("&"))
+            }
+            PhpType::Array(_) => Some("array".to_string()),
+            PhpType::ClassString(_) => Some("string".to_string()),
+            PhpType::InterfaceString(_) => Some("string".to_string()),
+            PhpType::IntRange(_, _) => Some("int".to_string()),
+            PhpType::Literal(s) => {
+                // Literal int/float/string/bool → the base scalar type.
+                if s.parse::<i64>().is_ok() {
+                    Some("int".to_string())
+                } else if s.parse::<f64>().is_ok() {
+                    Some("float".to_string())
+                } else if s.starts_with('\'') || s.starts_with('"') {
+                    Some("string".to_string())
+                } else {
+                    None
+                }
+            }
+            // Shapes, callables with signatures, conditionals, key-of,
+            // value-of, index-access, and raw types have no native form.
+            PhpType::ArrayShape(_)
+            | PhpType::ObjectShape(_)
+            | PhpType::Callable { .. }
+            | PhpType::Conditional { .. }
+            | PhpType::KeyOf(_)
+            | PhpType::ValueOf(_)
+            | PhpType::IndexAccess(_, _)
+            | PhpType::Raw(_) => None,
+        }
+    }
+
     /// Return the top-level union members if this is a union type,
     /// or a single-element slice containing `self` otherwise.
     ///
@@ -1352,6 +1429,67 @@ fn is_scalar_name(name: &str) -> bool {
             | "non-empty-list"
             | "list"
     )
+}
+
+/// Map a PHPStan/docblock type name to its native PHP equivalent.
+///
+/// Returns `Some("int")` for `positive-int`, `Some("string")` for
+/// `class-string`, `Some("array")` for `list`, etc.  Returns `None`
+/// for names that have no single native PHP type (`scalar`, `numeric`,
+/// `array-key`, `number`).  Class names pass through unchanged.
+fn native_scalar_name(name: &str) -> Option<&str> {
+    let lower = name.to_ascii_lowercase();
+    match lower.as_str() {
+        // Direct native types.
+        "int" | "integer" => Some("int"),
+        "float" | "double" => Some("float"),
+        "string" => Some("string"),
+        "bool" | "boolean" => Some("bool"),
+        "void" => Some("void"),
+        "never" | "no-return" | "noreturn" | "never-return" | "never-returns" => Some("never"),
+        "null" => Some("null"),
+        "false" => Some("false"),
+        "true" => Some("true"),
+        "array" | "non-empty-array" | "list" | "non-empty-list" | "associative-array" => {
+            Some("array")
+        }
+        "callable" | "callable-object" | "callable-array" => Some("callable"),
+        "iterable" => Some("iterable"),
+        "resource" | "closed-resource" | "open-resource" => Some("resource"),
+        "mixed" | "non-empty-mixed" => Some("mixed"),
+        "object" => Some("object"),
+        "self" => Some("self"),
+        "static" | "$this" => Some("static"),
+        "parent" => Some("parent"),
+
+        // PHPStan int refinements → int.
+        "positive-int" | "negative-int" | "non-positive-int" | "non-negative-int"
+        | "non-zero-int" => Some("int"),
+
+        // PHPStan string refinements → string.
+        "non-empty-string"
+        | "numeric-string"
+        | "class-string"
+        | "interface-string"
+        | "literal-string"
+        | "callable-string"
+        | "truthy-string"
+        | "non-falsy-string"
+        | "trait-string"
+        | "enum-string"
+        | "lowercase-string"
+        | "uppercase-string"
+        | "non-empty-lowercase-string"
+        | "non-empty-uppercase-string"
+        | "non-empty-literal-string" => Some("string"),
+
+        // Types with no single native equivalent.
+        "scalar" | "numeric" | "number" | "array-key" | "empty-scalar" | "non-empty-scalar"
+        | "empty" => None,
+
+        // Anything else is a class name — pass it through.
+        _ => Some(name),
+    }
 }
 
 /// Convert a borrowed mago AST `Type` into an owned `PhpType`.

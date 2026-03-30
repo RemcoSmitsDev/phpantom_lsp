@@ -321,6 +321,29 @@ fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
         );
     }
 
+    // ── return.void / return.empty / missingType.return ──────────────
+    // Note: `return.type` is deliberately excluded — no content
+    // heuristic can tell whether the right fix is to change the type
+    // or change the code.  It is cleared eagerly by codeAction/resolve.
+    if identifier == "return.void"
+        || identifier == "return.empty"
+        || identifier == "missingType.return"
+    {
+        return crate::code_actions::phpstan::fix_return_type::is_fix_return_type_stale(
+            content,
+            diag.range.start.line as usize,
+            identifier,
+        );
+    }
+
+    // ── deadCode.unreachable — unreachable statement removed ────────
+    if identifier == "deadCode.unreachable" {
+        return crate::code_actions::phpstan::remove_unreachable::is_remove_unreachable_stale(
+            content,
+            diag.range.start.line as usize,
+        );
+    }
+
     false
 }
 

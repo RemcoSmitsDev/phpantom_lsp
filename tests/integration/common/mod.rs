@@ -3,6 +3,8 @@
 use phpantom_lsp::Backend;
 use std::collections::HashMap;
 use std::fs;
+use std::sync::Arc;
+use tower_lsp::lsp_types::*;
 
 pub fn create_test_backend() -> Backend {
     Backend::new_test()
@@ -503,4 +505,163 @@ pub fn create_psr4_workspace_with_enum_stubs(
     *backend.workspace_root().write() = Some(dir.path().to_path_buf());
     *backend.psr4_mappings().write() = mappings;
     (backend, dir)
+}
+
+// ── Shared code-action test helpers ─────────────────────────────────────────
+
+/// Inject a PHPStan diagnostic into the backend's cache and return it.
+pub fn inject_phpstan_diag(
+    backend: &Backend,
+    uri: &str,
+    line: u32,
+    message: &str,
+    identifier: &str,
+) -> Diagnostic {
+    let diag = Diagnostic {
+        range: Range {
+            start: Position::new(line, 0),
+            end: Position::new(line, 80),
+        },
+        severity: Some(DiagnosticSeverity::ERROR),
+        code: Some(NumberOrString::String(identifier.to_string())),
+        source: Some("PHPStan".to_string()),
+        message: message.to_string(),
+        ..Default::default()
+    };
+    {
+        let mut cache = backend.phpstan_last_diags().lock();
+        cache.entry(uri.to_string()).or_default().push(diag.clone());
+    }
+    diag
+}
+
+/// Send a code action request at a specific line and character (point range).
+pub fn get_code_actions_at(
+    backend: &Backend,
+    uri: &str,
+    content: &str,
+    line: u32,
+    character: u32,
+) -> Vec<CodeActionOrCommand> {
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier {
+            uri: uri.parse().unwrap(),
+        },
+        range: Range {
+            start: Position::new(line, character),
+            end: Position::new(line, character),
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+    backend.handle_code_action(uri, content, &params)
+}
+
+/// Send a code action request spanning an entire line (columns 0–80).
+pub fn get_code_actions_on_line(
+    backend: &Backend,
+    uri: &str,
+    content: &str,
+    line: u32,
+) -> Vec<CodeActionOrCommand> {
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier {
+            uri: uri.parse().unwrap(),
+        },
+        range: Range {
+            start: Position::new(line, 0),
+            end: Position::new(line, 80),
+        },
+        context: CodeActionContext {
+            diagnostics: vec![],
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: WorkDoneProgressParams {
+            work_done_token: None,
+        },
+        partial_result_params: PartialResultParams {
+            partial_result_token: None,
+        },
+    };
+    backend.handle_code_action(uri, content, &params)
+}
+
+/// Find a code action by title prefix.
+pub fn find_action<'a>(
+    actions: &'a [CodeActionOrCommand],
+    prefix: &str,
+) -> Option<&'a CodeAction> {
+    actions.iter().find_map(|a| match a {
+        CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with(prefix) => Some(ca),
+        _ => None,
+    })
+}
+
+/// Resolve a deferred code action by storing file content in open_files
+/// and calling resolve_code_action.
+pub fn resolve_action(
+    backend: &Backend,
+    uri: &str,
+    content: &str,
+    action: &CodeAction,
+) -> CodeAction {
+    backend
+        .open_files()
+        .write()
+        .insert(uri.to_string(), Arc::new(content.to_string()));
+    let (resolved, _) = backend.resolve_code_action(action.clone());
+    assert!(
+        resolved.edit.is_some(),
+        "resolved action should have an edit, title: {}",
+        resolved.title
+    );
+    resolved
+}
+
+/// Extract all text edits from a resolved code action.
+pub fn extract_edits(action: &CodeAction) -> Vec<TextEdit> {
+    let edit = action.edit.as_ref().expect("action should have an edit");
+    let changes = edit.changes.as_ref().expect("edit should have changes");
+    changes.values().flat_map(|v| v.iter()).cloned().collect()
+}
+
+/// Apply text edits to content, producing the resulting source.
+pub fn apply_edits(content: &str, edits: &[TextEdit]) -> String {
+    let mut result = content.to_string();
+    let mut sorted: Vec<&TextEdit> = edits.iter().collect();
+    sorted.sort_by(|a, b| {
+        b.range
+            .start
+            .line
+            .cmp(&a.range.start.line)
+            .then(b.range.start.character.cmp(&a.range.start.character))
+    });
+    for edit in sorted {
+        let start = lsp_pos_to_offset(&result, edit.range.start);
+        let end = lsp_pos_to_offset(&result, edit.range.end);
+        result.replace_range(start..end, &edit.new_text);
+    }
+    result
+}
+
+/// Convert an LSP `Position` (line, character) to a byte offset in `content`.
+pub fn lsp_pos_to_offset(content: &str, pos: Position) -> usize {
+    let mut offset = 0;
+    for (i, line) in content.lines().enumerate() {
+        if i == pos.line as usize {
+            return offset + pos.character as usize;
+        }
+        offset += line.len() + 1;
+    }
+    content.len()
 }
