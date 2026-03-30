@@ -11,7 +11,6 @@ use crate::common::{
 };
 use tower_lsp::lsp_types::*;
 
-
 /// Find the "Add @throws" code action.
 fn find_add_throws_action(actions: &[CodeActionOrCommand]) -> Option<&CodeAction> {
     actions.iter().find_map(|a| match a {
@@ -19,7 +18,6 @@ fn find_add_throws_action(actions: &[CodeActionOrCommand]) -> Option<&CodeAction
         _ => None,
     })
 }
-
 
 // ── Basic: adds @throws into existing multi-line docblock ───────────────────
 

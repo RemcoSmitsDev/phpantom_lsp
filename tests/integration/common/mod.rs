@@ -597,10 +597,7 @@ pub fn get_code_actions_on_line(
 }
 
 /// Find a code action by title prefix.
-pub fn find_action<'a>(
-    actions: &'a [CodeActionOrCommand],
-    prefix: &str,
-) -> Option<&'a CodeAction> {
+pub fn find_action<'a>(actions: &'a [CodeActionOrCommand], prefix: &str) -> Option<&'a CodeAction> {
     actions.iter().find_map(|a| match a {
         CodeActionOrCommand::CodeAction(ca) if ca.title.starts_with(prefix) => Some(ca),
         _ => None,

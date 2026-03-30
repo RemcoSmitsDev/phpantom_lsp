@@ -1230,8 +1230,7 @@ pub(crate) fn is_fix_return_type_stale(content: &str, diag_line: usize, identifi
 
             // Gather text between `)` and `{` and check if the return
             // type is already `void`.
-            let between =
-                gather_between_paren_and_brace(&lines, paren_line, paren_col, brace_line);
+            let between = gather_between_paren_and_brace(&lines, paren_line, paren_col, brace_line);
 
             // Look for `: void` in the between text.
             if let Some(colon_pos) = between.find(':') {

@@ -9,7 +9,9 @@
 //! invalidation, classes from unedited files stay cached and the second
 //! pass is significantly faster.
 
-use crate::common::{create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs};
+use crate::common::{
+    create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs,
+};
 use std::time::Instant;
 
 /// Regression test for variable-type-caching in deprecated diagnostics.
@@ -28,16 +30,16 @@ async fn deprecated_diagnostics_variable_cache_regression() {
     // Build a class with 30 deprecated methods and a consumer that calls
     // each one twice on the same $svc variable = 60 member accesses that
     // all resolve to the same variable type.
-    let mut php = String::from(
-        "<?php\nclass Service {\n    public function ok(): void {}\n",
-    );
+    let mut php = String::from("<?php\nclass Service {\n    public function ok(): void {}\n");
     for i in 0..30 {
         php.push_str(&format!(
             "    /** @deprecated Use ok() instead */\n    public function old{}(): void {{}}\n",
             i
         ));
     }
-    php.push_str("}\n\nclass Consumer {\n    public function run(): void {\n        $svc = new Service();\n");
+    php.push_str(
+        "}\n\nclass Consumer {\n    public function run(): void {\n        $svc = new Service();\n",
+    );
     for i in 0..30 {
         php.push_str(&format!("        $svc->old{}();\n", i));
         php.push_str(&format!("        $svc->old{}();\n", i));

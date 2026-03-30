@@ -249,9 +249,7 @@ impl Backend {
             | "phpstan.fixReturnType.changeType"
             | "phpstan.fixReturnType.addType" => self.resolve_fix_return_type(&data, &content),
             // ── Remove unreachable statement ────────────────────────
-            "phpstan.removeUnreachable" => {
-                self.resolve_remove_unreachable(&data, &content)
-            }
+            "phpstan.removeUnreachable" => self.resolve_remove_unreachable(&data, &content),
             // ── Change visibility (parent-aware) ────────────────────
             "refactor.changeVisibility" => self.resolve_change_visibility(&data, &content),
             // ── Unused import quickfixes ─────────────────────────────
