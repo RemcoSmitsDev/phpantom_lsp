@@ -156,7 +156,6 @@ unlikely to move the needle for most users.
 | P9   | [`resolved_class_cache` generic-arg specialisation](todo/performance.md#p9-resolved_class_cache-generic-arg-specialisation)                                                 | Medium      | Medium         |
 | P14  | [Eager docblock parsing into structured fields](todo/performance.md#p14-eager-docblock-parsing-into-structured-fields)                                                      | Medium      | Medium         |
 | P10  | [Redundant `parse_and_cache_file` from multiple threads](todo/performance.md#p10-redundant-parse_and_cache_file-from-multiple-threads)                                      | Medium      | Low            |
-| P2   | Type AST for `apply_substitution` (full refactor)                                                                                                                           | Medium      | High           |
 | P11  | [Uncached base-resolution in `build_scope_methods_for_builder`](todo/performance.md#p11-uncached-base-resolution-in-build_scope_methods_for_builder)                        | Low-Medium  | Low            |
 | P3   | Parallel pre-filter in `find_implementors`                                                                                                                                  | Low-Medium  | Medium         |
 | P1a  | `type_hint_to_classes` returns `Vec<Arc<ClassInfo>>`                                                                                                                        | Low         | Low            |

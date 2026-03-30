@@ -185,22 +185,29 @@ Modules in recommended migration order (least dependencies first):
    union collapsing (e.g. `User|null` → `User`) were kept on
    `clean_type` since `base_name()` returns `None` for unions.
 
-3. ⏭️ **`src/parser/ast_update.rs`** — `resolve_type_string`.
+3. ✅ **`src/parser/ast_update.rs`** — `resolve_type_string`.
 
-   **Status:** Deferred. The `PhpType::resolve_names()` method is
-   implemented and tested (10 tests), but replacing the call sites
-   in `ast_update.rs` is deferred to Phase 5. The reason:
-   `PhpType::Display` produces `User | null` (spaces around `|`)
-   while the old code produces `User|null`. Since the resolved
-   strings are stored in `Option<String>` fields and consumed by
-   downstream string-based code, changing the format now would
-   cascade formatting differences throughout the codebase. Once
-   Phase 5 removes the string fields, `resolve_names` can be used
-   directly on `PhpType` values without going through strings.
+   **Status:** Complete. The ~120-line character-by-character
+   `resolve_type_string` function has been replaced with
+   `PhpType::resolve_names()`. Call sites that operate on `PhpType`
+   fields (return types, parameter type hints, property type hints)
+   now call `resolve_names` directly on the structured type,
+   eliminating the `to_string()` → string surgery →
+   `PhpType::parse()` round-trip. String-typed fields (`throws`,
+   `native_return_type`, type alias definitions, docblock tag
+   types) use a thin `resolve_type_string_via_php_type` wrapper
+   that parses, resolves, and converts back. A shared
+   `build_type_resolver` method constructs the resolver closure
+   that skips template params and type alias names. The callable
+   `kind` field (e.g. `\Closure`) is now resolved through the
+   resolver in `PhpType::resolve_names`, fixing FQN callable
+   references that previously retained their leading backslash.
+   All 7,732 tests pass.
 
    **New `PhpType` helper methods** added in this step:
    - `resolve_names(resolver)` — produce a new `PhpType` with all
-     class-like names resolved through a callback
+     class-like names resolved through a callback (now also
+     resolves callable `kind` names like `\Closure`)
    - `is_keyword_type()` (module-level) — superset of `is_scalar_name`
      that covers all PHPDoc pseudo-types and special keywords
 

@@ -29,6 +29,7 @@
 /// Type narrowing (instanceof, assert, custom type guards) is delegated
 /// to the [`crate::completion::type_narrowing`] module.  Closure/arrow-function scope
 /// handling is delegated to [`super::closure_resolution`].
+use std::cell::Cell;
 use std::sync::Arc;
 
 use mago_span::HasSpan;
@@ -40,6 +41,37 @@ use crate::parser::{extract_hint_string, with_parsed_program};
 use crate::types::{ClassInfo, ResolvedType};
 
 use crate::completion::resolver::{Loaders, VarResolutionCtx};
+
+// ── Re-entrancy guard for resolve_variable_types ────────────────────
+//
+// PHP allows `foreach ($x->method() as $x)` where the foreach value
+// variable shadows the iterator receiver.  Resolving `$x` finds the
+// foreach, which resolves the iterator expression `$x->method()`,
+// which resolves `$x` again — infinite recursion.
+//
+// The guard lives here, at the very top of `resolve_variable_types`,
+// so that the depth check executes before `with_parsed_program`
+// allocates its large closure frame on the stack.  Placing the guard
+// in a caller (e.g. `resolve_variable_fallback`) is insufficient
+// because several other call sites invoke `resolve_variable_types`
+// directly (diagnostics, hover, foreach resolution).
+thread_local! {
+    static VAR_RESOLUTION_DEPTH: Cell<u8> = const { Cell::new(0) };
+}
+
+/// Maximum nesting depth for `resolve_variable_types` calls.
+///
+/// Three levels covers legitimate nested resolution such as:
+///   depth 0: resolve `$item` in a foreach body
+///   depth 1: resolve `$collection` (the foreach iterator expression)
+///   depth 2: resolve `$node` (RHS of `$collection = $node->method()`)
+///
+/// Cycles like `foreach ($x->method() as $x)` are caught by a
+/// targeted check in `try_resolve_foreach_value_type` (which skips
+/// resolution when the value variable shadows the iterator receiver)
+/// rather than by this depth limit alone.  The depth limit is a
+/// safety net for any remaining recursive patterns.
+const MAX_VAR_RESOLUTION_DEPTH: u8 = 3;
 
 /// Build a [`VarClassStringResolver`] closure from a [`VarResolutionCtx`].
 ///
@@ -133,7 +165,18 @@ pub(crate) fn resolve_variable_types(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
 ) -> Vec<ResolvedType> {
-    with_parsed_program(content, "resolve_variable_types", |program, _content| {
+    // ── Depth guard ─────────────────────────────────────────────
+    let depth = VAR_RESOLUTION_DEPTH.with(|d| {
+        let cur = d.get();
+        d.set(cur.saturating_add(1));
+        cur
+    });
+    if depth >= MAX_VAR_RESOLUTION_DEPTH {
+        VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        return vec![];
+    }
+
+    let result = with_parsed_program(content, "resolve_variable_types", |program, _content| {
         let ctx = VarResolutionCtx {
             var_name,
             current_class,
@@ -147,10 +190,11 @@ pub(crate) fn resolve_variable_types(
             branch_aware: false,
         };
 
-        // Walk top-level (and namespace-nested) statements to find the
-        // class + method containing the cursor.
         resolve_variable_in_statements(program.statements.iter(), &ctx)
-    })
+    });
+
+    VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    result
 }
 
 /// Resolve variable types with branch-aware if/else handling.
@@ -169,7 +213,18 @@ pub(crate) fn resolve_variable_types_branch_aware(
     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
     loaders: Loaders<'_>,
 ) -> Vec<ResolvedType> {
-    with_parsed_program(
+    // ── Depth guard (same as resolve_variable_types) ────────────
+    let depth = VAR_RESOLUTION_DEPTH.with(|d| {
+        let cur = d.get();
+        d.set(cur.saturating_add(1));
+        cur
+    });
+    if depth >= MAX_VAR_RESOLUTION_DEPTH {
+        VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        return vec![];
+    }
+
+    let result = with_parsed_program(
         content,
         "resolve_variable_types_branch_aware",
         |program, _content| {
@@ -188,7 +243,10 @@ pub(crate) fn resolve_variable_types_branch_aware(
 
             resolve_variable_in_statements(program.statements.iter(), &ctx)
         },
-    )
+    );
+
+    VAR_RESOLUTION_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    result
 }
 
 /// Walk a sequence of top-level statements to find the class or

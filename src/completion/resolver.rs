@@ -881,18 +881,21 @@ fn resolve_variable_fallback(
         }
     }
 
-    ResolvedType::into_classes(super::variable::resolution::resolve_variable_types(
-        var_name,
-        effective_class,
-        all_classes,
-        ctx.content,
-        ctx.cursor_offset,
-        class_loader,
-        Loaders::with_function(function_loader),
-    ))
-    .into_iter()
-    .map(Arc::new)
-    .collect()
+    let result: Vec<Arc<ClassInfo>> =
+        ResolvedType::into_classes(super::variable::resolution::resolve_variable_types(
+            var_name,
+            effective_class,
+            all_classes,
+            ctx.content,
+            ctx.cursor_offset,
+            class_loader,
+            Loaders::with_function(function_loader),
+        ))
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+
+    result
 }
 
 // ── Static owner class resolution ───────────────────────────────────

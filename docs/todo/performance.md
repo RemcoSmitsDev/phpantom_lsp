@@ -133,47 +133,6 @@ still the dominant bottleneck.
 
 ---
 
-## P2. Recursive string substitution in `apply_substitution`
-
-**Impact: Medium · Effort: High**
-
-Generic type substitution (`apply_substitution`) does recursive
-string parsing and re-building for every type string. It handles
-nullable, union, intersection, generic, callable, and array types
-by splitting, recursing, and re-joining strings. Each recursion
-level allocates new `String` values.
-
-This runs on every inherited method's return type, every parameter's
-type hint, and every property's type hint when template substitution
-is active. In a deeply-generic framework like Laravel (where
-`Collection<TKey, TValue>` flows through multiple inheritance
-levels), this function is called hundreds of times per resolution,
-each time allocating new strings.
-
-The resolved-class cache mitigates this by
-caching the result, so substitution only runs on cache misses. But
-cache misses still happen: first access, after edits that trigger
-invalidation, and for generic classes with different type arguments.
-
-The short-term mitigations (early-exit check and `Cow` return type)
-are implemented. The remaining work is the long-term structural fix.
-
-### Fix
-
-Replace the string-based type representation with a parsed type AST
-(an enum of `TypeNode` variants: `Named`, `Union`, `Intersection`,
-`Generic`, `Nullable`, `Array`, `Callable`, etc.). Parse the type
-string once during class extraction. Substitution becomes a tree
-walk that swaps `Named` leaf nodes, avoiding all string allocation
-and re-parsing.
-
-This is a significant refactor that touches the parser, docblock
-extraction, type resolution, and inheritance merging. It should be
-evaluated after the lower-effort items are done and profiling
-confirms that substitution remains a measurable cost.
-
----
-
 ## P3. Parallel pre-filter in `find_implementors`
 
 **Impact: Medium · Effort: Medium**
@@ -369,8 +328,8 @@ Cache the base-resolved class (before generic substitution)
 separately, keyed by FQN alone. When a generic instantiation is
 requested, look up the base-resolved class and apply
 `apply_substitution` on top. The substitution step is cheap
-(string rewriting) compared to the full resolution (inheritance
-walking, trait merging, virtual member providers).
+(tree walk) compared to the full resolution (inheritance walking,
+trait merging, virtual member providers).
 
 This requires splitting `resolve_class_fully` into two stages:
 base resolution (cached by FQN) and generic specialisation (cached

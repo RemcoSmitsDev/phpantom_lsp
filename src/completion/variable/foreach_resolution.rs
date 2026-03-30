@@ -39,6 +39,42 @@ pub(in crate::completion) fn resolve_expression_type_string<'b>(
     if ts.is_empty() { None } else { Some(ts) }
 }
 
+// ─── Helpers ────────────────────────────────────────────────────────
+
+/// Check whether an expression directly uses a variable with the given
+/// name as a receiver or as the expression itself.
+///
+/// This is an AST-level check used to detect cycles like
+/// `foreach ($category->getBranch() as $category)` where the foreach
+/// value variable shadows the iterator receiver.  It returns `true`
+/// when:
+///
+///   - The expression IS the named variable (e.g. `foreach ($x as $x)`)
+///   - The expression is a method/property/null-safe call whose object
+///     is the named variable (e.g. `$x->method()`, `$x?->prop`)
+///
+/// It does NOT recurse into nested closures or sub-expressions, so
+/// `array_filter($items, fn($item) => ...)` correctly returns `false`
+/// for `$item`.
+fn expression_uses_variable(expr: &mago_syntax::ast::Expression<'_>, var_name: &str) -> bool {
+    use mago_syntax::ast::{Access, Call, Expression, Variable};
+
+    match expr {
+        Expression::Variable(Variable::Direct(dv)) => dv.name == var_name,
+        Expression::Call(call) => match call {
+            Call::Method(mc) => expression_uses_variable(mc.object, var_name),
+            Call::NullSafeMethod(mc) => expression_uses_variable(mc.object, var_name),
+            _ => false,
+        },
+        Expression::Access(access) => match access {
+            Access::Property(pa) => expression_uses_variable(pa.object, var_name),
+            Access::NullSafeProperty(pa) => expression_uses_variable(pa.object, var_name),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 // ─── Foreach Resolution ─────────────────────────────────────────────
 
 /// Try to resolve the foreach value variable's type from a generic
@@ -104,69 +140,95 @@ pub(in crate::completion) fn try_resolve_foreach_value_type<'b>(
         }
     }
 
+    // ── Cycle detection: foreach value variable shadows iterator ─
+    //
+    // When the foreach value variable has the same name as a variable
+    // used in the iterator expression (e.g.
+    // `foreach ($category->getBranch() as $category)`), resolving the
+    // iterator expression would try to resolve `$category`, which
+    // finds this same foreach, causing infinite recursion.
+    //
+    // Use AST-based detection rather than text matching to avoid
+    // false positives from substring matches (e.g. `$order` inside
+    // `$orders`) or same-named variables in nested scopes (e.g.
+    // `fn($u) => ...` inside `array_filter(...) as $u`).
+    let value_shadows_iterator = expression_uses_variable(foreach.expression, &value_var_name);
+
     // Try to resolve the iterable type from the foreach expression
     // via the unified pipeline.  Filter out bare class names (no
     // generics, array suffix, or shape) so that the class-based
     // fallback can resolve generics through @implements / @extends
     // annotations (e.g. `Collection` → `Collection<int, Customer>`
     // via closure parameter inference).
-    let raw_type = resolve_expression_type_string(foreach.expression, ctx)
-        .filter(|ts| ts.contains('<') || ts.contains('[') || ts.contains('{'))
-        .or_else(|| {
-            // Fallback 1: for simple `$variable` expressions, search backward
-            // from the foreach for @var or @param annotations.
-            let expr_span = foreach.expression.span();
-            let expr_start = expr_span.start.offset as usize;
-            let expr_end = expr_span.end.offset as usize;
-            let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
+    let raw_type = if value_shadows_iterator {
+        // Skip expression-based resolution to avoid the cycle.
+        None
+    } else {
+        resolve_expression_type_string(foreach.expression, ctx)
+            .filter(|ts| ts.contains('<') || ts.contains('[') || ts.contains('{'))
+    }
+    .or_else(|| {
+        // Fallback 1: for simple `$variable` expressions, search backward
+        // from the foreach for @var or @param annotations.
+        let expr_span = foreach.expression.span();
+        let expr_start = expr_span.start.offset as usize;
+        let expr_end = expr_span.end.offset as usize;
+        let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
 
-            if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
-                return None;
-            }
+        if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
+            return None;
+        }
 
-            let foreach_offset = foreach.foreach.span().start.offset as usize;
-            docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
-        })
-        .or_else(|| {
-            // Fallback 2: for simple `$variable` expressions, resolve the
-            // variable's type from its assignment (e.g.
-            // `$items = Country::cases();` → `Country[]`).
-            // This covers cases where the iterable type comes from a method
-            // return type or other expression rather than a docblock.
-            let expr_span = foreach.expression.span();
-            let expr_start = expr_span.start.offset as usize;
-            let expr_end = expr_span.end.offset as usize;
-            let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
+        let foreach_offset = foreach.foreach.span().start.offset as usize;
+        docblock::find_iterable_raw_type_in_source(ctx.content, foreach_offset, expr_text)
+    })
+    .or_else(|| {
+        // Fallback 2: for simple `$variable` expressions, resolve the
+        // variable's type from its assignment (e.g.
+        // `$items = Country::cases();` → `Country[]`).
+        // This covers cases where the iterable type comes from a method
+        // return type or other expression rather than a docblock.
+        //
+        // Skip when the value variable shadows the iterator expression
+        // (e.g. `foreach ($x as $x)`) to avoid infinite recursion:
+        // resolving `$x` here would find this same foreach again.
+        if value_shadows_iterator {
+            return None;
+        }
+        let expr_span = foreach.expression.span();
+        let expr_start = expr_span.start.offset as usize;
+        let expr_end = expr_span.end.offset as usize;
+        let expr_text = ctx.content.get(expr_start..expr_end)?.trim();
 
-            if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
-                return None;
-            }
+        if !expr_text.starts_with('$') || expr_text.contains("->") || expr_text.contains("::") {
+            return None;
+        }
 
-            let foreach_offset = foreach.foreach.span().start.offset;
-            let resolved = super::resolution::resolve_variable_types(
-                expr_text,
-                ctx.current_class,
-                ctx.all_classes,
-                ctx.content,
-                foreach_offset,
-                ctx.class_loader,
-                Loaders::with_function(ctx.function_loader()),
-            );
-            if resolved.is_empty() {
+        let foreach_offset = foreach.foreach.span().start.offset;
+        let resolved = super::resolution::resolve_variable_types(
+            expr_text,
+            ctx.current_class,
+            ctx.all_classes,
+            ctx.content,
+            foreach_offset,
+            ctx.class_loader,
+            Loaders::with_function(ctx.function_loader()),
+        );
+        if resolved.is_empty() {
+            None
+        } else {
+            let ts = ResolvedType::type_strings_joined(&resolved);
+            // If the resolved type is a bare class name (no generics,
+            // array suffix, or shape), return None so that the
+            // class-based fallback can resolve generics through
+            // @implements / @extends annotations.
+            if !ts.contains('<') && !ts.contains('[') && !ts.contains('{') {
                 None
             } else {
-                let ts = ResolvedType::type_strings_joined(&resolved);
-                // If the resolved type is a bare class name (no generics,
-                // array suffix, or shape), return None so that the
-                // class-based fallback can resolve generics through
-                // @implements / @extends annotations.
-                if !ts.contains('<') && !ts.contains('[') && !ts.contains('{') {
-                    None
-                } else {
-                    Some(ts)
-                }
+                Some(ts)
             }
-        });
+        }
+    });
 
     // ── Expand type aliases before extracting generic element type ──
     // When the raw type is a type alias (e.g. `UserList` defined via

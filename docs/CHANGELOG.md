@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Hover and go-to-definition on attributes.** Attributes on properties, class constants, function/method parameters, and enum cases are now recognized by the symbol map. Previously only attributes on classes, methods, and top-level functions produced navigable symbols; hovering or Ctrl+Clicking an attribute on a property (e.g. `#[Assert\NotBlank]`) did nothing.
+- **Function-level `@template` with `array<TKey, TValue>` parameters.** Template substitution at call sites now correctly resolves generic wrapper names like `array`, `iterable`, and `list`. Previously, `collect($users)->first()->` failed to infer the element type because the wrapper name was incorrectly discarded during binding classification.
+- **Stack overflow when a foreach value variable shadows the iterator receiver.** Patterns like `foreach ($category->getBranch() as $category)` caused infinite recursion during type resolution because resolving the value variable re-entered the same foreach. The foreach resolver now detects this cycle at the AST level and skips the recursive path. A depth guard on `resolve_variable_types` provides a safety net for any remaining recursive patterns.
 
 ## [0.6.0] - 2026-03-26
 

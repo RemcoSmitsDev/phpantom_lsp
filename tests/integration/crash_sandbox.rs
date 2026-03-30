@@ -557,6 +557,67 @@ class Demo {
 /// closure's parameter has no type hint (requires callable param
 /// inference from the receiver chain).
 #[test]
+fn foreach_value_variable_shadows_iterator_receiver_does_not_crash() {
+    let backend = create_test_backend();
+    let uri = "file:///foreach_shadow.php";
+
+    // `foreach ($category->getBranch() as $category)` — the foreach value
+    // variable `$category` shadows the iterator receiver `$category`.
+    // Resolving the value type tries to resolve the iterator expression
+    // `$category->getBranch()`, which resolves `$category`, which finds
+    // the same foreach again → infinite recursion without the depth guard.
+    let content = r#"<?php
+class Category {
+    /** @return Category[] */
+    public function getBranch(): array { return []; }
+    public function getId(): int { return 1; }
+}
+
+class SiteTreeService {
+    /** @param int[] $openCategories */
+    private function getOpenCategories(array $openCategories, ?int $selectedId = null): array {
+        if (null !== $selectedId) {
+            $category = new Category();
+            if ($category) {
+                foreach ($category->getBranch() as $category) {
+                    $openCategories[] = $category->getId();
+                }
+            }
+        }
+        return $openCategories;
+    }
+}
+"#;
+
+    backend.update_ast(uri, content);
+
+    // Trigger unknown-member diagnostics — the overflow originally
+    // happened in the diagnostics pipeline when resolving `$category`.
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics(uri, content, &mut diags);
+
+    // The test passes if we reach this point without a stack overflow.
+    // `getId()` exists on Category, so no unknown-member diagnostic
+    // should be emitted for it.
+    assert!(
+        !diags.iter().any(|d| d.message.contains("getId")),
+        "getId should be known on Category, got: {:?}",
+        diags
+    );
+
+    // Also trigger hover on `$category->getId()` inside the foreach
+    // body to exercise the completion/hover path.
+    let lines: Vec<&str> = content.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if line.contains("$category->getId()") {
+            let col = line.find("$category").unwrap_or(0) as u32;
+            hover_at(&backend, uri, content, i as u32, col);
+            break;
+        }
+    }
+}
+
+#[test]
 fn closure_without_type_hint_in_deep_chain_does_not_crash() {
     let backend = create_test_backend();
     let uri = "file:///closure_chain.php";

@@ -626,10 +626,7 @@ pub(crate) fn classify_template_binding(
         if let Some(open) = part.find('<')
             && let Some(close) = part.rfind('>')
         {
-            let wrapper_name = crate::php_type::PhpType::parse(&part[..open])
-                .base_name()
-                .unwrap_or("")
-                .to_string();
+            let wrapper_name = part[..open].trim().to_string();
             let generic_part = &part[open + 1..close];
             let hint_args: Vec<&str> = generic_part.split(',').map(|s| s.trim()).collect();
             for (i, arg) in hint_args.iter().enumerate() {

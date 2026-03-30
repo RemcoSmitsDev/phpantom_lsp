@@ -236,7 +236,11 @@ impl PhpType {
                 params,
                 return_type,
             } => PhpType::Callable {
-                kind: kind.clone(),
+                kind: if is_keyword_type(kind) {
+                    kind.clone()
+                } else {
+                    resolver(kind)
+                },
                 params: params
                     .iter()
                     .map(|p| CallableParam {

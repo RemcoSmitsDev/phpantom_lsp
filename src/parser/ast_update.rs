@@ -235,36 +235,31 @@ impl Backend {
             // types and parameter hints in `resolve_parent_class_names`.
             for func in &mut functions {
                 let skip_names: Vec<String> = func.template_params.clone();
+                let resolver = Self::build_type_resolver(&use_map, &namespace, &skip_names);
 
                 if let Some(ref ret) = func.return_type {
-                    let ret_str = ret.to_string();
-                    let resolved =
-                        Self::resolve_type_string(&ret_str, &use_map, &namespace, &skip_names);
-                    if resolved != ret_str {
-                        func.return_type = Some(PhpType::parse(&resolved));
+                    let resolved = ret.resolve_names(&resolver);
+                    if resolved != *ret {
+                        func.return_type = Some(resolved);
                     }
                 }
                 if let Some(ref ret) = func.native_return_type {
-                    let resolved =
-                        Self::resolve_type_string(ret, &use_map, &namespace, &skip_names);
+                    let resolved = Self::resolve_type_string_via_php_type(ret, &resolver);
                     if resolved != *ret {
                         func.native_return_type = Some(resolved);
                     }
                 }
                 for param in &mut func.parameters {
                     if let Some(ref hint) = param.type_hint {
-                        let hint_str = hint.to_string();
-                        let resolved =
-                            Self::resolve_type_string(&hint_str, &use_map, &namespace, &skip_names);
-                        if resolved != hint_str {
-                            param.type_hint = Some(PhpType::parse(&resolved));
+                        let resolved = hint.resolve_names(&resolver);
+                        if resolved != *hint {
+                            param.type_hint = Some(resolved);
                         }
                     }
                 }
                 // Resolve exception class names in @throws tags.
                 for throw in &mut func.throws {
-                    let resolved =
-                        Self::resolve_type_string(throw, &use_map, &namespace, &skip_names);
+                    let resolved = Self::resolve_type_string_via_php_type(throw, &resolver);
                     if resolved != *throw {
                         *throw = resolved;
                     }
@@ -753,6 +748,7 @@ impl Backend {
                 .cloned()
                 .chain(all_alias_names.iter().cloned())
                 .collect();
+            let resolver = Self::build_type_resolver(use_map, namespace, &skip_names);
 
             // Also resolve class-like names inside type alias definitions
             // so that `@phpstan-type ActiveUser User` where `User` is
@@ -769,7 +765,7 @@ impl Backend {
                     *def = format!("from:{}:{}", resolved_class, original);
                     continue;
                 }
-                let resolved = Self::resolve_type_string(def, use_map, namespace, &skip_names);
+                let resolved = Self::resolve_type_string_via_php_type(def, &resolver);
                 if resolved != *def {
                     *def = resolved;
                 }
@@ -779,42 +775,46 @@ impl Backend {
                 // Build a per-method skip list that includes both class-level
                 // and method-level template params so that names like `T` in
                 // `@return Collection<T>` are not namespace-resolved.
-                let method_skip: Vec<String> = if method.template_params.is_empty() {
-                    skip_names.clone()
+                //
+                // When the method has its own template params, build a
+                // per-method resolver that skips them in addition to the
+                // class-level skip names.  Otherwise reuse the class-level
+                // resolver.
+                let method_skip: Vec<String>;
+                let method_resolver: &dyn Fn(&str) -> String = if method.template_params.is_empty()
+                {
+                    &resolver
                 } else {
-                    skip_names
+                    method_skip = skip_names
                         .iter()
                         .cloned()
                         .chain(method.template_params.iter().cloned())
-                        .collect()
+                        .collect();
+                    // SAFETY: `method_skip` lives until end of this
+                    // `for method` iteration, so the closure is valid.
+                    &Self::build_type_resolver(use_map, namespace, &method_skip)
                 };
 
                 if let Some(ref ret) = method.return_type {
-                    let ret_str = ret.to_string();
-                    let resolved =
-                        Self::resolve_type_string(&ret_str, use_map, namespace, &method_skip);
-                    if resolved != ret_str {
-                        method.return_type = Some(PhpType::parse(&resolved));
+                    let resolved = ret.resolve_names(method_resolver);
+                    if resolved != *ret {
+                        method.return_type = Some(resolved);
                     }
                 }
                 for param in &mut method.parameters {
                     if let Some(ref hint) = param.type_hint {
-                        let hint_str = hint.to_string();
-                        let resolved =
-                            Self::resolve_type_string(&hint_str, use_map, namespace, &method_skip);
-                        if resolved != hint_str {
-                            param.type_hint = Some(PhpType::parse(&resolved));
+                        let resolved = hint.resolve_names(method_resolver);
+                        if resolved != *hint {
+                            param.type_hint = Some(resolved);
                         }
                     }
                 }
             }
             for prop in class.properties.make_mut() {
                 if let Some(ref hint) = prop.type_hint {
-                    let hint_str = hint.to_string();
-                    let resolved =
-                        Self::resolve_type_string(&hint_str, use_map, namespace, &skip_names);
-                    if resolved != hint_str {
-                        prop.type_hint = Some(PhpType::parse(&resolved));
+                    let resolved = hint.resolve_names(&resolver);
+                    if resolved != *hint {
+                        prop.type_hint = Some(resolved);
                     }
                 }
             }
@@ -828,8 +828,7 @@ impl Backend {
             // use-map does not import the same names would fail to
             // resolve the types.
             if let Some(ref docblock) = class.class_docblock {
-                let resolved_docblock =
-                    Self::resolve_docblock_tag_types(docblock, use_map, namespace, &skip_names);
+                let resolved_docblock = Self::resolve_docblock_tag_types(docblock, &resolver);
                 if resolved_docblock != *docblock {
                     class.class_docblock = Some(resolved_docblock);
                 }
@@ -845,12 +844,7 @@ impl Backend {
     /// This method rewrites those type portions to fully-qualified names
     /// so that cross-file consumers can resolve them without access to the
     /// declaring file's use-map.
-    fn resolve_docblock_tag_types(
-        docblock: &str,
-        use_map: &HashMap<String, String>,
-        namespace: &Option<String>,
-        skip_names: &[String],
-    ) -> String {
+    fn resolve_docblock_tag_types(docblock: &str, resolver: &dyn Fn(&str) -> String) -> String {
         let mut result = String::with_capacity(docblock.len());
 
         for line in docblock.split('\n') {
@@ -876,7 +870,7 @@ impl Backend {
                     let (type_token, _remainder) =
                         crate::docblock::types::split_type_token(rest_trimmed);
                     let resolved_type =
-                        Self::resolve_type_string(type_token, use_map, namespace, skip_names);
+                        Self::resolve_type_string_via_php_type(type_token, resolver);
                     if resolved_type != type_token
                         && let Some(type_start) = line.find(type_token)
                     {
@@ -916,9 +910,8 @@ impl Backend {
                         if let Some(last_space) = before_paren.rfind(|c: char| c.is_whitespace()) {
                             let ret_type = before_paren[..last_space].trim();
                             if !ret_type.is_empty() {
-                                let resolved_ret = Self::resolve_type_string(
-                                    ret_type, use_map, namespace, skip_names,
-                                );
+                                let resolved_ret =
+                                    Self::resolve_type_string_via_php_type(ret_type, resolver);
                                 if resolved_ret != ret_type
                                     && let Some(type_start) = line.find(ret_type)
                                 {
@@ -973,157 +966,40 @@ impl Backend {
         }
     }
 
-    /// Resolve class-like identifiers within a type string to their
-    /// fully-qualified forms.
+    /// Build a resolver closure that resolves class-like names to FQNs,
+    /// skipping template parameters, type aliases, and keyword types.
     ///
-    /// Walks through the type string token-by-token, identifies class-like
-    /// identifiers (words that are not scalars, keywords, or template
-    /// params), and resolves each one via `resolve_name`.
-    ///
-    /// Handles complex type strings including unions (`A|B`), intersections
-    /// (`A&B`), nullable (`?A`), generics (`Collection<int, User>`), and
-    /// array shapes (`array{name: string, user: User}`).
-    ///
-    /// # Examples
-    /// - `"Country"` → `"Luxplus\\Core\\Enums\\Country"` (via use map)
-    /// - `"?Country"` → `"?Luxplus\\Core\\Enums\\Country"`
-    /// - `"Country|null"` → `"Luxplus\\Core\\Enums\\Country|null"`
-    /// - `"Collection<int, User>"` → `"App\\Collection<int, App\\User>"`
-    /// - `"T"` (template param) → `"T"` (unchanged)
-    fn resolve_type_string(
-        type_str: &str,
-        use_map: &HashMap<String, String>,
-        namespace: &Option<String>,
-        skip_names: &[String],
-    ) -> String {
-        // Keywords that should never be resolved as class names.
-        // Most built-in types (int, string, array, mixed, self, static,
-        // etc.) are already caught by `PhpType::is_scalar()` above.
-        // This list only contains pseudo-types and special keywords that
-        // `is_scalar()` does not cover.
-        const TYPE_KEYWORDS: &[&str] = &[
-            // ── Misc pseudo-types ───────────────────────────────────
-            "class",
-            "number",
-            "empty",
-            // ── Integer refinements ─────────────────────────────────
-            "non-zero-int",
-            "int-mask",
-            "int-mask-of",
-            // ── String refinements ──────────────────────────────────
-            "literal-string",
-            "callable-string",
-            "uppercase-string",
-            "non-empty-uppercase-string",
-            "non-empty-literal-string",
-            // ── Class-string variants ───────────────────────────────
-            "trait-string",
-            "enum-string",
-            // ── Array / list refinements ────────────────────────────
-            "associative-array",
-            // ── Scalar / mixed variants ─────────────────────────────
-            "empty-scalar",
-            "non-empty-scalar",
-            "non-empty-mixed",
-            // ── Object / callable variants ──────────────────────────
-            "callable-object",
-            "callable-array",
-            // ── Resource variants ───────────────────────────────────
-            "closed-resource",
-            "open-resource",
-            // ── Never aliases ───────────────────────────────────────
-            "no-return",
-            "noreturn",
-            "never-return",
-            "never-returns",
-            // ── Key / value projection ──────────────────────────────
-            "key-of",
-            "value-of",
-        ];
-
-        let mut result = String::with_capacity(type_str.len());
-        let bytes = type_str.as_bytes();
-        let len = bytes.len();
-        let mut i = 0;
-
-        // Track brace depth so we can distinguish array shape keys
-        // (identifiers before `:` inside `{…}`) from type names.
-        let mut brace_depth: u32 = 0;
-        // Whether we are in "key position" inside a shape (before the `:`).
-        // Reset to true after each `,` or `{` at the current brace level.
-        let mut in_shape_key = false;
-
-        while i < len {
-            let c = bytes[i] as char;
-
-            // Start of an identifier (letter, underscore, or backslash for FQN)
-            if c.is_ascii_alphabetic() || c == '_' || c == '\\' {
-                let start = i;
-                // Consume the full identifier including namespace separators
-                while i < len
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'\\')
-                {
-                    i += 1;
-                }
-                let word = &type_str[start..i];
-
-                // Inside `{…}` in key position, identifiers are array shape
-                // keys (e.g. `name` in `array{name: string}`), not types.
-                if brace_depth > 0 && in_shape_key {
-                    result.push_str(word);
-                    continue;
-                }
-
-                let lower = word.to_ascii_lowercase();
-                if PhpType::parse(word).is_scalar()
-                    || TYPE_KEYWORDS.contains(&lower.as_str())
-                    || skip_names.iter().any(|s| s == word)
-                {
-                    // Leave as-is: scalar, keyword, template param,
-                    // or type alias name.
-                    result.push_str(word);
-                } else {
-                    // Route through resolve_name, which strips `\`
-                    // from already-qualified names and resolves
-                    // unqualified names via the use-map / namespace.
-                    result.push_str(&Self::resolve_name(word, use_map, namespace));
-                }
-            } else if c == '$' {
-                // Variable reference like `$this` — consume fully
-                let start = i;
-                i += 1;
-                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
-                    i += 1;
-                }
-                result.push_str(&type_str[start..i]);
-            } else {
-                // Track brace depth and key/value position for array shapes.
-                match c {
-                    '{' => {
-                        brace_depth += 1;
-                        in_shape_key = true;
-                    }
-                    '}' => {
-                        brace_depth = brace_depth.saturating_sub(1);
-                        in_shape_key = brace_depth > 0;
-                    }
-                    ':' if brace_depth > 0 => {
-                        // Colon separates key from value type — switch
-                        // to value position where identifiers ARE types.
-                        in_shape_key = false;
-                    }
-                    ',' if brace_depth > 0 => {
-                        // Comma separates entries — next identifier is a key.
-                        in_shape_key = true;
-                    }
-                    _ => {}
-                }
-                result.push(c);
-                i += 1;
+    /// The returned closure is suitable for passing to
+    /// `PhpType::resolve_names()`.  `is_keyword_type` inside `resolve_names`
+    /// already handles scalar and keyword types; this closure additionally
+    /// skips names in `skip_names` (template params and type alias names).
+    fn build_type_resolver<'a>(
+        use_map: &'a HashMap<String, String>,
+        namespace: &'a Option<String>,
+        skip_names: &'a [String],
+    ) -> impl Fn(&str) -> String + 'a {
+        move |name: &str| {
+            if skip_names.iter().any(|s| s == name) {
+                return name.to_string();
             }
+            Self::resolve_name(name, use_map, namespace)
         }
+    }
 
-        result
+    /// Resolve class-like identifiers within a type string to their
+    /// fully-qualified forms, using `PhpType::resolve_names()`.
+    ///
+    /// Parses the string into a `PhpType`, resolves names via the given
+    /// resolver, and converts back to a string.  This is used for
+    /// string-typed fields (e.g. `throws`, `native_return_type`,
+    /// type alias definitions) where the caller does not have a `PhpType`.
+    fn resolve_type_string_via_php_type(
+        type_str: &str,
+        resolver: &dyn Fn(&str) -> String,
+    ) -> String {
+        let parsed = PhpType::parse(type_str);
+        let resolved = parsed.resolve_names(resolver);
+        resolved.to_string()
     }
 
     /// Resolve a class name to its fully-qualified form given a use_map and
