@@ -152,6 +152,100 @@ pub(in crate::completion) fn extract_closure_return_type_from_assignment(
     Some(ret_type.to_string())
 }
 
+/// Extract the return type annotation from a closure or arrow-function
+/// literal passed as a call-site argument.
+///
+/// Unlike [`extract_closure_return_type_from_assignment`], this operates
+/// on the raw argument text (e.g. the text between the call's parentheses
+/// for one argument), not on a `$var = …` assignment context.
+///
+/// Handles:
+/// - `fn(…): ReturnType => …`
+/// - `function(…): ReturnType { … }`
+/// - `function(…) use (…): ReturnType { … }`
+///
+/// Returns `None` if the text is not a closure/arrow-function or if
+/// there is no return type hint.
+pub(in crate::completion) fn extract_closure_return_type_from_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+
+    let is_arrow = trimmed.starts_with("fn")
+        && trimmed
+            .get(2..2 + 1)
+            .is_some_and(|c| c.starts_with('(') || c.starts_with(' ') || c.starts_with('\t'));
+    let is_closure = trimmed.starts_with("function")
+        && trimmed
+            .get(8..)
+            .is_some_and(|rest| rest.trim_start().starts_with('('));
+
+    if !is_arrow && !is_closure {
+        return None;
+    }
+
+    // Find the opening `(` of the parameter list.
+    let paren_open = trimmed.find('(')?;
+    // Find the matching `)` by tracking depth.
+    let mut depth = 0i32;
+    let mut paren_close = None;
+    for (i, c) in trimmed[paren_open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    paren_close = Some(paren_open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let paren_close = paren_close?;
+
+    // After `)`, look for `: ReturnType`.
+    let after_paren = trimmed.get(paren_close + 1..)?.trim_start();
+
+    // For closures there may be a `use (…)` clause before the return type.
+    let after_use = if after_paren.starts_with("use") {
+        let use_paren = after_paren.find('(')?;
+        let mut udepth = 0i32;
+        let mut use_close = None;
+        for (i, c) in after_paren[use_paren..].char_indices() {
+            match c {
+                '(' => udepth += 1,
+                ')' => {
+                    udepth -= 1;
+                    if udepth == 0 {
+                        use_close = Some(use_paren + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        after_paren.get(use_close? + 1..)?.trim_start()
+    } else {
+        after_paren
+    };
+
+    // Expect `: ReturnType`
+    let after_colon = after_use.strip_prefix(':')?.trim_start();
+    if after_colon.is_empty() {
+        return None;
+    }
+
+    // Extract the return type token — stop at `{`, `=>`, or whitespace.
+    let end = after_colon
+        .find(|c: char| c == '{' || c == '=' || c.is_whitespace())
+        .unwrap_or(after_colon.len());
+    let ret_type = after_colon[..end].trim();
+    if ret_type.is_empty() {
+        return None;
+    }
+
+    Some(ret_type.to_string())
+}
+
 /// Resolve the return type of a first-class callable assigned to
 /// `var_name`.
 ///
@@ -531,4 +625,96 @@ fn resolve_lhs_to_class(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arrow_fn_with_return_type() {
+        let text = "fn(Decimal $carry, Orderproduct $p): Decimal => $carry->add($p->price)";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some("Decimal".to_string())
+        );
+    }
+
+    #[test]
+    fn arrow_fn_without_return_type() {
+        let text = "fn($carry, $p) => $carry + $p";
+        assert_eq!(extract_closure_return_type_from_text(text), None);
+    }
+
+    #[test]
+    fn closure_with_return_type() {
+        let text = "function(Money $carry, LineItem $item): Money { return $carry; }";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some("Money".to_string())
+        );
+    }
+
+    #[test]
+    fn closure_with_use_and_return_type() {
+        let text = "function(int $carry) use ($factor): Result { return new Result(); }";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some("Result".to_string())
+        );
+    }
+
+    #[test]
+    fn closure_without_return_type() {
+        let text = "function($carry, $item) { return $carry; }";
+        assert_eq!(extract_closure_return_type_from_text(text), None);
+    }
+
+    #[test]
+    fn not_a_closure() {
+        let text = "new Decimal('0')";
+        assert_eq!(extract_closure_return_type_from_text(text), None);
+    }
+
+    #[test]
+    fn arrow_fn_fqn_return_type() {
+        let text = r"fn(\App\Models\User $u): \App\Models\User => $u";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some(r"\App\Models\User".to_string())
+        );
+    }
+
+    #[test]
+    fn arrow_fn_nullable_return_type() {
+        let text = "fn(int $x): ?string => null";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some("?string".to_string())
+        );
+    }
+
+    #[test]
+    fn closure_with_nested_parens_in_params() {
+        let text = "function(array $items = []): Collection { return new Collection(); }";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some("Collection".to_string())
+        );
+    }
+
+    #[test]
+    fn variable_is_not_a_closure() {
+        let text = "$someVar";
+        assert_eq!(extract_closure_return_type_from_text(text), None);
+    }
+
+    #[test]
+    fn whitespace_around_text() {
+        let text = "  fn(int $x): string => ''  ";
+        assert_eq!(
+            extract_closure_return_type_from_text(text),
+            Some("string".to_string())
+        );
+    }
 }

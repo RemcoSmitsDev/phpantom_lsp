@@ -1036,10 +1036,10 @@ fn substitute_class_string_template_bounds(
 
     let bounds = docblock::extract_template_params_with_bounds(docblock);
     for (name, bound) in bounds {
-        if name == tpl_name {
-            if let Some(bound_str) = bound {
-                return PhpType::ClassString(Some(Box::new(PhpType::parse(&bound_str))));
-            }
+        if name == tpl_name
+            && let Some(bound_str) = bound
+        {
+            return PhpType::ClassString(Some(Box::new(PhpType::parse(&bound_str))));
         }
     }
 

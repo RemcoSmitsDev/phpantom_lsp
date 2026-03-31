@@ -445,39 +445,6 @@ closure's `$class` should be typed `CustomerDocument`.
 
 ---
 
-## T17. Method-level template binding from closure return type
-**Impact: Medium · Effort: Medium**
-
-Methods like `Collection::reduce()` declare a method-level template
-parameter (`TReduceReturnType`) whose binding depends on the
-closure argument's return type.  PHPantom doesn't infer method-level
-template bindings from closure return types.
-
-**Reproducer:**
-
-```php
-$total = $products->reduce(
-    fn(Decimal $carry, Orderproduct $p): Decimal => $carry->add($p->price),
-    new Decimal('0')
-);
-$total->add($order->postage);
-//     ^^^ "subject type 'TReduceReturnType' could not be resolved"
-```
-
-**What should work:** The closure's return type annotation
-(`Decimal`) should bind `TReduceReturnType = Decimal`, making
-`reduce()` return `Decimal`.
-
-**Where to fix:**
-- `src/completion/call_resolution.rs` —
-  `resolve_method_return_types_with_args`: when a method has a
-  method-level template parameter, check whether a closure argument
-  provides a return type annotation that can bind it.
-
-**Discovered in:** analyze-triage iteration 7 (F13).  
-**Impact in shared codebase:** 3 diagnostics + 7 cascading
-(FlowService.php L106, L343, L517).
-
 ---
 
 

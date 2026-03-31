@@ -552,6 +552,17 @@ fn build_constructor_template_subs(
                     subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
                 }
             }
+            TemplateBindingMode::CallableReturnType => {
+                // `@param callable(...): T $cb` — extract the closure's
+                // return type annotation from the argument text.
+                if let Some(ret_type) =
+                    crate::completion::source::helpers::extract_closure_return_type_from_text(
+                        arg_text,
+                    )
+                {
+                    subs.insert(tpl_name.clone(), PhpType::parse(&ret_type));
+                }
+            }
             TemplateBindingMode::ArrayElement => {
                 // `@param T[] $items` — resolve individual array elements.
                 if arg_text.starts_with('[') && arg_text.ends_with(']') {
@@ -600,6 +611,10 @@ pub(crate) enum TemplateBindingMode {
     /// `@param Wrapper<..., T, ...> $a` — the template param is a generic
     /// argument of the wrapper class at the given position.
     GenericWrapper(String, usize),
+    /// `@param callable(...): T $cb` — the template param appears in the
+    /// callable's return type.  The binding is resolved by extracting the
+    /// return type annotation from the closure/arrow-function argument.
+    CallableReturnType,
 }
 
 /// Classify how a template parameter name appears in a `@param` type hint.
@@ -655,7 +670,45 @@ fn classify_from_php_type(tpl_name: &str, ty: &PhpType) -> TemplateBindingMode {
             }
             TemplateBindingMode::Direct
         }
+        PhpType::Callable { return_type, .. } => {
+            if let Some(rt) = return_type
+                && type_contains_name(rt, tpl_name)
+            {
+                return TemplateBindingMode::CallableReturnType;
+            }
+            TemplateBindingMode::Direct
+        }
         _ => TemplateBindingMode::Direct,
+    }
+}
+
+/// Check whether a [`PhpType`] tree contains a [`PhpType::Named`] with the
+/// given name anywhere in its structure.
+fn type_contains_name(ty: &PhpType, name: &str) -> bool {
+    match ty {
+        PhpType::Named(n) => n == name,
+        PhpType::Nullable(inner) | PhpType::Array(inner) => type_contains_name(inner, name),
+        PhpType::Union(members) | PhpType::Intersection(members) => {
+            members.iter().any(|m| type_contains_name(m, name))
+        }
+        PhpType::Generic(_, args) => args.iter().any(|a| type_contains_name(a, name)),
+        PhpType::Callable {
+            params,
+            return_type,
+            ..
+        } => {
+            params
+                .iter()
+                .any(|p| type_contains_name(&p.type_hint, name))
+                || return_type
+                    .as_ref()
+                    .is_some_and(|rt| type_contains_name(rt, name))
+        }
+        PhpType::ClassString(Some(inner))
+        | PhpType::InterfaceString(Some(inner))
+        | PhpType::KeyOf(inner)
+        | PhpType::ValueOf(inner) => type_contains_name(inner, name),
+        _ => false,
     }
 }
 
@@ -908,6 +961,17 @@ pub(crate) fn build_function_template_subs(
             TemplateBindingMode::Direct => {
                 if let Some(type_name) = Backend::resolve_arg_text_to_type(arg_text, rctx) {
                     subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                }
+            }
+            TemplateBindingMode::CallableReturnType => {
+                // `@param callable(...): T $cb` — extract the closure's
+                // return type annotation from the argument text.
+                if let Some(ret_type) =
+                    crate::completion::source::helpers::extract_closure_return_type_from_text(
+                        arg_text,
+                    )
+                {
+                    subs.insert(tpl_name.clone(), PhpType::parse(&ret_type));
                 }
             }
             TemplateBindingMode::ArrayElement => {
@@ -1907,5 +1971,87 @@ fn extract_closure_or_arrow_return_type(expr: &Expression<'_>) -> Option<String>
             .as_ref()
             .map(|rth| extract_hint_string(&rth.hint)),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_direct_param() {
+        let mode = classify_template_binding("T", Some("T"));
+        assert!(matches!(mode, TemplateBindingMode::Direct));
+    }
+
+    #[test]
+    fn classify_array_element() {
+        let mode = classify_template_binding("T", Some("T[]"));
+        assert!(matches!(mode, TemplateBindingMode::ArrayElement));
+    }
+
+    #[test]
+    fn classify_generic_wrapper() {
+        let mode = classify_template_binding("T", Some("Collection<T>"));
+        assert!(matches!(mode, TemplateBindingMode::GenericWrapper(_, 0)));
+    }
+
+    #[test]
+    fn classify_callable_return_type() {
+        let mode = classify_template_binding(
+            "TReduceReturnType",
+            Some("callable(TReduceInitial|TReduceReturnType, TValue): TReduceReturnType"),
+        );
+        assert!(matches!(mode, TemplateBindingMode::CallableReturnType));
+    }
+
+    #[test]
+    fn classify_closure_return_type() {
+        let mode = classify_template_binding("T", Some("Closure(int, string): T"));
+        assert!(matches!(mode, TemplateBindingMode::CallableReturnType));
+    }
+
+    #[test]
+    fn classify_callable_no_return_type() {
+        // Template appears only in params, not in return type — should be Direct.
+        let mode = classify_template_binding("T", Some("callable(T): void"));
+        assert!(matches!(mode, TemplateBindingMode::Direct));
+    }
+
+    #[test]
+    fn classify_nullable_union_callable() {
+        // Template in callable return type within a union.
+        let mode = classify_template_binding("T", Some("callable(int): T|null"));
+        assert!(matches!(mode, TemplateBindingMode::CallableReturnType));
+    }
+
+    #[test]
+    fn classify_none_hint() {
+        let mode = classify_template_binding("T", None);
+        assert!(matches!(mode, TemplateBindingMode::Direct));
+    }
+
+    #[test]
+    fn type_contains_name_simple() {
+        let ty = PhpType::Named("Foo".to_owned());
+        assert!(type_contains_name(&ty, "Foo"));
+        assert!(!type_contains_name(&ty, "Bar"));
+    }
+
+    #[test]
+    fn type_contains_name_nested_callable() {
+        let ty = PhpType::parse("callable(int): Decimal");
+        assert!(type_contains_name(&ty, "Decimal"));
+        assert!(type_contains_name(&ty, "int"));
+        assert!(!type_contains_name(&ty, "string"));
+    }
+
+    #[test]
+    fn type_contains_name_union() {
+        let ty = PhpType::parse("Foo|Bar|null");
+        assert!(type_contains_name(&ty, "Foo"));
+        assert!(type_contains_name(&ty, "Bar"));
+        assert!(type_contains_name(&ty, "null"));
+        assert!(!type_contains_name(&ty, "Baz"));
     }
 }

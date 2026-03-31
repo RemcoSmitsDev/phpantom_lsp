@@ -961,15 +961,17 @@ fn resolve_variable_fallback(
                             _ => None,
                         };
                         if let Some(inner_ty) = cs_inner {
-                            let resolved =
-                                super::type_resolution::type_hint_to_classes_typed(
-                                    inner_ty,
-                                    &effective_class.name,
-                                    all_classes,
-                                    class_loader,
-                                );
+                            let resolved = super::type_resolution::type_hint_to_classes_typed(
+                                inner_ty,
+                                &effective_class.name,
+                                all_classes,
+                                class_loader,
+                            );
                             for cls in resolved {
-                                ClassInfo::push_unique_arc(&mut class_string_results, Arc::new(cls));
+                                ClassInfo::push_unique_arc(
+                                    &mut class_string_results,
+                                    Arc::new(cls),
+                                );
                             }
                         }
                     }

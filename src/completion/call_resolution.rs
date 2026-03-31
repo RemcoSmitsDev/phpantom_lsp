@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::Backend;
+use crate::completion::variable::rhs_resolution::{TemplateBindingMode, classify_template_binding};
 use crate::completion::variable::{ARRAY_ELEMENT_FUNCS, ARRAY_PRESERVING_FUNCS};
 use crate::docblock;
 use crate::php_type::PhpType;
@@ -926,9 +927,35 @@ impl Backend {
                 None => continue,
             };
 
-            // Try to resolve the argument text to a type name.
-            if let Some(type_name) = Self::resolve_arg_text_to_type(arg_text, ctx) {
-                subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+            // Classify how the template param appears in the parameter's
+            // type hint (direct, array element, generic wrapper, or
+            // callable return type).
+            let param_hint_str = method
+                .parameters
+                .get(param_idx)
+                .and_then(|p| p.type_hint_str());
+            let binding_mode = classify_template_binding(tpl_name, param_hint_str.as_deref());
+
+            match binding_mode {
+                TemplateBindingMode::Direct | TemplateBindingMode::GenericWrapper(..) => {
+                    if let Some(type_name) = Self::resolve_arg_text_to_type(arg_text, ctx) {
+                        subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                    }
+                }
+                TemplateBindingMode::CallableReturnType => {
+                    // `@param callable(...): T $cb` — extract the closure's
+                    // return type annotation from the argument text.
+                    if let Some(ret_type) =
+                        super::source::helpers::extract_closure_return_type_from_text(arg_text)
+                    {
+                        subs.insert(tpl_name.clone(), PhpType::parse(&ret_type));
+                    }
+                }
+                TemplateBindingMode::ArrayElement => {
+                    if let Some(type_name) = Self::resolve_arg_text_to_type(arg_text, ctx) {
+                        subs.insert(tpl_name.clone(), PhpType::parse(&type_name));
+                    }
+                }
             }
         }
 

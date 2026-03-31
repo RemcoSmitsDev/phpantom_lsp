@@ -492,6 +492,35 @@ class MethodTemplateDemo
 }
 
 
+// ── Closure Return Type Template Binding ────────────────────────────────────
+
+class ClosureReturnTemplateDemo
+{
+    public function demo(): void
+    {
+        // Method-level @template bound from closure return type annotation.
+        // reduce()'s TReduceReturnType is inferred from the closure's `: Pen` return type.
+        /** @var ScaffoldingReducible<Pencil> $pencils */
+        $pencils = new ScaffoldingReducible();
+
+        $merged = $pencils->reduce(
+            fn(Pen $carry, Pencil $item): Pen => $carry,
+            new Pen('starter')
+        );
+        $merged->write();       // TReduceReturnType = Pen
+
+        // Same with function() keyword closure
+        $merged2 = $pencils->reduce(
+            function(Pen $carry, Pencil $item): Pen {
+                return $carry;
+            },
+            new Pen('starter')
+        );
+        $merged2->color();      // TReduceReturnType = Pen
+    }
+}
+
+
 // ── Trait Generic Substitution ──────────────────────────────────────────────
 
 class TraitGenericDemo
@@ -3391,6 +3420,25 @@ class ScaffoldingClosureParamInference
     public function __construct() { $this->items = new FluentCollection([new Pen('red'), new Pen('blue')]); }
 }
 
+/**
+ * @template TValue
+ */
+class ScaffoldingReducible
+{
+    /**
+     * @template TReduceInitial
+     * @template TReduceReturnType
+     *
+     * @param callable(TReduceInitial|TReduceReturnType, TValue): TReduceReturnType $callback
+     * @param TReduceInitial $initial
+     * @return TReduceReturnType
+     */
+    public function reduce(callable $callback, mixed $initial): mixed
+    {
+        return $initial;
+    }
+}
+
 class ScaffoldingPipeline
 {
     /**
@@ -4887,6 +4935,15 @@ function runDemoAssertions(): void
     assert($wrapped instanceof TypedCollection, 'ObjectMapper::wrap() must return TypedCollection');
     $first = $wrapped->first();
     assert($first instanceof Pen, 'wrap(Pen)->first() must return Pen');
+
+    // ── ScaffoldingReducible::reduce() — closure return type binding ────
+    /** @var ScaffoldingReducible<Pencil> $reducible */
+    $reducible = new ScaffoldingReducible();
+    $reduced = $reducible->reduce(
+        fn(Pen $carry, Pencil $item): Pen => $carry,
+        new Pen('starter')
+    );
+    assert($reduced instanceof Pen, 'reduce() with fn(): Pen must return Pen');
 
     // ── Nested generic: ServiceLocator::wrap → Box::unwrap ──────────────
     $boxed = $locator->wrap(Pen::class);
