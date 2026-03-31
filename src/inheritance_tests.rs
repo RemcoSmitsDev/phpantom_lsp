@@ -439,3 +439,97 @@ fn test_extends_generics_propagate_through_parent_use_generics() {
         "first() return type should be substituted from TValue to DeliveryOption"
     );
 }
+
+#[test]
+fn test_apply_generic_args_right_aligns_single_arg_for_collection() {
+    // When `Collection<SectionTranslation>` is written (1 arg) but
+    // Collection has `@template TKey of array-key` and `@template TValue`,
+    // the single arg should bind to TValue, not TKey.
+    let collection = ClassInfo {
+        name: "Collection".to_string(),
+        template_params: vec!["TKey".to_string(), "TValue".to_string()],
+        template_param_bounds: HashMap::from([("TKey".to_string(), PhpType::parse("array-key"))]),
+        methods: vec![MethodInfo::virtual_method("first", Some("TValue"))].into(),
+        ..ClassInfo::default()
+    };
+
+    let result = apply_generic_args(&collection, &["SectionTranslation"]);
+
+    let first = result
+        .methods
+        .iter()
+        .find(|m| m.name == "first")
+        .expect("first() should exist");
+    assert_eq!(
+        first.return_type.as_ref().unwrap().to_string(),
+        "SectionTranslation",
+        "Single generic arg should bind to TValue (not TKey) when TKey has array-key bound"
+    );
+}
+
+#[test]
+fn test_apply_generic_args_no_right_align_when_all_args_provided() {
+    // When both args are provided, positional mapping is used as-is.
+    let collection = ClassInfo {
+        name: "Collection".to_string(),
+        template_params: vec!["TKey".to_string(), "TValue".to_string()],
+        template_param_bounds: HashMap::from([("TKey".to_string(), PhpType::parse("array-key"))]),
+        methods: vec![MethodInfo::virtual_method("first", Some("TValue"))].into(),
+        ..ClassInfo::default()
+    };
+
+    let result = apply_generic_args(&collection, &["int", "User"]);
+
+    let first = result
+        .methods
+        .iter()
+        .find(|m| m.name == "first")
+        .expect("first() should exist");
+    assert_eq!(first.return_type.as_ref().unwrap().to_string(), "User",);
+}
+
+#[test]
+fn test_apply_generic_args_no_right_align_without_key_bound() {
+    // When the leading param has no key-like bound, positional mapping
+    // is used even with fewer args.
+    let cls = ClassInfo {
+        name: "Pair".to_string(),
+        template_params: vec!["TFirst".to_string(), "TSecond".to_string()],
+        methods: vec![MethodInfo::virtual_method("first", Some("TFirst"))].into(),
+        ..ClassInfo::default()
+    };
+
+    let result = apply_generic_args(&cls, &["Foo"]);
+
+    let first = result
+        .methods
+        .iter()
+        .find(|m| m.name == "first")
+        .expect("first() should exist");
+    assert_eq!(
+        first.return_type.as_ref().unwrap().to_string(),
+        "Foo",
+        "Without key-like bound on leading param, single arg should bind positionally to TFirst"
+    );
+}
+
+#[test]
+fn test_apply_generic_args_right_align_with_int_bound() {
+    // `int` is also a key-like bound.
+    let cls = ClassInfo {
+        name: "TypedList".to_string(),
+        template_params: vec!["TKey".to_string(), "TValue".to_string()],
+        template_param_bounds: HashMap::from([("TKey".to_string(), PhpType::parse("int"))]),
+        methods: vec![MethodInfo::virtual_method("get", Some("TValue"))].into(),
+        ..ClassInfo::default()
+    };
+
+    let result = apply_generic_args(&cls, &["Product"]);
+
+    let get = result
+        .methods
+        .iter()
+        .find(|m| m.name == "get")
+        .expect("get() should exist");
+    assert_eq!(get.return_type.as_ref().unwrap().to_string(), "Product",);
+}

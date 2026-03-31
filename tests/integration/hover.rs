@@ -9048,3 +9048,81 @@ class Test {
         text
     );
 }
+
+/// When a property is typed as `Collection<SectionTranslation>` (single
+/// generic arg on a class with `@template TKey of array-key` and
+/// `@template TValue`), calling `->where()->first()` should resolve
+/// TValue to `SectionTranslation`, not leave it as a raw template param.
+///
+/// This is the common PHP pattern of writing `Collection<Model>` instead
+/// of `Collection<int, Model>`.  The single arg should right-align to
+/// bind to TValue.
+#[test]
+fn hover_collection_single_generic_arg_resolves_value_type() {
+    let backend = create_test_backend();
+    let uri = "file:///test_collection_single_arg.php";
+    let content = r#"<?php
+/**
+ * @template TKey of array-key
+ * @template-covariant TValue
+ */
+class Collection {
+    /**
+     * @param callable|string $key
+     * @return static
+     */
+    public function where($key, $operator = null, $value = null) { return $this; }
+
+    /**
+     * @template TFirstDefault
+     * @param (callable(TValue, TKey): bool)|null $callback
+     * @param TFirstDefault|(\Closure(): TFirstDefault) $default
+     * @return TValue|TFirstDefault
+     */
+    public function first(?callable $callback = null, $default = null) { return null; }
+}
+
+class SectionTranslation {
+    public string $title = '';
+    public bool $enabled = false;
+}
+
+class Section {
+    /** @var Collection<SectionTranslation> */
+    public $translations;
+}
+
+class Test {
+    public function run(Section $section): void {
+        $result = $section->translations->where('lang_code', 'en')->first();
+        $result;
+    }
+}
+"#;
+
+    // Hover on `$result` on line 34 (the standalone reference, after assignment)
+    let hover = hover_at(&backend, uri, content, 34, 9).expect("expected hover on $result");
+    let text = hover_text(&hover);
+    assert!(
+        text.contains("SectionTranslation"),
+        "Hover should resolve TValue to SectionTranslation via right-aligned generic arg, got: {}",
+        text
+    );
+    assert!(
+        !text.contains("TValue"),
+        "Hover should not show raw template param TValue, got: {}",
+        text
+    );
+    // TFirstDefault should resolve to `null` because $default = null and
+    // no second argument was passed to first().
+    assert!(
+        !text.contains("TFirstDefault"),
+        "TFirstDefault should resolve to null (parameter default), got: {}",
+        text
+    );
+    assert!(
+        text.contains("null"),
+        "Hover should include null from the resolved TFirstDefault default, got: {}",
+        text
+    );
+}

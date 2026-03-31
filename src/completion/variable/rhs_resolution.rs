@@ -1543,11 +1543,8 @@ fn resolve_rhs_method_call_inner<'b>(
     let var_resolver = build_var_resolver_from_ctx(ctx);
 
     for owner in &owner_classes {
-        let template_subs = if !text_args.is_empty() {
-            Backend::build_method_template_subs(owner, &method_name, &text_args, &rctx)
-        } else {
-            HashMap::new()
-        };
+        let template_subs =
+            Backend::build_method_template_subs(owner, &method_name, &text_args, &rctx);
         let mr_ctx = MethodReturnCtx {
             all_classes: ctx.all_classes,
             class_loader: ctx.class_loader,
@@ -1671,11 +1668,8 @@ fn resolve_rhs_static_call(
                 ctx.content,
             );
             let rctx = ctx.as_resolution_ctx();
-            let template_subs = if !text_args.is_empty() {
-                Backend::build_method_template_subs(owner, &method_name, &text_args, &rctx)
-            } else {
-                HashMap::new()
-            };
+            let template_subs =
+                Backend::build_method_template_subs(owner, &method_name, &text_args, &rctx);
             let var_resolver = build_var_resolver_from_ctx(ctx);
             let mr_ctx = MethodReturnCtx {
                 all_classes: ctx.all_classes,

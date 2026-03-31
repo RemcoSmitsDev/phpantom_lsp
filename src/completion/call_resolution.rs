@@ -399,11 +399,8 @@ impl Backend {
 
                 let mut results = Vec::new();
                 for owner in &lhs_classes {
-                    let template_subs = if !text_args.is_empty() {
-                        Self::build_method_template_subs(owner, method_name, text_args, ctx)
-                    } else {
-                        HashMap::new()
-                    };
+                    let template_subs =
+                        Self::build_method_template_subs(owner, method_name, text_args, ctx);
                     let var_resolver = build_var_resolver(ctx);
                     let mr_ctx = MethodReturnCtx {
                         all_classes: ctx.all_classes,
@@ -437,11 +434,8 @@ impl Backend {
                 };
 
                 if let Some(ref owner) = owner_class {
-                    let template_subs = if !text_args.is_empty() {
-                        Self::build_method_template_subs(owner, method_name, text_args, ctx)
-                    } else {
-                        HashMap::new()
-                    };
+                    let template_subs =
+                        Self::build_method_template_subs(owner, method_name, text_args, ctx);
                     let var_resolver = build_var_resolver(ctx);
                     let mr_ctx = MethodReturnCtx {
                         all_classes: ctx.all_classes,
@@ -924,7 +918,22 @@ impl Backend {
             // Get the corresponding argument text.
             let arg_text = match args.get(param_idx) {
                 Some(text) => text.trim(),
-                None => continue,
+                None => {
+                    // No argument was provided at the call site.  If the
+                    // parameter has a default value of `null`, resolve the
+                    // template param to `null`.  This handles the common
+                    // pattern `@template TDefault` with
+                    // `@param TDefault $default = null` where the caller
+                    // omits the argument — e.g. `Collection::first()`
+                    // returns `TValue|TFirstDefault` and `TFirstDefault`
+                    // should become `null` when no default is passed.
+                    if let Some(param) = method.parameters.get(param_idx)
+                        && param.default_value.as_deref().is_some_and(|d| d == "null")
+                    {
+                        subs.insert(tpl_name.clone(), PhpType::Named("null".into()));
+                    }
+                    continue;
+                }
             };
 
             // Classify how the template param appears in the parameter's

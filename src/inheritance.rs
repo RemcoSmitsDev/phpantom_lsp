@@ -1020,9 +1020,35 @@ pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> Class
         return class.clone();
     }
 
+    // When fewer type arguments are provided than template parameters,
+    // right-align the args so that trailing (value) params get bound
+    // and leading key-like params stay unbound.  This handles the
+    // common PHP pattern of writing `Collection<Model>` instead of
+    // `Collection<int, Model>` — the single arg should bind to
+    // `TValue`/`TModel`, not `TKey`.
+    //
+    // The heuristic only activates when every skipped leading param
+    // has an `array-key` (or `int` / `string`) bound, which is the
+    // universal convention for collection key parameters.
+    let offset = if type_args.len() < class.template_params.len() {
+        let skip = class.template_params.len() - type_args.len();
+        let all_skipped_are_key_like = class.template_params[..skip].iter().all(|param| {
+            class
+                .template_param_bounds
+                .get(param)
+                .is_some_and(is_key_like_bound)
+        });
+        if all_skipped_are_key_like { skip } else { 0 }
+    } else {
+        0
+    };
+
     let mut subs = HashMap::new();
     for (i, param_name) in class.template_params.iter().enumerate() {
-        if let Some(arg) = type_args.get(i) {
+        if i < offset {
+            continue;
+        }
+        if let Some(arg) = type_args.get(i - offset) {
             subs.insert(param_name.clone(), PhpType::parse(arg));
         }
     }
@@ -1050,6 +1076,26 @@ pub(crate) fn apply_generic_args(class: &ClassInfo, type_args: &[&str]) -> Class
     apply_substitution_to_generics(&mut result.use_generics, &subs);
 
     result
+}
+
+/// Whether a template parameter bound represents a key-like type.
+///
+/// Returns `true` for `array-key`, `int`, `string`, and other types
+/// that are conventionally used as collection key bounds.  This is
+/// used by [`apply_generic_args`] to right-align generic arguments
+/// when fewer arguments than template parameters are provided.
+fn is_key_like_bound(bound: &PhpType) -> bool {
+    match bound {
+        PhpType::Named(n) => matches!(n.as_str(), "array-key" | "int" | "string"),
+        PhpType::Union(members) => {
+            // `int|string` is equivalent to `array-key`.
+            !members.is_empty()
+                && members.iter().all(
+                    |m| matches!(m, PhpType::Named(n) if matches!(n.as_str(), "int" | "string")),
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Apply a substitution map to a list of generic annotations.
