@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use crate::Backend;
 use crate::docblock;
+use crate::php_type::PhpType;
 use crate::types::*;
 use crate::util::find_class_by_name;
 
@@ -909,16 +910,77 @@ fn resolve_variable_fallback(
         }
     }
 
-    let result: Vec<Arc<ClassInfo>> =
-        ResolvedType::into_classes(super::variable::resolution::resolve_variable_types(
-            var_name,
-            effective_class,
-            all_classes,
-            ctx.content,
-            ctx.cursor_offset,
-            class_loader,
-            Loaders::with_function(function_loader),
-        ))
+    let resolved_types = super::variable::resolution::resolve_variable_types(
+        var_name,
+        effective_class,
+        all_classes,
+        ctx.content,
+        ctx.cursor_offset,
+        class_loader,
+        Loaders::with_function(function_loader),
+    );
+
+    // ── `class-string<T>` unwrapping for `$var::` access ────────
+    // When the variable's type is `class-string<T>` (e.g. from a
+    // `@param class-string<BackedEnum> $class` annotation) and the
+    // access kind is `::`, unwrap the inner type `T` and resolve it
+    // to classes so that static members are offered against `T`.
+    if access_kind == AccessKind::DoubleColon {
+        let mut class_string_results: Vec<Arc<ClassInfo>> = Vec::new();
+        for rt in &resolved_types {
+            let inner = match &rt.type_string {
+                PhpType::ClassString(Some(inner)) => Some(inner.as_ref()),
+                // Handle `?class-string<T>` — unwrap nullable first.
+                PhpType::Nullable(inner) => match inner.as_ref() {
+                    PhpType::ClassString(Some(cs_inner)) => Some(cs_inner.as_ref()),
+                    _ => None,
+                },
+                // Handle union types containing class-string<T>.
+                PhpType::Union(members) => {
+                    for member in members {
+                        let cs_inner = match member {
+                            PhpType::ClassString(Some(inner)) => Some(inner.as_ref()),
+                            PhpType::Nullable(inner) => match inner.as_ref() {
+                                PhpType::ClassString(Some(cs_inner)) => Some(cs_inner.as_ref()),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(inner_ty) = cs_inner {
+                            let resolved =
+                                super::type_resolution::type_hint_to_classes_typed(
+                                    inner_ty,
+                                    &effective_class.name,
+                                    all_classes,
+                                    class_loader,
+                                );
+                            for cls in resolved {
+                                ClassInfo::push_unique_arc(&mut class_string_results, Arc::new(cls));
+                            }
+                        }
+                    }
+                    None // already handled inline
+                }
+                _ => None,
+            };
+            if let Some(inner_ty) = inner {
+                let resolved = super::type_resolution::type_hint_to_classes_typed(
+                    inner_ty,
+                    &effective_class.name,
+                    all_classes,
+                    class_loader,
+                );
+                for cls in resolved {
+                    ClassInfo::push_unique_arc(&mut class_string_results, Arc::new(cls));
+                }
+            }
+        }
+        if !class_string_results.is_empty() {
+            return class_string_results;
+        }
+    }
+
+    let result: Vec<Arc<ClassInfo>> = ResolvedType::into_classes(resolved_types)
         .into_iter()
         .map(Arc::new)
         .collect();

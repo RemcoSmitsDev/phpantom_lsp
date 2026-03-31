@@ -607,6 +607,25 @@ fn try_resolve_in_function(
         &body_ctx,
         &mut results,
     );
+
+    // ── T15: substitute method-level template params in
+    // `class-string<T>` for standalone function parameters ──────
+    // Same logic as in `resolve_variable_in_members`: when the
+    // resolved parameter type is `class-string<T>` and `T` is a
+    // function-level template with an upper bound, replace `T`
+    // with the bound so that `$class::` resolves static members.
+    let func_start = func.span().start.offset as usize;
+    for rt in results.iter_mut() {
+        if matches!(&rt.type_string, PhpType::ClassString(Some(inner)) if matches!(inner.as_ref(), PhpType::Named(_)))
+        {
+            rt.type_string = substitute_class_string_template_bounds(
+                rt.type_string.clone(),
+                ctx.content,
+                func_start,
+            );
+        }
+    }
+
     walk_statements_for_assignments(func.body.statements.iter(), &body_ctx, &mut results, false);
     if !results.is_empty() {
         return Some(results);
@@ -868,7 +887,23 @@ fn resolve_variable_in_members<'b>(
                     // docblock provides a more specific annotation.
                     let best_type_str = raw_docblock_type.as_deref().or(type_str_for_resolution);
                     if let Some(ts) = best_type_str {
-                        param_results = vec![ResolvedType::from_type_string(PhpType::parse(ts))];
+                        let mut parsed = PhpType::parse(ts);
+
+                        // ── T15: substitute method-level template params
+                        // in `class-string<T>` with their bounds ────────
+                        // When the parameter type is `class-string<T>` and
+                        // `T` is a method-level template with an upper bound
+                        // (e.g. `@template T of CustomerModel`), replace `T`
+                        // with `CustomerModel` so that static member access
+                        // (`$class::KEY`, `$class::from(...)`) resolves
+                        // against the bound type.
+                        parsed = substitute_class_string_template_bounds(
+                            parsed,
+                            ctx.content,
+                            method.span().start.offset as usize,
+                        );
+
+                        param_results = vec![ResolvedType::from_type_string(parsed)];
                     }
                 }
             }
@@ -963,6 +998,70 @@ fn resolve_variable_in_members<'b>(
 /// is being unconditionally reassigned).  When `conditional` is `true`,
 /// a new assignment **adds** to the list (the variable *might* be this
 /// type).
+/// Substitute method-level template parameters inside `class-string<T>`
+/// types with their upper bounds from `@template T of Bound` annotations.
+///
+/// This enables `$class::` static member access resolution when the
+/// parameter is typed as `class-string<T>` and `T` is bounded by a
+/// concrete class.  Without this substitution, `T` remains an
+/// unresolvable named type and `$class::` yields no completions.
+fn substitute_class_string_template_bounds(
+    ty: PhpType,
+    content: &str,
+    method_start_offset: usize,
+) -> PhpType {
+    // Only act on class-string<T> where the inner type is a simple name
+    // (i.e. a potential template parameter).
+    let inner_name = match &ty {
+        PhpType::ClassString(Some(inner)) => match inner.as_ref() {
+            PhpType::Named(name) => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    let Some(tpl_name) = inner_name else {
+        return ty;
+    };
+
+    // Extract the method's docblock to find template parameter bounds.
+    // The docblock sits immediately before the method declaration, so
+    // we search backward from the method's start offset.
+    let before = &content[..method_start_offset];
+    let docblock = extract_preceding_docblock(before);
+
+    let Some(docblock) = docblock else {
+        return ty;
+    };
+
+    let bounds = docblock::extract_template_params_with_bounds(docblock);
+    for (name, bound) in bounds {
+        if name == tpl_name {
+            if let Some(bound_str) = bound {
+                return PhpType::ClassString(Some(Box::new(PhpType::parse(&bound_str))));
+            }
+        }
+    }
+
+    ty
+}
+
+/// Extract the docblock comment immediately preceding a given offset.
+///
+/// Scans backward from `before` (the source text up to the method start)
+/// to find the closest `/** ... */` block.  Returns `None` when no
+/// docblock is found or when there is non-whitespace between the
+/// docblock and the method declaration.
+fn extract_preceding_docblock(before: &str) -> Option<&str> {
+    let trimmed = before.trim_end();
+    if !trimmed.ends_with("*/") {
+        return None;
+    }
+    let close_pos = trimmed.len();
+    let open_pos = trimmed.rfind("/**")?;
+    Some(&trimmed[open_pos..close_pos])
+}
+
 pub(in crate::completion) fn walk_statements_for_assignments<'b>(
     statements: impl Iterator<Item = &'b Statement<'b>>,
     ctx: &VarResolutionCtx<'_>,

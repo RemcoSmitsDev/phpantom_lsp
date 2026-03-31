@@ -18775,3 +18775,320 @@ async fn test_completion_inline_var_cast_applies_after_assignment() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+/// T15: `class-string<T>` parameter annotation should resolve static
+/// member access (`$class::`) against the bound type `T`.
+#[tokio::test]
+async fn test_completion_class_string_param_static_access() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_param.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class CustomerModel {\n",
+        "    public const KEY = 'customer';\n",
+        "    public static function from(array $values): static {}\n",
+        "    public static string $table = 'customers';\n",
+        "}\n",
+        "\n",
+        "class Service {\n",
+        "    /**\n",
+        "     * @template T of CustomerModel\n",
+        "     * @param class-string<T> $class\n",
+        "     * @return T|null\n",
+        "     */\n",
+        "    private function parseModel(string $class): ?CustomerModel {\n",
+        "        $class::\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 16,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for class-string<T> $class::"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"KEY"),
+                "Should include constant 'KEY' from CustomerModel, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"from"),
+                "Should include static method 'from' from CustomerModel, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"$table"),
+                "Should include static property '$table' from CustomerModel, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// T15: `class-string<BackedEnum>` parameter — static call on a
+/// concrete class (not a template) should also resolve.
+#[tokio::test]
+async fn test_completion_class_string_param_backed_enum_static_access() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_enum.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "interface BackedEnum {\n",
+        "    public static function cases(): array;\n",
+        "    public static function from(string|int $value): static;\n",
+        "}\n",
+        "\n",
+        "class OptionList {\n",
+        "    /**\n",
+        "     * @param class-string<BackedEnum> $class\n",
+        "     */\n",
+        "    public function getOptions(string $class): array {\n",
+        "        $class::\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 11,
+                character: 16,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for class-string<BackedEnum> $class::"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"cases"),
+                "Should include static method 'cases' from BackedEnum, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"from"),
+                "Should include static method 'from' from BackedEnum, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// T15: `class-string<T>` in a standalone function should also resolve
+/// static member access against the template bound.
+#[tokio::test]
+async fn test_completion_class_string_param_standalone_function() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_func.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Animal {\n",
+        "    public const LEGS = 4;\n",
+        "    public static function species(): string {}\n",
+        "}\n",
+        "\n",
+        "/**\n",
+        " * @template T of Animal\n",
+        " * @param class-string<T> $class\n",
+        " * @return T\n",
+        " */\n",
+        "function createAnimal(string $class): Animal {\n",
+        "    $class::\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 12,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for class-string<T> in standalone function"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"LEGS"),
+                "Should include constant 'LEGS' from Animal, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"species"),
+                "Should include static method 'species' from Animal, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// T15: `class-string<BackedEnum>` — foreach over `$class::cases()`
+/// should resolve `$item` to the bound type so that `$item->name`
+/// and `$item->value` are available.
+#[tokio::test]
+async fn test_completion_class_string_foreach_cases() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///class_string_foreach.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "interface BackedEnum {\n",
+        "    public string $name;\n",
+        "    public string|int $value;\n",
+        "    public static function cases(): array;\n",
+        "    public static function from(string|int $value): static;\n",
+        "}\n",
+        "\n",
+        "class Status implements BackedEnum {\n",
+        "    public string $name;\n",
+        "    public string|int $value;\n",
+        "    public static function cases(): array {}\n",
+        "    public static function from(string|int $value): static {}\n",
+        "    public function getLabel(): string {}\n",
+        "}\n",
+        "\n",
+        "class OptionList {\n",
+        "    /**\n",
+        "     * @param class-string<BackedEnum> $class\n",
+        "     */\n",
+        "    public function getOptions(string $class): array {\n",
+        "        $items = $class::cases();\n",
+        "        $class::\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Verify that $class:: resolves to BackedEnum's static members
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 22,
+                character: 16,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for class-string<BackedEnum> $class::"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let names: Vec<&str> = items
+                .iter()
+                .map(|i| i.filter_text.as_deref().unwrap_or(i.label.as_str()))
+                .collect();
+            assert!(
+                names.contains(&"cases"),
+                "Should include static method 'cases' from BackedEnum, got: {:?}",
+                names
+            );
+            assert!(
+                names.contains(&"from"),
+                "Should include static method 'from' from BackedEnum, got: {:?}",
+                names
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
