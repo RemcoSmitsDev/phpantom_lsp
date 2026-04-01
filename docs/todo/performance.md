@@ -437,9 +437,13 @@ split into three tiers based on how the file is used:
   should not fire when fqn_index is fully populated. Go-to-definition
   can re-parse on demand using the file path from class_index.
 
-- **Vendor files are never edited, never diagnosed.** They only
-  need ClassInfo for type resolution and class_index for
-  go-to-definition file lookup.
+- **Vendor files are rarely edited but can be diagnosed.** Users
+  working in monorepos or with `--prefer-source` packages edit
+  vendor files directly, and diagnostics run on any file open in
+  the editor. Tiered storage must still keep enough data to
+  support diagnostics for open vendor files, but non-open vendor
+  files only need ClassInfo for type resolution and class_index
+  for go-to-definition file lookup.
 
 - **Go-to-implementation currently scans all ast_map entries.**
   A dedicated GTI index (parent FQN to list of child FQNs, built

@@ -472,9 +472,29 @@ pub(crate) fn discover_user_files(
 
     let vendor_dirs: Vec<PathBuf> = backend.vendor_dir_paths.lock().clone();
 
+    // When an explicit path filter points outside all PSR-4 source
+    // directories (e.g. into vendor/), walk the filter path directly
+    // instead of skipping it.  This matches PHPStan behaviour: the
+    // default scan covers only user code, but an explicit override
+    // scans whatever you point it at.
+    let filter_overlaps_psr4 = abs_filter.as_ref().is_none_or(|fp| {
+        source_dirs
+            .iter()
+            .any(|d| d.starts_with(fp) || fp.starts_with(d))
+    });
+
+    let dirs_to_walk: Vec<&Path> = if filter_overlaps_psr4 {
+        source_dirs.iter().map(|p| p.as_path()).collect()
+    } else {
+        // The filter path doesn't overlap any PSR-4 dir — walk it
+        // directly (no vendor exclusion since the user explicitly
+        // asked for this path).
+        vec![abs_filter.as_deref().unwrap()]
+    };
+
     let mut files: Vec<PathBuf> = Vec::new();
 
-    for dir in &source_dirs {
+    for dir in &dirs_to_walk {
         // If a directory filter is active and doesn't overlap with
         // this source dir, skip entirely.
         if let Some(ref fp) = abs_filter
@@ -485,7 +505,13 @@ pub(crate) fn discover_user_files(
             continue;
         }
 
-        let skip_vendor = vendor_dirs.clone();
+        let skip_vendor = if filter_overlaps_psr4 {
+            vendor_dirs.clone()
+        } else {
+            // User explicitly targeted this path — don't skip vendor
+            // subdirectories within it.
+            Vec::new()
+        };
         let walker = WalkBuilder::new(dir)
             .git_ignore(true)
             .git_global(true)
@@ -495,6 +521,7 @@ pub(crate) fn discover_user_files(
             .ignore(true)
             .filter_entry(move |entry| {
                 if entry.file_type().is_some_and(|ft| ft.is_dir())
+                    && !skip_vendor.is_empty()
                     && let Ok(canonical) = entry.path().canonicalize()
                     && skip_vendor.iter().any(|v| canonical.starts_with(v))
                 {

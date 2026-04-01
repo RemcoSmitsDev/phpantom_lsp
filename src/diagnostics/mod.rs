@@ -121,13 +121,12 @@ use crate::util::ranges_overlap;
 
 impl Backend {
     /// Returns `true` if the URI should be skipped for diagnostics
-    /// (stub files and vendor files).
+    /// (stub files only).  Vendor files are not skipped because
+    /// diagnostics only run on files the user has open in the editor,
+    /// and users working in monorepos or with `--prefer-source`
+    /// packages legitimately edit vendor files.
     fn should_skip_diagnostics(&self, uri_str: &str) -> bool {
-        if uri_str.starts_with("phpantom-stub://") || uri_str.starts_with("phpantom-stub-fn://") {
-            return true;
-        }
-        let prefixes = self.vendor_uri_prefixes.lock();
-        prefixes.iter().any(|p| uri_str.starts_with(p.as_str()))
+        uri_str.starts_with("phpantom-stub://") || uri_str.starts_with("phpantom-stub-fn://")
     }
 
     /// Collect Phase 1 (fast) diagnostics: syntax errors, unused
@@ -1067,8 +1066,23 @@ impl Backend {
 /// 1. `unknown_class` trumps `unresolved_member_access`
 /// 2. `unknown_member` trumps `unresolved_member_access`
 /// 3. `scalar_member_access` trumps `unresolved_member_access`
-/// 4. Any precise (sub-line) diagnostic suppresses full-line diagnostics
-///    on the same line (PHPStan only reports line numbers).
+/// 4. Full-line diagnostics are suppressed when any precise (sub-line)
+///    diagnostic exists on the same line.
+///
+/// **Why rule 4 exists.** Diagnostics arrive from multiple independent
+/// sources (Mago parser, PHPStan, native PHPantom checks) that use
+/// completely different error codes and descriptions.  There is no
+/// reliable way to determine whether two diagnostics from different
+/// sources describe the same issue.  What we *can* determine is
+/// precision: tools like PHPStan only report a line number, so their
+/// diagnostics span the entire line (character 0 to a very large end
+/// character).  Native diagnostics and parser errors pinpoint the exact
+/// token.  A full-line underline obscures the precise location, making
+/// it harder for the developer to spot the problem.  Suppressing it
+/// unconditionally when any precise diagnostic exists on the same line
+/// keeps the pinpointed one visible without losing information.  Once
+/// the precise diagnostic is resolved, the full-line one reappears
+/// automatically (if the underlying issue persists).
 ///
 /// Each source's diagnostics are authoritative: if PHPStan reports five
 /// issues on a line, all five are shown; if PHPantom reports two issues
@@ -1127,27 +1141,14 @@ fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     // diagnostic.  A diagnostic is "precise" when it does not span the
     // entire line, i.e. it has a meaningful character range rather than
     // `0..MAX`.  External tools like PHPStan only report a line number,
-    // so their diagnostics stretch the full line.  When a native
-    // diagnostic already pinpoints the exact location on that line *and*
-    // reports a related issue, the full-line underline is redundant
-    // noise.  We only suppress a full-line diagnostic when a precise
-    // diagnostic on the same line has a related code.
-    let mut precise_diags_by_line: std::collections::HashMap<u32, Vec<String>> =
-        std::collections::HashMap::new();
+    // so their diagnostics stretch the full line.  A full-line underline
+    // obscures the precise location and makes it harder for the
+    // developer to spot the problem, so we suppress it unconditionally
+    // when any precise diagnostic exists on the same line.
+    let mut lines_with_precise: std::collections::HashSet<u32> = std::collections::HashSet::new();
     for d in diagnostics.iter() {
         if !is_full_line_range(&d.range) {
-            let code = d
-                .code
-                .as_ref()
-                .map(|c| match c {
-                    NumberOrString::String(s) => s.clone(),
-                    NumberOrString::Number(n) => n.to_string(),
-                })
-                .unwrap_or_default();
-            precise_diags_by_line
-                .entry(d.range.start.line)
-                .or_default()
-                .push(code);
+            lines_with_precise.insert(d.range.start.line);
         }
     }
 
@@ -1168,33 +1169,11 @@ fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
                 .any(|pr| ranges_overlap(pr, &d.range));
         }
 
-        // Suppress full-line diagnostics on lines where a more precise
-        // diagnostic already covers the same issue.  This avoids the
-        // visual clutter of a line-wide PHPStan underline next to a
-        // pinpointed native error.  The suppressed diagnostic will
-        // reappear once the user resolves the precise one.
-        //
-        // Only suppress when the precise diagnostic is *related* to
-        // the full-line one.  Unrelated diagnostics (e.g. PHPStan's
-        // `class.prefixed` alongside a native `unknown_class`) must
-        // both be shown so their respective code actions are available.
-        if is_full_line_range(&d.range) {
-            let full_line_code = d
-                .code
-                .as_ref()
-                .map(|c| match c {
-                    NumberOrString::String(s) => s.as_str(),
-                    _ => "",
-                })
-                .unwrap_or("");
-
-            if let Some(precise_codes) = precise_diags_by_line.get(&d.range.start.line)
-                && precise_codes
-                    .iter()
-                    .any(|pc| are_related_diagnostics(full_line_code, pc))
-            {
-                return false;
-            }
+        // Suppress full-line diagnostics when any precise diagnostic
+        // exists on the same line.  See the doc comment on this
+        // function for the rationale.
+        if is_full_line_range(&d.range) && lines_with_precise.contains(&d.range.start.line) {
+            return false;
         }
 
         true
@@ -1217,76 +1196,6 @@ fn deduplicate_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
 /// produce these ranges because they don't report column information.
 fn is_full_line_range(range: &Range) -> bool {
     range.start.line == range.end.line && range.start.character == 0 && range.end.character >= 1000
-}
-
-/// Check whether two diagnostic codes report related issues such that
-/// the full-line diagnostic is redundant when the precise one is
-/// present.
-///
-/// For example, PHPStan's `argument.type` and a native `unknown_class`
-/// on the same line are related (the class error causes the argument
-/// mismatch).  But PHPStan's `class.prefixed` and a native
-/// `unknown_class` are unrelated issues that need separate fixes.
-fn are_related_diagnostics(full_line_code: &str, precise_code: &str) -> bool {
-    // A native diagnostic that already covers the exact same concept
-    // makes the full-line PHPStan diagnostic redundant.
-    //
-    // Group 1: class existence / resolution errors.
-    const CLASS_RELATED: &[&str] = &["unknown_class", "class.notFound", "class.nameCase"];
-    // Group 2: member access errors.
-    const MEMBER_RELATED: &[&str] = &[
-        "unknown_member",
-        "unresolved_member_access",
-        "scalar_member_access",
-        "method.notFound",
-        "staticMethod.notFound",
-        "property.notFound",
-        "constant.notFound",
-        "access.property",
-        "access.staticProperty",
-    ];
-    // Group 3: function call errors.
-    const FUNCTION_RELATED: &[&str] = &["unknown_function", "function.notFound"];
-
-    // If both codes belong to the same group, they are related.
-    for group in &[CLASS_RELATED as &[&str], MEMBER_RELATED, FUNCTION_RELATED] {
-        let full_in = group.contains(&full_line_code);
-        let precise_in = group.contains(&precise_code);
-        if full_in && precise_in {
-            return true;
-        }
-    }
-
-    // PHPStan diagnostics that are consequences of a class/member not
-    // being found are redundant when the native diagnostic already
-    // flags the root cause.  For example, `argument.type` or
-    // `return.type` caused by an unknown class.
-    const CONSEQUENCE_CODES: &[&str] = &[
-        "argument.type",
-        "return.type",
-        "assign.propertyType",
-        "isset.property",
-        "deadCode.unreachable",
-    ];
-    const ROOT_CAUSE_CODES: &[&str] = &[
-        "unknown_class",
-        "unknown_member",
-        "unknown_function",
-        "scalar_member_access",
-        "unresolved_member_access",
-    ];
-
-    if CONSEQUENCE_CODES.contains(&full_line_code) && ROOT_CAUSE_CODES.contains(&precise_code) {
-        return true;
-    }
-
-    // Same code — always related (e.g. PHPStan `class.notFound` and
-    // native `class.notFound` on the same line).
-    if full_line_code == precise_code {
-        return true;
-    }
-
-    false
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1543,6 +1452,11 @@ mod tests {
 
     #[test]
     fn suppresses_full_line_phpstan_when_precise_diagnostic_on_same_line() {
+        // A full-line diagnostic (from a tool that only reports line
+        // numbers) is suppressed when any precise diagnostic exists on
+        // the same line, regardless of error codes.  The precise
+        // diagnostic pinpoints the exact location; the full-line
+        // underline just adds noise.
         let phpstan = Diagnostic {
             range: make_range(5, 0, 5, u32::MAX),
             severity: Some(DiagnosticSeverity::ERROR),
@@ -1563,6 +1477,35 @@ mod tests {
         deduplicate_diagnostics(&mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, precise.message);
+    }
+
+    #[test]
+    fn suppresses_full_line_regardless_of_code() {
+        // Suppression is unconditional — we cannot reliably determine
+        // whether diagnostics from different tools (Mago parser,
+        // PHPStan, native PHPantom) describe the same issue because
+        // they use completely different error codes and descriptions.
+        // Any precise diagnostic on the same line is enough.
+        let phpstan = Diagnostic {
+            range: make_range(5, 0, 5, u32::MAX),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("class.prefixed".to_string())),
+            source: Some("phpstan".to_string()),
+            message: "Class prefixed with vendor namespace.".to_string(),
+            ..Default::default()
+        };
+        let syntax_error = Diagnostic {
+            range: make_range(5, 3, 5, 10),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: Some(NumberOrString::String("syntax_error".to_string())),
+            source: Some("phpantom".to_string()),
+            message: "Syntax error: unexpected token `->`".to_string(),
+            ..Default::default()
+        };
+        let mut diags = vec![phpstan, syntax_error.clone()];
+        deduplicate_diagnostics(&mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, syntax_error.message);
     }
 
     #[test]
@@ -1668,7 +1611,8 @@ mod tests {
 
     #[test]
     fn keeps_multiple_phpstan_diagnostics_on_same_line() {
-        // If PHPStan reports five issues on a line, all five survive.
+        // If PHPStan reports five issues on a line and no precise
+        // diagnostic exists, all five survive.
         let make_phpstan = |code: &str, msg: &str| Diagnostic {
             range: make_range(10, 0, 10, u32::MAX),
             severity: Some(DiagnosticSeverity::ERROR),
