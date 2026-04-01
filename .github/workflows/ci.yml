@@ -89,8 +89,6 @@ jobs:
       - name: Ensure gh-pages branch exists
         run: |
           if ! git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
-            # Create an orphan gh-pages branch without leaving the current checkout.
-            # Build an empty tree and commit it, then push as the new branch.
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             empty_tree="$(git hash-object -t tree /dev/null)"
@@ -98,13 +96,15 @@ jobs:
             git push origin "$commit:refs/heads/gh-pages"
           fi
       - name: Run benchmarks
-        run: cargo bench --bench completion -- --output-format bencher | tee output.txt
+        run: cargo bench --bench completion -- --output-format bencher | tee raw_output.txt
+      - name: Convert to milliseconds
+        run: python3 benches/format_bench_output.py < raw_output.txt > output.json
       - name: Store benchmark result
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: PHPantom Benchmarks
-          tool: cargo
-          output-file-path: output.txt
+          tool: customSmallerIsBetter
+          output-file-path: output.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
           auto-push: true
@@ -131,16 +131,109 @@ jobs:
           fi
       - name: Run benchmarks
         if: steps.check-gh-pages.outputs.exists == 'true'
-        run: cargo bench --bench completion -- --output-format bencher | tee output.txt
+        run: cargo bench --bench completion -- --output-format bencher | tee raw_output.txt
+      - name: Convert to milliseconds
+        if: steps.check-gh-pages.outputs.exists == 'true'
+        run: python3 benches/format_bench_output.py < raw_output.txt > output.json
       - name: Compare against baseline
         if: steps.check-gh-pages.outputs.exists == 'true'
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: PHPantom Benchmarks
-          tool: cargo
-          output-file-path: output.txt
+          tool: customSmallerIsBetter
+          output-file-path: output.json
           gh-pages-branch: gh-pages
           benchmark-data-dir-path: dev/bench
+          auto-push: false
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          comment-on-alert: true
+          alert-threshold: "130%"
+          fail-on-alert: true
+          alert-comment-cc-users: "@AJenbo"
+
+  memory-benchmark:
+    name: Memory Benchmark
+    runs-on: ubuntu-latest
+    needs: benchmark
+    permissions:
+      contents: write
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+      - name: Configure mold
+        run: |
+          mkdir -p .cargo
+          echo '[target.x86_64-unknown-linux-gnu]' >> .cargo/config.toml
+          echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> .cargo/config.toml
+      - name: Build release binary
+        run: cargo build --release
+      - name: Measure memory usage
+        run: python3 benches/memory_usage.py --binary target/release/phpantom_lsp | tee memory_output.json
+      - name: Store memory benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: PHPantom Memory Usage
+          tool: customSmallerIsBetter
+          output-file-path: memory_output.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/memory
+          auto-push: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  memory-benchmark-pr:
+    name: Memory Benchmark (PR comparison)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: build
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          tools: composer
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+      - name: Configure mold
+        run: |
+          mkdir -p .cargo
+          echo '[target.x86_64-unknown-linux-gnu]' >> .cargo/config.toml
+          echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> .cargo/config.toml
+      - name: Build release binary
+        run: cargo build --release
+      - name: Check gh-pages branch exists
+        id: check-gh-pages
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ gh-pages branch does not exist yet — skipping memory benchmark comparison"
+          fi
+      - name: Measure memory usage
+        if: steps.check-gh-pages.outputs.exists == 'true'
+        run: python3 benches/memory_usage.py --binary target/release/phpantom_lsp | tee memory_output.json
+      - name: Compare against baseline
+        if: steps.check-gh-pages.outputs.exists == 'true'
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: PHPantom Memory Usage
+          tool: customSmallerIsBetter
+          output-file-path: memory_output.json
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/memory
           auto-push: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
           comment-on-alert: true
