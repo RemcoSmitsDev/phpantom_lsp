@@ -1,35 +1,5 @@
 # PHPantom — Bug Fixes
 
-#### B19. Nullable return type `TValue|null` drops `|null`
-
-| | |
-|---|---|
-| **Impact** | Low |
-| **Effort** | Low |
-
-When a method returns `TValue|null` (e.g. Eloquent `first()`), the
-resolved type drops the `|null` component. `AdminUser::first()`
-shows as `AdminUser` instead of `?AdminUser`.
-
-**Reproducer:**
-
-```php
-// Builder::first() has @return TValue|null
-$admin = AdminUser::first();
-// Hover shows: AdminUser
-// Expected:    ?AdminUser
-```
-
-**Where to fix:**
-- Likely in the template substitution or return type resolution
-  pipeline. When `TValue` is substituted with `AdminUser` in a
-  `TValue|null` union, the `|null` member may be discarded because
-  it does not resolve to a class.
-
-**Discovered in:** analyze-triage iteration 9 (DatabaseSeeder.php:57).
-
----
-
 #### B20. Loop-body assignments not visible to null narrowing for null-initialized variables
 
 | | |

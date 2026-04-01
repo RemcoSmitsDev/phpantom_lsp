@@ -11,8 +11,6 @@
 //! classification, nullable handling, self/static replacement) have
 //! been migrated to `PhpType` methods in `php_type.rs`.
 
-use crate::php_type::PhpType;
-
 /// All built-in type keywords offered in PHPDoc type completion contexts.
 ///
 /// Includes primitive PHP types (`int`, `string`, `array`, …), PHPDoc-only
@@ -259,55 +257,26 @@ fn consume_union_intersection_suffix(s: &str, pos: usize) -> usize {
     end
 }
 
-/// Clean a raw type string from a docblock, **preserving** generic
-/// parameters so that downstream resolution can apply generic
-/// substitution.
+/// Clean a raw type string from a docblock.
 ///
-/// Specifically this function:
-///   - Strips trailing punctuation (`.`, `,`) that could leak from
-///     docblock descriptions
-///   - Handles `TypeName|null` → `TypeName` (using `PhpType::parse` for
-///     structured union handling so that `Collection<int|string, User>|null`
-///     is handled correctly)
-///   - Preserves `?TypeName` (nullable shorthand is not stripped)
-///   - Preserves leading `\` (fully-qualified names)
+/// Strips trailing punctuation (`.`, `,`) that could leak from
+/// docblock descriptions.  Everything else is preserved as-is:
 ///
-/// Generic parameters like `<int, User>` are **not** stripped.  Use
-/// `PhpType::parse(s).base_name()` when you need just the unparameterised
-/// class name.
+///   - `Foo|null` stays `Foo|null` (nullable unions are kept)
+///   - `?Foo` stays `?Foo` (nullable shorthand is kept)
+///   - `\App\Models\User` stays `\App\Models\User` (FQN prefix kept)
+///   - `Collection<int, User>` stays `Collection<int, User>` (generics kept)
+///
+/// Use `PhpType::parse(s).base_name()` when you need just the
+/// unparameterised, non-nullable class name.
 pub fn clean_type(raw: &str) -> String {
     // Strip trailing punctuation that could leak from docblocks
     // (e.g. trailing `.` or `,` in descriptions).
     let s = raw.trim_end_matches(['.', ',']);
 
-    // Parse into a structured PhpType to handle union splitting.
-    // This replaces the manual `split_union_depth0` approach with
-    // mago-type-syntax, which correctly handles all nesting.
-    let parsed = PhpType::parse(s);
-
-    // Only strip `null` from explicit unions (`Foo|null`), NOT from
-    // the `?Foo` nullable shorthand — callers rely on `?Foo` being
-    // preserved for display and tag extraction.
-    if let PhpType::Union(ref members) = parsed {
-        let non_null: Vec<&PhpType> = members
-            .iter()
-            .filter(|m| !matches!(m, PhpType::Named(n) if n.eq_ignore_ascii_case("null")))
-            .collect();
-
-        match non_null.len() {
-            0 => {}
-            1 => return non_null[0].to_string(),
-            _ => {
-                return non_null
-                    .iter()
-                    .map(|m| m.to_string())
-                    .collect::<Vec<_>>()
-                    .join("|");
-            }
-        }
-    }
-
-    // For non-union types (including Nullable, Named, Generic, Raw,
-    // etc.), return the punctuation-stripped string as-is.
+    // Return the punctuation-stripped string as-is.  Nullable
+    // information (`Foo|null`, `?Foo`) is preserved so that
+    // downstream consumers (hover, type display, template
+    // substitution) see the full type including nullability.
     s.to_string()
 }

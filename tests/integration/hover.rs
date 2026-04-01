@@ -9161,3 +9161,137 @@ function test(string $role): void {
         text
     );
 }
+
+/// B19: When a method returns `TValue|null` and `TValue` is substituted with
+/// a concrete class, the `|null` component must be preserved in hover output.
+#[test]
+fn hover_nullable_template_return_type_preserves_null() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template TValue
+ */
+class Builder {
+    /** @return TValue|null */
+    public function first() {}
+
+    /** @return static */
+    public static function query(): static { return new static(); }
+}
+
+/**
+ * @extends Builder<AdminUser>
+ */
+class AdminUser extends Builder {
+    public function assignRole(string $role): void {}
+}
+
+function test(): void {
+    $builder = AdminUser::query();
+    $admin = $builder->first();
+    $admin;
+}
+"#;
+
+    // Hover on `$admin` at the standalone `$admin;` line (line 22)
+    let hover = hover_at(&backend, uri, content, 22, 5);
+    assert!(hover.is_some(), "should produce hover for $admin");
+    let text = hover_text(hover.as_ref().unwrap());
+    eprintln!("B19 hover text: {}", text);
+    assert!(
+        text.contains("AdminUser"),
+        "hover should resolve $admin to AdminUser, got: {}",
+        text
+    );
+    assert!(
+        text.contains("null"),
+        "hover should preserve |null from TValue|null after substitution, got: {}",
+        text
+    );
+}
+
+/// B19 variant: nullable shorthand `?TValue` should also preserve nullability.
+#[test]
+fn hover_nullable_shorthand_template_return_type_preserves_null() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+/**
+ * @template TValue
+ */
+class Builder2 {
+    /** @return ?TValue */
+    public function first() {}
+
+    /** @return static */
+    public static function query(): static { return new static(); }
+}
+
+/**
+ * @extends Builder2<AdminUser2>
+ */
+class AdminUser2 extends Builder2 {}
+
+function test2(): void {
+    $builder = AdminUser2::query();
+    $admin = $builder->first();
+    $admin;
+}
+"#;
+
+    // Hover on `$admin` at the standalone `$admin;` line (line 20)
+    let hover = hover_at(&backend, uri, content, 20, 5);
+    assert!(hover.is_some(), "should produce hover for $admin");
+    let text = hover_text(hover.as_ref().unwrap());
+    eprintln!("B19 ?TValue hover text: {}", text);
+    assert!(
+        text.contains("AdminUser2"),
+        "hover should resolve $admin to AdminUser2, got: {}",
+        text
+    );
+    assert!(
+        text.contains("?") || text.contains("null"),
+        "hover should preserve nullability from ?TValue after substitution, got: {}",
+        text
+    );
+}
+
+/// B19 variant: non-generic `@return Foo|null` should preserve `|null`.
+#[test]
+fn hover_non_generic_nullable_return_type_preserves_null() {
+    let backend = create_test_backend();
+    let uri = "file:///test.php";
+    let content = r#"<?php
+class Widget {
+    public function name(): string { return ''; }
+}
+
+class WidgetFactory {
+    /** @return Widget|null */
+    public function find(): ?Widget { return null; }
+}
+
+function test3(): void {
+    $factory = new WidgetFactory();
+    $w = $factory->find();
+    $w;
+}
+"#;
+
+    // Hover on `$w` at the standalone `$w;` line (line 13)
+    let hover = hover_at(&backend, uri, content, 13, 5);
+    assert!(hover.is_some(), "should produce hover for $w");
+    let text = hover_text(hover.as_ref().unwrap());
+    eprintln!("B19 non-generic hover text: {}", text);
+    assert!(
+        text.contains("Widget"),
+        "hover should resolve $w to Widget, got: {}",
+        text
+    );
+    assert!(
+        text.contains("null") || text.contains("?"),
+        "hover should preserve nullability from Widget|null, got: {}",
+        text
+    );
+}

@@ -1319,8 +1319,8 @@ async fn test_docblock_return_nullable_union() {
     assert_eq!(functions.len(), 1);
     assert_eq!(
         functions[0].return_type_str().as_deref(),
-        Some("Application"),
-        "@return Application|null should resolve to Application"
+        Some("Application|null"),
+        "@return Application|null should preserve the nullable union"
     );
 }
 

@@ -330,7 +330,7 @@ fn return_type_none_when_missing() {
 #[test]
 fn return_type_nullable_union() {
     let doc = "/** @return Application|null */";
-    assert_eq!(extract_return_type(doc), Some("Application".into()));
+    assert_eq!(extract_return_type(doc), Some("Application|null".into()));
 }
 
 #[test]
@@ -890,10 +890,10 @@ fn clean_type_nested_generic() {
 
 #[test]
 fn clean_type_generic_with_nullable_union() {
-    // `Collection<int, User>|null` → strip null, keep generics
+    // `Collection<int, User>|null` → preserve null, keep generics
     assert_eq!(
         clean_type("Collection<int, User>|null"),
-        "Collection<int, User>"
+        "Collection<int, User>|null"
     );
 }
 
@@ -902,13 +902,13 @@ fn clean_type_generic_union_inside_angle_brackets() {
     // `|` inside `<…>` must not be treated as a union separator
     assert_eq!(
         clean_type("Collection<int|string, User>|null"),
-        "Collection<int|string, User>"
+        "Collection<int|string, User>|null"
     );
 }
 
 #[test]
 fn clean_nullable_union() {
-    assert_eq!(clean_type("Foo|null"), "Foo");
+    assert_eq!(clean_type("Foo|null"), "Foo|null");
 }
 
 #[test]
