@@ -24,6 +24,11 @@ within the same impact tier.
 | #   | Item                                                                                                                                       | Impact | Effort     |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ---------- |
 | T18 | [Method-level template parameter resolution at call sites](todo/type-inference.md#t18-method-level-template-parameter-resolution-at-call-sites) | Medium | Medium     |
+| B18 | [Assignment inside `if` condition does not resolve variable in body](todo/bugs.md#b18-assignment-inside-if-condition-does-not-resolve-variable-in-body) | Medium | Medium     |
+| B19 | [Nullable return type `TValue\|null` drops `\|null`](todo/bugs.md#b19-nullable-return-type-tvaluenull-drops-null) | Low | Low |
+| B20 | [Loop-body assignments not visible to null narrowing](todo/bugs.md#b20-loop-body-assignments-not-visible-to-null-narrowing-for-null-initialized-variables) | Low | Medium |
+| B21 | [Builder `__call` return type drops chain type for dynamic `where{Column}` calls](todo/bugs.md#b21-builder-__call-return-type-drops-chain-type-for-dynamic-wherecolumn-calls) | Medium | Medium     |
+| L12 | [`App::make` / `App::makeWith` class-string return type dispatch](todo/laravel.md#l12-appmake--appmakewith-class-string-return-type-dispatch) | Medium | Low        |
 |     | **Release 0.7.0**                                                                                                                          |        |            |
 
 ## Sprint 5 — Polish for office adoption
@@ -103,9 +108,6 @@ unlikely to move the needle for most users.
 | D6   | [Unreachable code diagnostic](todo/diagnostics.md#d6-unreachable-code-diagnostic)                                                                                           | Low-Medium  | Low            |
 | D10  | PHPMD diagnostic proxy                                                                                                                                                      | Low         | Medium         |
 |      | **[Bug Fixes](todo/bugs.md)**                                                                                                                                               |             |                |
-| B18  | [Assignment inside `if` condition does not resolve variable in body](todo/bugs.md#b18-assignment-inside-if-condition-does-not-resolve-variable-in-body)                     | Medium      | Medium         |
-| B19  | [Nullable return type `TValue\|null` drops `\|null`](todo/bugs.md#b19-nullable-return-type-tvaluenull-drops-null)                                                           | Low         | Low            |
-| B20  | [Loop-body assignments not visible to null narrowing](todo/bugs.md#b20-loop-body-assignments-not-visible-to-null-narrowing-for-null-initialized-variables)                  | Low         | Medium         |
 |      | **[Code Actions](todo/actions.md)**                                                                                                                                         |             |                |
 | A8   | [Update docblock to match signature](todo/actions.md#a8-update-docblock-to-match-signature)                                                                                 | Medium      | Medium         |
 | A6   | [Inline function/method](todo/actions.md#a6-inline-functionmethod)                                                                                                          | Medium      | High           |

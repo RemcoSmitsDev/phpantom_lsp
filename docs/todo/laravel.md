@@ -463,3 +463,50 @@ accessors, so in most cases the accessor method itself already produces
 the virtual property. Parsing `$appends` would only help when the
 accessor is defined in an unloaded parent class.
 
+#### L12. `App::make` / `App::makeWith` class-string return type dispatch
+
+**Impact: Medium · Effort: Low**
+
+`App::make(Foo::class)` and `App::makeWith(Foo::class, [...])` are
+the standard ways to resolve a service from Laravel's container.
+The first argument is `class-string<T>`, and the return type should
+be `T`. PHPantom currently resolves the return as `mixed`, so any
+method call on the result fails with "subject type could not be
+resolved".
+
+**Reproducer:**
+
+```php
+$connection = App::makeWith(Connection::class, ['token' => $token]);
+$connection->request(...);
+// diagnostic: "Cannot resolve type of '$connection'"
+
+$service = App::make(LinkCampaignService::class);
+$service->isAvailable();
+// diagnostic: "Cannot resolve type of '$service'"
+```
+
+**Expected:** When the first argument to `App::make`, `App::makeWith`,
+`app()`, or `resolve()` is a `Foo::class` literal, the return type
+should be `Foo`.
+
+**Scope:** This only needs to handle the `::class` literal form. String
+aliases like `app('cache')` require container binding knowledge and
+are out of scope.
+
+**Where to fix:**
+- The `Application::make` stub declares `@template TClass` with
+  `@param class-string<TClass> $abstract` and `@return TClass`. This
+  should already work through template binding if PHPantom resolves
+  `class-string<Foo>` literals to bind `TClass = Foo`. The gap is
+  likely that `Foo::class` as an argument does not bind the template
+  parameter. Check `resolve_method_level_templates` in
+  `call_resolution.rs`.
+- For `app(Foo::class)`, the global `app()` function has a similar
+  `class-string<TClass>` signature in stubs.
+
+**Impact in shared codebase:** ~2 diagnostics
+(`ChargebackEventListener:34`, `LinkCampaign:149`).
+
+**Discovered in:** analyze-triage iteration 10.
+
