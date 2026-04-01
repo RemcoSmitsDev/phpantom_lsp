@@ -228,9 +228,14 @@ pub(in crate::completion) fn resolve_array_func_raw_type(
 /// (e.g. `"User"`) for the output.
 ///
 /// Used by `resolve_rhs_expression` so that `$item = array_pop($users)`
-/// resolves `$item` to `User`.  This handles both element-extracting
-/// functions (array_pop, current, etc.) and `array_map` (via callback
-/// return type).
+/// resolves `$item` to `User`.  This only covers true element-extracting
+/// functions (array_pop, current, etc.) that return a single element.
+///
+/// Array-producing functions like `array_map` and `iterator_to_array`
+/// are handled exclusively by [`resolve_array_func_raw_type`] which
+/// preserves the container type (e.g. `list<User>`).  Returning the
+/// element type here would lose the array wrapper and break downstream
+/// consumers that need to walk bracket segments (e.g. `$result[0]->`).
 pub(in crate::completion) fn resolve_array_func_element_type(
     func_name: &str,
     args: &ArgumentList<'_>,
@@ -243,20 +248,6 @@ pub(in crate::completion) fn resolve_array_func_element_type(
     {
         let arr_expr = super::resolution::first_arg_expr(args)?;
         let raw = super::resolution::resolve_arg_raw_type(arr_expr, ctx)?;
-        return crate::php_type::PhpType::parse(&raw)
-            .extract_value_type(true)
-            .map(|t| t.to_string());
-    }
-
-    // array_map: callback return type is the element type.
-    if func_name.eq_ignore_ascii_case("array_map") {
-        return extract_array_map_element_type(args, ctx);
-    }
-
-    // iterator_to_array: the element type is the iterator's value type.
-    if func_name.eq_ignore_ascii_case("iterator_to_array") {
-        let iter_expr = super::resolution::first_arg_expr(args)?;
-        let raw = super::resolution::resolve_arg_raw_type(iter_expr, ctx)?;
         return crate::php_type::PhpType::parse(&raw)
             .extract_value_type(true)
             .map(|t| t.to_string());

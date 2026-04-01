@@ -1839,17 +1839,67 @@ class Collection {
     /** @return Item[] */
     public static function all(): array { return []; }
 }
-class Consumer {
-    public function run(): void {
-        Collection::all()[0]->getLabel();
-    }
+
+function test(): void {
+    Collection::all()[0]->getLabel();
 }
 "#;
-    let diags = unknown_member_diagnostics(&backend, uri, text);
+    backend.update_ast(uri, text);
+    let mut diags = Vec::new();
+    backend.collect_unknown_member_diagnostics(uri, text, &mut diags);
     assert!(
         !diags.iter().any(|d| d.message.contains("getLabel")),
         "No diagnostic expected for getLabel on Item resolved via static method-return array access, got: {:?}",
         diags
+    );
+}
+
+/// `$app['config']->set(...)` where `Application implements ArrayAccess`
+/// without concrete generic annotations should NOT resolve the bracket
+/// access to `Application` itself.  With `unresolved-member-access`
+/// enabled, it should emit a diagnostic saying the type could not be
+/// resolved.
+#[test]
+fn array_access_on_array_access_class_emits_unresolved_diagnostic() {
+    let backend = create_test_backend();
+    {
+        let mut cfg = backend.config();
+        cfg.diagnostics.unresolved_member_access = Some(true);
+        backend.set_config(cfg);
+    }
+    let uri = "file:///test.php";
+    let text = r#"<?php
+class Application implements \ArrayAccess {
+    public function offsetExists(mixed $offset): bool { return true; }
+    public function offsetGet(mixed $offset): mixed { return null; }
+    public function offsetSet(mixed $offset, mixed $value): void {}
+    public function offsetUnset(mixed $offset): void {}
+
+    public function useStoragePath(string $path): void {}
+}
+
+function test(Application $app): void {
+    $app->useStoragePath('/tmp');
+    $app['config']->set('logging.default', 'stderr');
+}
+"#;
+    let diags = unknown_member_diagnostics(&backend, uri, text);
+    // $app->useStoragePath() should NOT be flagged (valid method).
+    assert!(
+        !diags.iter().any(|d| d.message.contains("useStoragePath")),
+        "useStoragePath is a valid method on Application, got: {diags:?}",
+    );
+    // $app['config']->set() should NOT say 'set' is missing on Application.
+    assert!(
+        !diags.iter().any(|d| d.message.contains("Application")),
+        "should not report 'set' as missing on Application, got: {diags:?}",
+    );
+    // $app['config']->set() SHOULD flag that the subject type is unresolved.
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("set") && d.message.contains("could not be resolved")),
+        "expected unresolved-member-access diagnostic for $app['config']->set(), got: {diags:?}",
     );
 }
 

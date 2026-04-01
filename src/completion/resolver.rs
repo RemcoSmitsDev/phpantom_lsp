@@ -818,12 +818,11 @@ pub(crate) fn resolve_target_classes_expr(
             ) {
                 return resolved.into_iter().map(Arc::new).collect();
             }
-            // Fall through to variable resolution if the base is a bare variable
-            if let SubjectExpr::Variable(_) = **base {
-                resolve_variable_fallback(&base_var, access_kind, ctx)
-            } else {
-                vec![]
-            }
+            // Segment walk failed — the base type does not have
+            // array-shape, generic, or iterable annotations that
+            // cover bracket access.  Return empty: `$var['key']` is
+            // never the same type as `$var`.
+            vec![]
         }
 
         // ── Bare variable ───────────────────────────────────────

@@ -897,6 +897,14 @@ impl Backend {
         self.config.lock().clone()
     }
 
+    /// Replace the current configuration.
+    ///
+    /// Used by integration tests to enable opt-in diagnostics like
+    /// `unresolved-member-access` without needing a `.phpantom.toml` file.
+    pub fn set_config(&self, config: config::Config) {
+        *self.config.lock() = config;
+    }
+
     /// Set the PHP version (used by integration tests and during
     /// server initialization after reading `composer.json`).
     ///

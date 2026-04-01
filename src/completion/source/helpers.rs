@@ -428,12 +428,45 @@ fn walk_array_segments_and_resolve(
     let mut current = PhpType::parse(&current_str);
 
     for seg in segments {
-        current = match seg {
+        // Try pure-type extraction first (array shapes, generics).
+        let extracted = match seg {
             BracketSegment::StringKey(key) => current
                 .shape_value_type(key)
                 .or_else(|| current.extract_value_type(true))
-                .cloned()?,
-            BracketSegment::ElementAccess => current.extract_value_type(true)?.clone(),
+                .cloned(),
+            BracketSegment::ElementAccess => current.extract_value_type(true).cloned(),
+        };
+
+        current = if let Some(t) = extracted {
+            t
+        } else {
+            // Fallback: when the current type is a plain class name (e.g.
+            // `Application`, `OpeningHours`), resolve the class and check
+            // its iterable generics (`@extends`, `@implements`) for the
+            // element type.  This handles bracket access on classes that
+            // implement `ArrayAccess` with generic type parameters.
+            let type_str = current.to_string();
+            let class_element = crate::completion::type_resolution::type_hint_to_classes(
+                &type_str,
+                current_class_name,
+                all_classes,
+                class_loader,
+            )
+            .into_iter()
+            .find_map(|cls| {
+                let merged =
+                    crate::virtual_members::resolve_class_fully(&cls, class_loader);
+                crate::completion::variable::foreach_resolution::extract_iterable_element_type_from_class(
+                    &merged,
+                    class_loader,
+                )
+            });
+
+            if let Some(element) = class_element {
+                PhpType::parse(&element)
+            } else {
+                return None;
+            }
         };
 
         // After each segment, the resulting type might itself be an

@@ -170,12 +170,10 @@ enum SubjectOutcome {
     Scalar(String),
     /// Subject resolved to a class name that couldn't be loaded.
     UnresolvableClass(String),
-    /// Subject is a chain or call expression whose type couldn't be
-    /// resolved.
-    UnresolvableChain,
-    /// Subject is a bare variable with no type information at all.
-    /// No diagnostic should be emitted (the opt-in
-    /// `unresolved-member-access` diagnostic covers this case).
+    /// Subject type could not be resolved — no class information
+    /// available.  The opt-in `unresolved-member-access` diagnostic
+    /// covers this case regardless of whether the subject is a bare
+    /// variable, a chain, an array access, or a function call.
     Untyped,
 }
 
@@ -261,15 +259,6 @@ fn resolve_subject_outcome(
         resolve_unresolvable_class_subject(&expr, rctx, class_loader, function_loader)
     {
         return SubjectOutcome::UnresolvableClass(unresolved);
-    }
-
-    // Check if the subject is a chain or call expression.
-    let is_chain = matches!(
-        expr,
-        SubjectExpr::PropertyChain { .. } | SubjectExpr::CallExpr { .. }
-    );
-    if is_chain {
-        return SubjectOutcome::UnresolvableChain;
     }
 
     SubjectOutcome::Untyped
@@ -548,65 +537,39 @@ impl Backend {
                     ));
                 }
 
-                SubjectOutcome::UnresolvableChain => {
-                    let range = match offset_range_to_lsp_range(
-                        content,
-                        span.start as usize,
-                        span.end as usize,
-                    ) {
-                        Some(r) => r,
-                        None => continue,
-                    };
-                    let kind_label = if is_method_call { "method" } else { "property" };
-                    let message = format!(
-                        "Cannot verify {} '{}' — subject type could not be resolved",
-                        kind_label, member_name,
-                    );
-                    out.push(make_diagnostic(
-                        range,
-                        DiagnosticSeverity::WARNING,
-                        UNKNOWN_MEMBER_CODE,
-                        message,
-                    ));
-                    broken_chain_prefixes.push(broken_chain_prefix(
-                        subject_text,
-                        member_name,
-                        is_static,
-                        is_method_call,
-                    ));
-                }
-
                 SubjectOutcome::Untyped => {
                     // When the opt-in `unresolved-member-access` diagnostic
-                    // is enabled, emit it here instead of in a separate
-                    // collector pass.  This avoids a second full walk of
-                    // the same symbol spans with duplicate type resolution.
+                    // is enabled, report every member access where the
+                    // subject type could not be resolved — regardless of
+                    // whether the subject is a bare variable, a chain, an
+                    // array access, or a function call result.
                     if self.config().diagnostics.unresolved_member_access_enabled() {
-                        // Skip call-expression subjects — the failure is
-                        // usually because the symbol map's subject_text
-                        // doesn't preserve full argument text, not because
-                        // the user is missing a type annotation.
-                        if !subject_text.is_empty() && !subject_text.contains('(') {
-                            let range = match offset_range_to_lsp_range(
-                                content,
-                                span.start as usize,
-                                span.end as usize,
-                            ) {
-                                Some(r) => r,
-                                None => continue,
-                            };
-                            let subject_display = subject_text.trim();
-                            let message = format!(
-                                "Cannot resolve type of '{}'. Add a type annotation or PHPDoc tag to enable full IDE support.",
-                                subject_display,
-                            );
-                            out.push(make_diagnostic(
-                                range,
-                                DiagnosticSeverity::HINT,
-                                UNRESOLVED_MEMBER_ACCESS_CODE,
-                                message,
-                            ));
-                        }
+                        let range = match offset_range_to_lsp_range(
+                            content,
+                            span.start as usize,
+                            span.end as usize,
+                        ) {
+                            Some(r) => r,
+                            None => continue,
+                        };
+                        let subject_display = subject_text.trim();
+                        let kind_label = if is_method_call { "method" } else { "property" };
+                        let message = format!(
+                            "Cannot verify {} '{}' — type of '{}' could not be resolved",
+                            kind_label, member_name, subject_display,
+                        );
+                        out.push(make_diagnostic(
+                            range,
+                            DiagnosticSeverity::HINT,
+                            UNRESOLVED_MEMBER_ACCESS_CODE,
+                            message,
+                        ));
+                        broken_chain_prefixes.push(broken_chain_prefix(
+                            subject_text,
+                            member_name,
+                            is_static,
+                            is_method_call,
+                        ));
                     }
                 }
 
@@ -4966,6 +4929,100 @@ function test(): void {
         assert!(
             bad.is_empty(),
             "should resolve $conn from if-condition assignment with !== null, got: {bad:?}"
+        );
+    }
+
+    /// Bracket access on a class implementing `ArrayAccess` without
+    /// concrete generic annotations should NOT resolve to the container
+    /// class itself.  `$app['config']` is not `Application`.
+    /// The diagnostic should say the subject type could not be resolved,
+    /// not that the member is missing on `Application`.
+    #[test]
+    fn flags_member_on_array_access_class_without_generics() {
+        let php = r#"<?php
+class Application implements \ArrayAccess {
+    public function offsetExists(mixed $offset): bool { return true; }
+    public function offsetGet(mixed $offset): mixed { return null; }
+    public function offsetSet(mixed $offset, mixed $value): void {}
+    public function offsetUnset(mixed $offset): void {}
+
+    public function useStoragePath(string $path): void {}
+}
+
+function test(Application $app): void {
+    $app['config']->set('logging.default', 'stderr');
+}
+"#;
+        let backend = Backend::new_test();
+        // Enable unresolved-member-access so the Untyped outcome emits.
+        backend.config.lock().diagnostics.unresolved_member_access = Some(true);
+        let diags = collect(&backend, "file:///test.php", php);
+        // `$app['config']` returns `mixed` (no concrete generics), so
+        // we cannot know the type — the diagnostic should say the
+        // subject could not be resolved, NOT that 'set' is missing on
+        // `Application`.
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Application")),
+            "should not report 'set' as missing on Application — bracket access returns mixed, got: {diags:?}",
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("could not be resolved")),
+            "expected 'could not be resolved' diagnostic for unresolvable bracket access, got: {diags:?}",
+        );
+    }
+
+    /// Same as above but with inheritance: `Application2 extends
+    /// Container2 implements ArrayAccess`.  The `ArrayAccess` interface
+    /// is on the parent class, not the child.
+    #[test]
+    fn flags_member_on_array_access_subclass_without_generics() {
+        let php = r#"<?php
+namespace Tests;
+
+use ArrayAccess;
+
+class Container2 implements ArrayAccess
+{
+    public function offsetExists($offset): bool
+    {
+        return false;
+    }
+
+    public function offsetGet($offset): mixed
+    {
+        return '';
+    }
+
+    public function offsetSet($offset, $value): void
+    {
+    }
+
+    public function offsetUnset($offset): void
+    {
+    }
+}
+
+class Application2 extends Container2
+{
+}
+
+class TestCase
+{
+    public function defineEnvironment(): void
+    {
+        $test4 = new Application2();
+        $test4['config']->set('logging.channels.stack.channels', ['stderr']);
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        backend.config.lock().diagnostics.unresolved_member_access = Some(true);
+        let diags = collect(&backend, "file:///test.php", php);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("Application2")),
+            "should not report 'set' as missing on Application2 — bracket access returns mixed, got: {diags:?}",
         );
     }
 
