@@ -24,7 +24,6 @@ within the same impact tier.
 | #   | Item                                                                                                                                       | Impact | Effort     |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------ | ---------- |
 | T18 | [Method-level template parameter resolution at call sites](todo/type-inference.md#t18-method-level-template-parameter-resolution-at-call-sites) | Medium | Medium     |
-| B21 | [Builder `__call` return type drops chain type for dynamic `where{Column}` calls](todo/bugs.md#b21-builder-__call-return-type-drops-chain-type-for-dynamic-wherecolumn-calls) | Medium | Medium     |
 | H17 | [`missingType.iterableValue` — add `@return` with inferred element type](todo/phpstan-actions.md#h17-missingtype-iterablevalue-return-type--add-return-with-iterable-type) | Medium | High       |
 | H10 | [`return.unusedType` — remove unused type from return union](todo/phpstan-actions.md#h10-returnunusedtype--remove-unused-type-from-return-union) | Medium | Medium     |
 | L12 | [`App::make` / `App::makeWith` class-string return type dispatch](todo/laravel.md#l12-appmake--appmakewith-class-string-return-type-dispatch) | Medium | Low        |

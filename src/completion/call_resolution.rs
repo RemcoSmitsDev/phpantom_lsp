@@ -61,6 +61,11 @@ pub(super) struct MethodReturnCtx<'a> {
     /// appears), as opposed to the class that owns the method being called.
     /// Used to resolve `self`/`static`/`parent` in conditional return types.
     pub calling_class_name: Option<&'a str>,
+    /// Whether the call is a static method call (`Class::method()`).
+    ///
+    /// When `true`, the magic-method fallback checks `__callStatic`
+    /// instead of `__call`.
+    pub is_static: bool,
 }
 
 /// Build a [`VarClassStringResolver`] closure from a [`ResolutionCtx`].
@@ -409,6 +414,7 @@ impl Backend {
                         var_resolver: Some(&var_resolver),
                         cache: ctx.resolved_class_cache,
                         calling_class_name: ctx.current_class.map(|c| c.name.as_str()),
+                        is_static: false,
                     };
                     results.extend(Self::resolve_method_return_types_with_args(
                         owner,
@@ -444,6 +450,7 @@ impl Backend {
                         var_resolver: Some(&var_resolver),
                         cache: ctx.resolved_class_cache,
                         calling_class_name: ctx.current_class.map(|c| c.name.as_str()),
+                        is_static: true,
                     };
                     return Self::resolve_method_return_types_with_args(
                         owner,
@@ -841,6 +848,15 @@ impl Backend {
             vec![]
         };
 
+        // Determine which magic method handles unknown calls for this
+        // access kind: `__call` for instance calls, `__callStatic` for
+        // static calls.
+        let magic_name = if mr_ctx.is_static {
+            "__callStatic"
+        } else {
+            "__call"
+        };
+
         // First check the class itself
         if let Some(method) = class_info.methods.iter().find(|m| m.name == method_name) {
             let result = resolve_method(method);
@@ -859,13 +875,263 @@ impl Backend {
             class_loader,
             mr_ctx.cache,
         );
+
+        // Look up the magic method once; used for both validation and
+        // fallback below.
+        let magic_method = merged
+            .methods
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(magic_name));
+
         if let Some(method) = merged.methods.iter().find(|m| m.name == method_name) {
-            return resolve_method(method);
+            if method.is_virtual {
+                // ── Virtual method (from @method, @mixin, etc.) ─────
+                // At runtime these are dispatched through __call /
+                // __callStatic.  Validate the virtual method's return
+                // type against the magic method's native return type
+                // the same way we validate a concrete implementation
+                // against an interface: the virtual type can only
+                // *narrow* the native constraint, not contradict it.
+                if let Some(ref virtual_ret) = method.return_type {
+                    if let Some(magic) = magic_method {
+                        if let Some(ref native_ret) = magic.native_return_type {
+                            // The magic method has a native PHP type
+                            // hint.  Check whether the virtual
+                            // method's declared type is a valid
+                            // narrowing of that native constraint.
+                            if is_valid_virtual_narrowing(
+                                virtual_ret,
+                                native_ret,
+                                class_info,
+                                all_classes,
+                                class_loader,
+                            ) {
+                                // Valid narrowing — trust the virtual
+                                // method's declared type.
+                                let result = resolve_method(method);
+                                if !result.is_empty() {
+                                    return result;
+                                }
+                            }
+                            // Invalid narrowing (lie) or the virtual
+                            // type failed to resolve.  Fall through
+                            // to the magic-method fallback below,
+                            // which will use __call's own return type.
+                        } else {
+                            // Magic method has no native type hint —
+                            // trust the virtual method's declared type.
+                            let result = resolve_method(method);
+                            if !result.is_empty() {
+                                return result;
+                            }
+                        }
+                    } else {
+                        // No magic method at all — trust the virtual
+                        // method's declared type unconditionally.
+                        let result = resolve_method(method);
+                        if !result.is_empty() {
+                            return result;
+                        }
+                    }
+                }
+                // Virtual method with no return type (or whose type
+                // was rejected by the validation above).  Fall through
+                // to the magic-method fallback below.
+            } else {
+                // ── Real method ─────────────────────────────────────
+                // Real methods are invoked directly at runtime, never
+                // through __call.  Use whatever resolve_method
+                // returns, even if empty.
+                return resolve_method(method);
+            }
+        }
+
+        // ── Magic-method fallback ───────────────────────────────
+        // Either the method was not found at all, or it was a virtual
+        // method whose return type was absent or rejected by the
+        // native-type validation.  Use the magic method's effective
+        // return type (docblock-overridden if available, otherwise
+        // native).  When the magic method returns `$this`/`static`/
+        // `self`, this preserves the chain type (e.g. Builder<User>
+        // stays Builder<User> through dynamic `where{Column}` calls).
+        // When it returns `mixed`, no classes resolve and the caller
+        // gets an empty vec — the same as before this fallback.
+        if let Some(magic) = magic_method {
+            let result = resolve_method(magic);
+            if !result.is_empty() {
+                return result;
+            }
         }
 
         vec![]
     }
+}
 
+// ─── Virtual method narrowing ───────────────────────────────────────────────
+
+/// Check whether a virtual method's return type is a valid narrowing of a
+/// magic method's (`__call` / `__callStatic`) native return type.
+///
+/// At runtime, calls to virtual methods (from `@method` tags, `@mixin`
+/// members, etc.) are dispatched through the magic method.  The magic
+/// method's native PHP type hint is the runtime truth: the virtual
+/// method's declared type can only *narrow* it (provide a more specific
+/// subtype), not contradict it.
+///
+/// Returns `true` when the virtual type should be trusted, `false` when
+/// it should be rejected in favour of the magic method's type.
+///
+/// # Examples
+///
+/// | `__call` native | `@method` type | Result |
+/// |-----------------|----------------|--------|
+/// | `mixed`         | `Frog`         | ✓ (anything narrows mixed) |
+/// | `object`        | `Frog`         | ✓ (any class narrows object) |
+/// | `static`        | `ChildClass`   | ✓ if ChildClass extends the owner |
+/// | `Animal`        | `Dog`          | ✓ if Dog extends Animal |
+/// | `Cement`        | `Frog`         | ✗ (unrelated classes) |
+/// | `static`        | `Frog`         | ✗ if Frog does not extend the owner |
+/// | `int`           | `string`       | ✗ (incompatible scalars) |
+fn is_valid_virtual_narrowing(
+    virtual_type: &PhpType,
+    native_type: &PhpType,
+    owner_class: &ClassInfo,
+    all_classes: &[Arc<ClassInfo>],
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> bool {
+    let native_str = native_type.to_string();
+    let native_lower = native_str.to_ascii_lowercase();
+
+    // `mixed` and `void` impose no constraint — any type is valid.
+    if matches!(native_lower.as_str(), "mixed" | "void") {
+        return true;
+    }
+
+    // `object` — any class type is a valid narrowing.
+    if native_lower == "object" {
+        // Only reject if the virtual type is a non-object scalar.
+        return !virtual_type.is_scalar();
+    }
+
+    // Self-like types (`static`, `self`, `$this`) resolve to the owner
+    // class at runtime.  The virtual type must be the owner class itself
+    // or a subclass of it.
+    if is_self_like_type(native_type) {
+        return is_type_subclass_of(virtual_type, &owner_class.name, all_classes, class_loader);
+    }
+
+    // Both are concrete types.  For scalar-to-scalar, delegate to the
+    // existing `should_override_type` check which handles compatible
+    // refinements (e.g. `string` → `class-string<T>`).
+    if native_type.is_scalar() {
+        let virtual_str = virtual_type.to_string();
+        return crate::docblock::should_override_type(&virtual_str, &native_str);
+    }
+
+    // Native is a class type — the virtual type must be the same class
+    // or a subclass.
+    is_type_subclass_of(virtual_type, &native_str, all_classes, class_loader)
+}
+
+/// Check whether `candidate_type` is the same class as `ancestor_name` or
+/// a subclass of it, by walking the parent chain.
+///
+/// Returns `true` when:
+/// - The candidate type's base name matches `ancestor_name` (case-insensitive).
+/// - The candidate class's parent chain includes `ancestor_name`.
+/// - The candidate class cannot be resolved (benefit of the doubt).
+fn is_type_subclass_of(
+    candidate_type: &PhpType,
+    ancestor_name: &str,
+    all_classes: &[Arc<ClassInfo>],
+    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+) -> bool {
+    let candidate_str = candidate_type.to_string();
+
+    // Strip leading backslash and generic parameters for name comparison.
+    let candidate_base = candidate_str
+        .strip_prefix('\\')
+        .unwrap_or(&candidate_str)
+        .split('<')
+        .next()
+        .unwrap_or(&candidate_str);
+    let ancestor_base = ancestor_name
+        .strip_prefix('\\')
+        .unwrap_or(ancestor_name)
+        .split('<')
+        .next()
+        .unwrap_or(ancestor_name);
+
+    // Same class (case-insensitive, ignoring namespace prefix differences).
+    if candidate_base.eq_ignore_ascii_case(ancestor_base) {
+        return true;
+    }
+    // Also check short-name match (e.g. "Dog" vs "App\\Models\\Dog").
+    let candidate_short = crate::util::short_name(candidate_base);
+    let ancestor_short = crate::util::short_name(ancestor_base);
+    if candidate_short.eq_ignore_ascii_case(ancestor_short) {
+        return true;
+    }
+
+    // Try to load the candidate class and walk its parent chain.
+    let candidate_class = find_class_by_name(all_classes, candidate_base)
+        .cloned()
+        .or_else(|| class_loader(candidate_base));
+
+    let Some(cls) = candidate_class else {
+        // Cannot resolve the candidate class — give benefit of the
+        // doubt and trust the @method tag.
+        return true;
+    };
+
+    // Walk the parent chain up to a reasonable depth.
+    let mut current_parent = cls.parent_class.clone();
+    let mut depth = 0u32;
+    while let Some(ref parent_name) = current_parent {
+        depth += 1;
+        if depth > 20 {
+            break;
+        }
+        let parent_base = parent_name
+            .strip_prefix('\\')
+            .unwrap_or(parent_name)
+            .split('<')
+            .next()
+            .unwrap_or(parent_name);
+        if parent_base.eq_ignore_ascii_case(ancestor_base)
+            || crate::util::short_name(parent_base).eq_ignore_ascii_case(ancestor_short)
+        {
+            return true;
+        }
+        // Also check implemented interfaces on the parent.
+        let parent_class = find_class_by_name(all_classes, parent_base)
+            .cloned()
+            .or_else(|| class_loader(parent_base));
+        match parent_class {
+            Some(p) => current_parent = p.parent_class.clone(),
+            None => break,
+        }
+    }
+
+    // Also check the candidate's own implemented interfaces.
+    for iface in &cls.interfaces {
+        let iface_base = iface
+            .strip_prefix('\\')
+            .unwrap_or(iface)
+            .split('<')
+            .next()
+            .unwrap_or(iface);
+        if iface_base.eq_ignore_ascii_case(ancestor_base)
+            || crate::util::short_name(iface_base).eq_ignore_ascii_case(ancestor_short)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+impl Backend {
     /// Build a template substitution map for a method-level `@template` call.
     ///
     /// Finds the method on the class (or inherited), checks for template

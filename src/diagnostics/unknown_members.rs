@@ -82,6 +82,23 @@ pub(crate) const SCALAR_MEMBER_ACCESS_CODE: &str = "scalar_member_access";
 
 // ─── Subject resolution cache ───────────────────────────────────────────────
 
+/// Result of checking whether a member exists on resolved classes.
+///
+/// Returned by [`Backend::check_member_on_resolved_classes`] to tell
+/// the caller whether a diagnostic was emitted and whether the chain
+/// should be considered broken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberCheckResult {
+    /// No issue — member exists or access is fully suppressed (e.g. `__get`).
+    Ok,
+    /// Diagnostic emitted; the chain is broken because the type
+    /// cannot be recovered.
+    Break,
+    /// Diagnostic emitted; a magic method (`__call` / `__callStatic`)
+    /// can recover the return type so the chain continues resolving.
+    MagicFallback,
+}
+
 /// Scope identifier for the subject resolution cache.
 ///
 /// Two member accesses share the same scope when they are inside the
@@ -594,7 +611,7 @@ impl Backend {
                 }
 
                 SubjectOutcome::Resolved(ref base_classes) => {
-                    let emitted = self.check_member_on_resolved_classes(
+                    let result = self.check_member_on_resolved_classes(
                         base_classes,
                         member_name,
                         is_static,
@@ -607,7 +624,12 @@ impl Backend {
                         span.end,
                         out,
                     );
-                    if emitted {
+                    // Only break the chain when the member is truly
+                    // missing (no magic method fallback).  When
+                    // `__call`/`__callStatic` exists, the diagnostic
+                    // is emitted but the chain continues because the
+                    // magic method's return type recovers the type.
+                    if result == MemberCheckResult::Break {
                         broken_chain_prefixes.push(broken_chain_prefix(
                             subject_text,
                             member_name,
@@ -642,7 +664,7 @@ impl Backend {
         start: u32,
         end: u32,
         out: &mut Vec<Diagnostic>,
-    ) -> bool {
+    ) -> MemberCheckResult {
         // ── Quick check on pre-resolved base classes ────────────────
         // `resolve_target_classes` already returns fully-resolved
         // classes in many code paths (e.g. `type_hint_to_classes`
@@ -654,20 +676,26 @@ impl Backend {
         // (e.g. Builder scope methods that depend on the concrete
         // model type).  Checking here avoids false positives when
         // the cache and the resolver disagree.
-        if base_classes
-            .iter()
-            .any(|c| has_magic_method_for_access(c, is_static, is_method_call))
+
+        // ── Suppress property access on __get classes ───────────────
+        // `__get` handles arbitrary property names.  Unlike __call,
+        // we suppress the diagnostic entirely because there is no
+        // meaningful return-type recovery to perform.
+        if !is_method_call
+            && base_classes
+                .iter()
+                .any(|c| has_magic_method_for_access(c, is_static, false))
         {
-            return false;
+            return MemberCheckResult::Ok;
         }
         if base_classes.iter().any(|c| c.name == "stdClass") {
-            return false;
+            return MemberCheckResult::Ok;
         }
         if base_classes.iter().any(|c| {
             member_exists(c, member_name, is_static, is_method_call)
                 || (is_docblock_ref && member_exists_relaxed(c, member_name, is_method_call))
         }) {
-            return false;
+            return MemberCheckResult::Ok;
         }
 
         // ── Fully resolve each class (inheritance + virtual members) ─
@@ -686,17 +714,18 @@ impl Backend {
             })
             .collect();
 
-        // ── Check for magic methods on ANY branch ───────────────────
-        if resolved_classes
-            .iter()
-            .any(|c| has_magic_method_for_access(c, is_static, is_method_call))
+        // ── Suppress property access on __get classes (resolved) ────
+        if !is_method_call
+            && resolved_classes
+                .iter()
+                .any(|c| has_magic_method_for_access(c, is_static, false))
         {
-            return false;
+            return MemberCheckResult::Ok;
         }
 
         // ── Skip stdClass (universal object container) ──────────────
         if resolved_classes.iter().any(|c| c.name == "stdClass") {
-            return false;
+            return MemberCheckResult::Ok;
         }
 
         // ── Check whether the member exists on ANY branch ───────────
@@ -704,13 +733,28 @@ impl Backend {
             member_exists(c, member_name, is_static, is_method_call)
                 || (is_docblock_ref && member_exists_relaxed(c, member_name, is_method_call))
         }) {
-            return false;
+            return MemberCheckResult::Ok;
         }
+
+        // ── Check for __call / __callStatic on ANY branch ───────────
+        // When any branch has a magic call handler, the method IS
+        // dispatched at runtime (no fatal error), but it is still
+        // "unknown" in the sense that it has no explicit declaration.
+        // We emit the diagnostic so the user knows, but we return
+        // `MagicFallback` so the chain is NOT broken — the return
+        // type of `__call`/`__callStatic` recovers the chain type.
+        let has_magic_call = is_method_call
+            && (base_classes
+                .iter()
+                .any(|c| has_magic_method_for_access(c, is_static, true))
+                || resolved_classes
+                    .iter()
+                    .any(|c| has_magic_method_for_access(c, is_static, true)));
 
         // ── Member is unresolved on ALL branches — emit diagnostic ──
         let range = match offset_range_to_lsp_range(content, start as usize, end as usize) {
             Some(r) => r,
-            None => return false,
+            None => return MemberCheckResult::Ok,
         };
 
         let kind_label = if is_method_call {
@@ -752,7 +796,12 @@ impl Backend {
             UNKNOWN_MEMBER_CODE,
             message,
         ));
-        true
+
+        if has_magic_call {
+            MemberCheckResult::MagicFallback
+        } else {
+            MemberCheckResult::Break
+        }
     }
 }
 
@@ -1304,7 +1353,7 @@ echo Foo::class;
     // ── Magic methods ───────────────────────────────────────────────
 
     #[test]
-    fn no_diagnostic_when_class_has_magic_call() {
+    fn diagnostic_when_class_has_magic_call_but_chain_continues() {
         let php = r#"<?php
 class Dynamic {
     public function __call(string $name, array $args): mixed { return null; }
@@ -1317,7 +1366,16 @@ function test(): void {
 "#;
         let backend = Backend::new_test();
         let diags = collect(&backend, "file:///test.php", php);
-        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag unknown method even when __call exists, got: {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("anything"),
+            "Diagnostic should mention 'anything', got: {}",
+            diags[0].message
+        );
     }
 
     #[test]
@@ -1338,7 +1396,7 @@ function test(): void {
     }
 
     #[test]
-    fn no_diagnostic_when_class_has_magic_call_static() {
+    fn diagnostic_when_class_has_magic_call_static_but_chain_continues() {
         let php = r#"<?php
 class Dynamic {
     public static function __callStatic(string $name, array $args): mixed { return null; }
@@ -1348,7 +1406,16 @@ Dynamic::anything();
 "#;
         let backend = Backend::new_test();
         let diags = collect(&backend, "file:///test.php", php);
-        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag unknown static method even when __callStatic exists, got: {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("anything"),
+            "Diagnostic should mention 'anything', got: {}",
+            diags[0].message
+        );
     }
 
     // ── Inheritance ─────────────────────────────────────────────────
@@ -1973,7 +2040,7 @@ function handler(Service $svc): void {
     // ── Parent with magic ───────────────────────────────────────────
 
     #[test]
-    fn no_diagnostic_when_parent_has_magic_call() {
+    fn diagnostic_when_parent_has_magic_call_but_chain_continues() {
         let php = r#"<?php
 class Base {
     public function __call(string $name, array $args): mixed { return null; }
@@ -1987,7 +2054,16 @@ function test(): void {
 "#;
         let backend = Backend::new_test();
         let diags = collect(&backend, "file:///test.php", php);
-        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag unknown method even when parent has __call, got: {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("anything"),
+            "Diagnostic should mention 'anything', got: {}",
+            diags[0].message
+        );
     }
 
     // ── Interfaces ──────────────────────────────────────────────────
@@ -2136,7 +2212,7 @@ class Test {
     }
 
     #[test]
-    fn no_diagnostic_when_any_union_branch_has_magic_call() {
+    fn diagnostic_when_any_union_branch_has_magic_call_but_chain_continues() {
         let php = r#"<?php
 class Normal {
     public function known(): void {}
@@ -2159,7 +2235,16 @@ class Test {
 "#;
         let backend = Backend::new_test();
         let diags = collect(&backend, "file:///test.php", php);
-        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag unknown method even when a union branch has __call, got: {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("anything"),
+            "Diagnostic should mention 'anything', got: {}",
+            diags[0].message
+        );
     }
 
     // ── stdClass ────────────────────────────────────────────────────
@@ -4907,6 +4992,146 @@ function test(): void {
         assert!(
             bad.is_empty(),
             "should resolve $row from while-condition assignment, got: {bad:?}"
+        );
+    }
+
+    // ── __call chain continuation ───────────────────────────────────
+
+    /// When a class defines `__call` with a typed return, unknown methods
+    /// are flagged but the chain continues.  Known methods after the
+    /// unknown call should NOT be flagged.
+    #[test]
+    fn magic_call_chain_flags_unknown_but_continues() {
+        let php = r#"<?php
+class AppleCart {
+    public function getApples(): array { return []; }
+}
+class Builder {
+    public function __call(string $name, array $args): static { return $this; }
+    public function first(): AppleCart { return new AppleCart(); }
+}
+class Svc {
+    public function run(): void {
+        $b = new Builder();
+        $b->doesntExist()->first()->getApples();
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag only doesntExist(), not first() or getApples(), got: {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("doesntExist"),
+            "Diagnostic should mention 'doesntExist', got: {}",
+            diags[0].message
+        );
+    }
+
+    /// Two unknown methods in a chain should both be flagged, but known
+    /// methods between and after them should not.
+    #[test]
+    fn magic_call_chain_flags_multiple_unknown_methods() {
+        let php = r#"<?php
+class AppleCart {
+    public function getApples(): array { return []; }
+}
+class Builder {
+    public function __call(string $name, array $args): static { return $this; }
+    public function first(): AppleCart { return new AppleCart(); }
+}
+class Svc {
+    public function run(): void {
+        $b = new Builder();
+        $b->doesntExist()->first()->getApples();
+        $b->doesntExist()->alsoDoesntExist()->first()->getApples();
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        // First statement: doesntExist (1 diagnostic)
+        // Second statement: doesntExist + alsoDoesntExist (2 diagnostics)
+        let unknown_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("doesntExist") || d.message.contains("alsoDoesntExist"))
+            .collect();
+        assert_eq!(
+            unknown_diags.len(),
+            3,
+            "Should flag doesntExist twice and alsoDoesntExist once, got: {diags:?}"
+        );
+        // first() and getApples() should NOT be flagged
+        let false_positives: Vec<_> = diags
+            .iter()
+            .filter(|d| d.message.contains("first") || d.message.contains("getApples"))
+            .collect();
+        assert!(
+            false_positives.is_empty(),
+            "Should not flag first() or getApples(), got: {false_positives:?}"
+        );
+    }
+
+    /// When `__call` returns a concrete type (not self/static), the
+    /// chain resolves to that type after the unknown method.
+    #[test]
+    fn magic_call_concrete_return_continues_chain() {
+        let php = r#"<?php
+class Result {
+    public function getData(): array { return []; }
+}
+class Proxy {
+    public function __call(string $name, array $args): Result { return new Result(); }
+}
+class Svc {
+    public function run(): void {
+        $p = new Proxy();
+        $p->anything()->getData();
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag 'anything' but not 'getData', got: {diags:?}"
+        );
+        assert!(
+            diags[0].message.contains("anything"),
+            "Diagnostic should mention 'anything', got: {}",
+            diags[0].message
+        );
+    }
+
+    /// When `__call` returns `mixed`, the chain cannot recover.
+    /// The unknown method is flagged, and downstream methods produce
+    /// unresolvable-chain diagnostics.
+    #[test]
+    fn magic_call_mixed_return_breaks_chain_downstream() {
+        let php = r#"<?php
+class Loose {
+    public function __call(string $name, array $args): mixed { return null; }
+}
+class Svc {
+    public function run(): void {
+        $l = new Loose();
+        $l->unknown()->somethingElse();
+    }
+}
+"#;
+        let backend = Backend::new_test();
+        let diags = collect(&backend, "file:///test.php", php);
+        // 'unknown' is flagged (magic fallback, chain continues in
+        // principle but mixed resolves to nothing).
+        // 'somethingElse' should get an unresolvable-chain diagnostic
+        // because mixed yields no class info.
+        assert!(
+            diags.iter().any(|d| d.message.contains("unknown")),
+            "Should flag 'unknown', got: {diags:?}"
         );
     }
 }

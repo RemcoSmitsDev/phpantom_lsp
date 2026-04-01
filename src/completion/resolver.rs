@@ -870,10 +870,40 @@ fn resolve_call_raw_return_type(
                     ctx.class_loader,
                     ctx.resolved_class_cache,
                 );
+                let found = merged
+                    .methods
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(method));
+                if let Some(m) = found {
+                    if let Some(ref ret) = m.return_type {
+                        return Some(ret.to_string());
+                    }
+                    // Method exists but has no return type.
+                    // Only fall through to __call for virtual methods
+                    // (from @method tags or @mixin). Real methods are
+                    // invoked directly at runtime, not through __call.
+                    if !m.is_virtual {
+                        continue;
+                    }
+                }
+                // __call fallback: method not found, or virtual method
+                // without a return type.
                 if let Some(m) = merged
                     .methods
                     .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(method))
+                    .find(|m| m.name.eq_ignore_ascii_case("__call"))
+                    && let Some(ref ret) = m.return_type
+                {
+                    return Some(ret.to_string());
+                }
+                // __call fallback: when the method is not found but the
+                // class defines __call, use its return type so that
+                // chains through dynamic calls (e.g. Builder where{Column})
+                // preserve the type.
+                if let Some(m) = merged
+                    .methods
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case("__call"))
                     && let Some(ref ret) = m.return_type
                 {
                     return Some(ret.to_string());
@@ -889,10 +919,26 @@ fn resolve_call_raw_return_type(
                     ctx.class_loader,
                     ctx.resolved_class_cache,
                 );
+                let found = merged
+                    .methods
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(method));
+                if let Some(m) = found {
+                    if let Some(ref ret) = m.return_type {
+                        return Some(ret.to_string());
+                    }
+                    // Method exists but has no return type.
+                    // Only fall through to __callStatic for virtual methods.
+                    if !m.is_virtual {
+                        return None;
+                    }
+                }
+                // __callStatic fallback: method not found, or virtual
+                // method without a return type.
                 if let Some(m) = merged
                     .methods
                     .iter()
-                    .find(|m| m.name.eq_ignore_ascii_case(method))
+                    .find(|m| m.name.eq_ignore_ascii_case("__callStatic"))
                     && let Some(ref ret) = m.return_type
                 {
                     return Some(ret.to_string());

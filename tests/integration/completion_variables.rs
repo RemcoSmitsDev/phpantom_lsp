@@ -19468,3 +19468,818 @@ async fn test_loop_body_assignment_before_cursor_still_works() {
         _ => panic!("Expected CompletionResponse::Array"),
     }
 }
+
+// ─── __call return type fallback ────────────────────────────────────────────
+
+/// When a class defines `__call` with a self-referencing return type
+/// (`$this`, `static`, or `self`), calling an unknown method should
+/// fall back to `__call`'s return type so the chain continues.
+/// This is the pattern used by Eloquent Builder for dynamic `where{Column}`
+/// calls.
+#[tokio::test]
+async fn test_completion_magic_call_self_return_preserves_chain() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///magic_call_chain.php").unwrap();
+    let text = concat!(
+        "<?php\n",                                                                           // 0
+        "class Item {\n",                                                                    // 1
+        "    public function save(): void {}\n",                                             // 2
+        "    public function getTotal(): float { return 0.0; }\n",                           // 3
+        "}\n",                                                                               // 4
+        "class FluentBuilder {\n",                                                           // 5
+        "    public function __call(string $name, array $args): static { return $this; }\n", // 6
+        "    public function where(string $col, mixed $val): static { return $this; }\n",    // 7
+        "    public function first(): Item { return new Item(); }\n",                        // 8
+        "}\n",                                                                               // 9
+        "class Runner {\n",                                                                  // 10
+        "    public function run(): void {\n",                                               // 11
+        "        $b = new FluentBuilder();\n",                                               // 12
+        "        $b->where('active', true)->whereSomeDynamic(1)->first()->\n",               // 13
+        "    }\n",                                                                           // 14
+        "}\n",                                                                               // 15
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `->first()->` on line 13
+    // "        $b->where('active', true)->whereSomeDynamic(1)->first()->"
+    //  0         1         2         3         4         5         6
+    //  0123456789012345678901234567890123456789012345678901234567890123456
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 13,
+                character: 66,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results after dynamic __call method in chain"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("save")),
+                "Should include save from Item (resolved through __call chain), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("getTotal")),
+                "Should include getTotal from Item (resolved through __call chain), got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When `__call` returns `mixed`, the fallback should not produce any
+/// class completions (same as before the fallback was added).
+#[tokio::test]
+async fn test_completion_magic_call_mixed_return_no_completions() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///magic_call_mixed.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Dynamic {\n",
+        "    public function __call(string $name, array $args): mixed { return null; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $d = new Dynamic();\n",
+        "        $d->anything()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 7,
+                character: 24,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    // mixed return type should not produce class-member completions
+    if let Some(CompletionResponse::Array(items)) = result {
+        let method_items: Vec<_> = items
+            .iter()
+            .filter(|i| {
+                i.kind == Some(CompletionItemKind::METHOD)
+                    || i.kind == Some(CompletionItemKind::PROPERTY)
+            })
+            .collect();
+        assert!(
+            method_items.is_empty(),
+            "Should not offer method/property completions when __call returns mixed, got: {:?}",
+            method_items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// When `__call` returns a concrete class type, calling an unknown method
+/// should resolve to that class's members.
+#[tokio::test]
+async fn test_completion_magic_call_concrete_return_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///magic_call_concrete.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Result {\n",
+        "    public function getData(): array { return []; }\n",
+        "    public function isOk(): bool { return true; }\n",
+        "}\n",
+        "class Proxy {\n",
+        "    public function __call(string $name, array $args): Result { return new Result(); }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $p = new Proxy();\n",
+        "        $p->anyMethod()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 11,
+                character: 26,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results when __call returns a concrete class"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("getData")),
+                "Should include getData from Result via __call return type, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("isOk")),
+                "Should include isOk from Result via __call return type, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// __call fallback should work when __call is inherited from a parent class.
+#[tokio::test]
+async fn test_completion_magic_call_inherited_self_return() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///magic_call_inherited.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class BaseBuilder {\n",
+        "    public function __call(string $name, array $args): static { return $this; }\n",
+        "    public function execute(): array { return []; }\n",
+        "}\n",
+        "class ChildBuilder extends BaseBuilder {\n",
+        "    public function limit(int $n): static { return $this; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $b = new ChildBuilder();\n",
+        "        $b->dynamicWhere(1)->limit(5)->anotherDynamic(2)->execute();\n",
+        "        $b->dynamicWhere(1)->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$b->dynamicWhere(1)->` on line 12
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 29,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results after inherited __call"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("limit")),
+                "Should include limit from ChildBuilder via inherited __call, got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("execute")),
+                "Should include execute from BaseBuilder via inherited __call, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// Variable assigned from a dynamic __call method should also resolve.
+#[tokio::test]
+async fn test_completion_magic_call_variable_assignment() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///magic_call_assign.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Item {\n",
+        "    public function save(): void {}\n",
+        "}\n",
+        "class FluentBuilder {\n",
+        "    public function __call(string $name, array $args): static { return $this; }\n",
+        "    public function first(): Item { return new Item(); }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $b = new FluentBuilder();\n",
+        "        $filtered = $b->whereDynamic(1);\n",
+        "        $item = $filtered->first();\n",
+        "        $item->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 13,
+                character: 15,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for variable assigned through __call chain"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("save")),
+                "Should include save from Item via __call chain assignment, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When a `@method` tag has no return type and the class defines `__call`
+/// with a typed return, the `@method` should inherit `__call`'s return type.
+#[tokio::test]
+async fn test_completion_magic_call_method_tag_inherits_return_type() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///method_tag_inherits_call.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "/**\n",
+        " * @method whereStatus(string $status)\n",
+        " * @method string getName()\n",
+        " */\n",
+        "class QueryBuilder {\n",
+        "    public function __call(string $name, array $args): static { return $this; }\n",
+        "    public function get(): array { return []; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $b = new QueryBuilder();\n",
+        "        $b->whereStatus('active')->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$b->whereStatus('active')->` on line 12
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 12,
+                character: 37,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results for @method without return type inheriting from __call"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // whereStatus has no return type in @method, should inherit
+            // static from __call, so chain continues with QueryBuilder members
+            assert!(
+                labels.iter().any(|l| l.starts_with("get")),
+                "Should include get from QueryBuilder (inherited __call return type), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("whereStatus")),
+                "Should include whereStatus from @method tag, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When a `@method` tag declares a return type that contradicts
+/// `__call`'s native return type (`static`), the native type wins.
+/// `@method Result fetch()` is a lie when `__call` natively returns
+/// `static`, because `Result` does not extend `ApiClient`.  The
+/// chain resolves to `ApiClient` (via `static`) instead.
+#[tokio::test]
+async fn test_completion_magic_call_method_tag_own_return_type_wins() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///method_tag_own_return.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Result {\n",
+        "    public function getData(): array { return []; }\n",
+        "}\n",
+        "/**\n",
+        " * @method Result fetch()\n",
+        " */\n",
+        "class ApiClient {\n",
+        "    public function __call(string $name, array $args): static { return $this; }\n",
+        "    public function status(): int { return 200; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $c = new ApiClient();\n",
+        "        $c->fetch()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$c->fetch()->` on line 14
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 22,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return ApiClient members (native static wins over @method lie)"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // @method Result is a lie: Result does not extend ApiClient,
+            // so __call's native `static` wins → ApiClient members.
+            assert!(
+                labels.iter().any(|l| l.starts_with("fetch")),
+                "Should include fetch from ApiClient (__call static wins), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("status")),
+                "Should include status from ApiClient (__call static wins), got: {:?}",
+                labels
+            );
+            assert!(
+                !labels.iter().any(|l| l.starts_with("getData")),
+                "Should NOT include getData from Result (the @method lied), got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When a `@method` tag declares a return type that contradicts
+/// `__call`'s native return type, the native type wins ("lie detection").
+/// Here `__call` natively returns `Cement`, so `@method Frog getThing()`
+/// is rejected and the chain resolves to `Cement` members instead.
+#[tokio::test]
+async fn test_completion_magic_call_method_tag_lie_detection_native_wins() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///method_tag_lie.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Frog {\n",
+        "    public function ribbit(): void {}\n",
+        "}\n",
+        "class Cement {\n",
+        "    public function harden(): void {}\n",
+        "    public function pour(): void {}\n",
+        "}\n",
+        "/**\n",
+        " * @method Frog getThing()\n",
+        " */\n",
+        "class Factory {\n",
+        "    public function __call(string $name, array $args): Cement { return new Cement(); }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $f = new Factory();\n",
+        "        $f->getThing()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$f->getThing()->` on line 17
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 17,
+                character: 25,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results when @method lies about return type"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // __call natively returns Cement — @method Frog is a lie.
+            // We should see Cement members, not Frog members.
+            assert!(
+                labels.iter().any(|l| l.starts_with("harden")),
+                "Should include harden from Cement (__call native type wins over @method lie), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("pour")),
+                "Should include pour from Cement, got: {:?}",
+                labels
+            );
+            assert!(
+                !labels.iter().any(|l| l.starts_with("ribbit")),
+                "Should NOT include ribbit from Frog (the @method lied), got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When `__call` has no native return type but has a docblock `@return`,
+/// `@method` return types are trusted because there is no runtime
+/// constraint to contradict them.
+#[tokio::test]
+async fn test_completion_magic_call_no_native_type_trusts_method_tag() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///method_tag_no_native.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Result {\n",
+        "    public function getData(): array { return []; }\n",
+        "}\n",
+        "/**\n",
+        " * @method Result fetch()\n",
+        " */\n",
+        "class ApiClient {\n",
+        "    /** @return static */\n",
+        "    public function __call(string $name, array $args) { return $this; }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $c = new ApiClient();\n",
+        "        $c->fetch()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$c->fetch()->` on line 14
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 14,
+                character: 22,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return Result members when __call has no native type"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // __call has no native type hint — @method Result is trusted
+            assert!(
+                labels.iter().any(|l| l.starts_with("getData")),
+                "Should include getData from Result (@method trusted when no native type), got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// When `@method` declares a return type that is a valid narrowing of
+/// `__call`'s native type (e.g. subclass), the narrowed type is used.
+#[tokio::test]
+async fn test_completion_magic_call_method_tag_valid_narrowing() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///method_tag_narrow.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Animal {\n",
+        "    public function breathe(): void {}\n",
+        "}\n",
+        "class Dog extends Animal {\n",
+        "    public function bark(): void {}\n",
+        "}\n",
+        "/**\n",
+        " * @method Dog getDog()\n",
+        " */\n",
+        "class Kennel {\n",
+        "    public function __call(string $name, array $args): Animal { return new Animal(); }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        $k = new Kennel();\n",
+        "        $k->getDog()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `$k->getDog()->` on line 16
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 16,
+                character: 22,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return Dog members when @method narrows __call's return type"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            // Dog extends Animal, so @method Dog is a valid narrowing
+            // of __call's native return type Animal.
+            assert!(
+                labels.iter().any(|l| l.starts_with("bark")),
+                "Should include bark from Dog (valid narrowing of Animal), got: {:?}",
+                labels
+            );
+            assert!(
+                labels.iter().any(|l| l.starts_with("breathe")),
+                "Should include breathe inherited from Animal, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}
+
+/// `__callStatic` fallback works the same way as `__call` for static calls.
+#[tokio::test]
+async fn test_completion_magic_call_static_fallback() {
+    let backend = create_test_backend();
+
+    let uri = Url::parse("file:///call_static_fallback.php").unwrap();
+    let text = concat!(
+        "<?php\n",
+        "class Result {\n",
+        "    public function getData(): array { return []; }\n",
+        "}\n",
+        "class Facade {\n",
+        "    public static function __callStatic(string $name, array $args): Result { return new Result(); }\n",
+        "}\n",
+        "class Svc {\n",
+        "    public function run(): void {\n",
+        "        Facade::anyMethod()->\n",
+        "    }\n",
+        "}\n",
+    );
+
+    let open_params = DidOpenTextDocumentParams {
+        text_document: TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "php".to_string(),
+            version: 1,
+            text: text.to_string(),
+        },
+    };
+    backend.did_open(open_params).await;
+
+    // Cursor after `Facade::anyMethod()->` on line 9
+    let completion_params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri },
+            position: Position {
+                line: 9,
+                character: 29,
+            },
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let result = backend.completion(completion_params).await.unwrap();
+    assert!(
+        result.is_some(),
+        "Completion should return results via __callStatic fallback"
+    );
+
+    match result.unwrap() {
+        CompletionResponse::Array(items) => {
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert!(
+                labels.iter().any(|l| l.starts_with("getData")),
+                "Should include getData from Result via __callStatic, got: {:?}",
+                labels
+            );
+        }
+        _ => panic!("Expected CompletionResponse::Array"),
+    }
+}

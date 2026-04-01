@@ -260,7 +260,7 @@ $name = Foo::class;
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn no_diagnostic_when_class_has_magic_call() {
+fn diagnostic_when_class_has_magic_call_but_chain_continues() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let text = r#"<?php
@@ -277,10 +277,21 @@ class Consumer {
 }
 "#;
     let diags = unknown_member_diagnostics(&backend, uri, text);
-    assert!(
-        diags.is_empty(),
-        "No diagnostics expected when __call exists, got: {:?}",
+    assert_eq!(
+        diags.len(),
+        2,
+        "Should flag unknown methods even when __call exists, got: {:?}",
         diags
+    );
+    assert!(
+        diags[0].message.contains("anything"),
+        "First diagnostic should mention 'anything', got: {}",
+        diags[0].message
+    );
+    assert!(
+        diags[1].message.contains("whatever"),
+        "Second diagnostic should mention 'whatever', got: {}",
+        diags[1].message
     );
 }
 
@@ -310,7 +321,7 @@ class Consumer {
 }
 
 #[test]
-fn no_diagnostic_when_class_has_magic_call_static() {
+fn diagnostic_when_class_has_magic_call_static_but_chain_continues() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let text = r#"<?php
@@ -322,10 +333,21 @@ StaticMagic::anything();
 StaticMagic::whatever();
 "#;
     let diags = unknown_member_diagnostics(&backend, uri, text);
-    assert!(
-        diags.is_empty(),
-        "No diagnostics expected when __callStatic exists, got: {:?}",
+    assert_eq!(
+        diags.len(),
+        2,
+        "Should flag unknown static methods even when __callStatic exists, got: {:?}",
         diags
+    );
+    assert!(
+        diags[0].message.contains("anything"),
+        "First diagnostic should mention 'anything', got: {}",
+        diags[0].message
+    );
+    assert!(
+        diags[1].message.contains("whatever"),
+        "Second diagnostic should mention 'whatever', got: {}",
+        diags[1].message
     );
 }
 
@@ -362,7 +384,7 @@ class Consumer {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn no_diagnostic_when_parent_has_magic_call() {
+fn diagnostic_when_parent_has_magic_call_but_chain_continues() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let text = r#"<?php
@@ -380,10 +402,16 @@ class Consumer {
 }
 "#;
     let diags = unknown_member_diagnostics(&backend, uri, text);
-    assert!(
-        diags.is_empty(),
-        "No diagnostics expected when parent has __call, got: {:?}",
+    assert_eq!(
+        diags.len(),
+        1,
+        "Should flag unknown method even when parent has __call, got: {:?}",
         diags
+    );
+    assert!(
+        diags[0].message.contains("anything"),
+        "Diagnostic should mention 'anything', got: {}",
+        diags[0].message
     );
 }
 

@@ -532,6 +532,7 @@ fn collect_mixin_members(
             // the substitution map rewrites `$this` to
             // `\Illuminate\Database\Eloquent\Builder<Model>`, so the
             // return type must still be the raw keyword at this stage.
+            method.is_virtual = true;
             collector.methods.push(method);
         }
 
@@ -546,6 +547,7 @@ fn collect_mixin_members(
             if !subs.is_empty() {
                 inheritance::apply_substitution_to_property(&mut property, &subs);
             }
+            property.is_virtual = true;
             collector.properties.push(property);
         }
 
