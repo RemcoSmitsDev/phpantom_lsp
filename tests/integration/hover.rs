@@ -398,7 +398,7 @@ class Consumer {
 }
 
 #[test]
-fn hover_suppressed_on_parameter_definition_site() {
+fn hover_active_on_parameter_definition_site() {
     let backend = create_test_backend();
     let uri = "file:///test.php";
     let content = r#"<?php
@@ -410,17 +410,21 @@ class Builder {
 "#;
 
     // Hover on `$query` at the parameter definition site (line 2, col ~72)
-    let hover = hover_at(&backend, uri, content, 2, 73);
+    let hover = hover_at(&backend, uri, content, 2, 73)
+        .expect("hover should be active on parameter $query");
+    let text = hover_text(&hover);
     assert!(
-        hover.is_none(),
-        "hover should be suppressed on parameter $query"
+        text.contains("$query"),
+        "hover should show the parameter name"
     );
 
     // Hover on `$genre` at the parameter definition site (line 2, col ~87)
-    let hover = hover_at(&backend, uri, content, 2, 88);
+    let hover = hover_at(&backend, uri, content, 2, 88)
+        .expect("hover should be active on parameter $genre");
+    let text = hover_text(&hover);
     assert!(
-        hover.is_none(),
-        "hover should be suppressed on parameter $genre"
+        text.contains("$genre") && text.contains("string"),
+        "hover should show the parameter name and type"
     );
 }
 
